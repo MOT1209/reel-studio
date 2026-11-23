@@ -1,0 +1,128 @@
+// Fast unit tests (no network, no browser): node tools/unit.mjs
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
+
+process.env.RS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-unit-'));
+const { ThinkStripper, stripThink } = await import('../server/apis.mjs');
+const { parseScript, tokenize, normWord, charsToWords, wordsWithChars, alignWords, countWords } = await import('../server/text.mjs');
+const { repairStoryboard, extractJson } = await import('../server/storyboard.mjs');
+const { resolveIconKey, iconsFor } = await import('../server/icons.mjs');
+const { updateSettings, getPublicSettings, getSettings } = await import('../server/settings.mjs');
+
+let n = 0;
+const test = (name, fn) => { fn(); n++; console.log('✔', name); };
+
+test('<think> stripped even when tags are split across chunks', () => {
+  const src = 'A<think>secret plan</think>B<th' + 'ink>more</thi' + 'nk>C';
+  for (const size of [1, 2, 3, 5, 7]) {
+    const s = new ThinkStripper(); let out = '';
+    for (let i = 0; i < src.length; i += size) out += s.feed(src.slice(i, i + size));
+    out += s.flush();
+    assert.equal(out, 'ABC', `chunk size ${size}`);
+  }
+  assert.equal(stripThink('reasoning…</think>TITLE: x'), 'TITLE: x');
+});
+
+test('parseScript reads TITLE / SCRIPT / SOURCES (with markdown noise)', () => {
+  const r = parseScript('**TITLE:** ليه بنتاوب؟\n**SCRIPT:**\n- التثاؤب معدي.\nعارف ليه؟\n[music]\nيعني باختصار: كده.\n**SOURCES:**\n1. Provine 2005\n- Platek 2003');
+  assert.equal(r.title, 'ليه بنتاوب؟');
+  assert.equal(r.text, 'التثاؤب معدي.\nعارف ليه؟\nيعني باختصار: كده.');
+  assert.deepEqual(r.sources, ['Provine 2005', 'Platek 2003']);
+});
+
+test('tokenize keeps punctuation with words and tracks lines', () => {
+  const t = tokenize('الأزرق بيتشتت ، أكتر\nعارف ليه ؟');
+  assert.deepEqual(t.map((x) => x.text), ['الأزرق', 'بيتشتت،', 'أكتر', 'عارف', 'ليه؟']);
+  assert.deepEqual(t.map((x) => x.line), [0, 0, 0, 1, 1]);
+  assert.equal(countWords('الـ DNA بيتنسخ'), 3);
+});
+
+test('normWord unifies Arabic spelling variants', () => {
+  assert.equal(normWord('أَكْتَر'), normWord('اكتر'));
+  assert.equal(normWord('الطاقة'), normWord('الطاقه'));
+  assert.equal(normWord('مستشفى'), normWord('مستشفي'));
+  assert.equal(normWord('DNA,'), 'dna');
+  assert.equal(normWord('٣٧'), '37');
+});
+
+test('LCS alignment: script spelling kept, ASR drift + missing/extra words handled', () => {
+  const script = tokenize('الشمس بتطلع ضوء أبيض\nفيه كل الألوان');
+  // ASR heard: different spelling, a dropped word ("كل"), and an extra word ("يعني")
+  const heard = [['الشمس', 0.0, 0.4], ['بتطلع', 0.45, 0.8], ['يعني', 0.85, 1.0], ['ضو', 1.05, 1.3], ['ابيض', 1.35, 1.7], ['فيه', 2.0, 2.2], ['الالوان', 2.6, 3.1]]
+    .map(([text, start, end]) => ({ text, start, end }));
+  const w = alignWords(script, wordsWithChars(heard));
+  assert.deepEqual(w.map((x) => x.text), ['الشمس', 'بتطلع', 'ضوء', 'أبيض', 'فيه', 'كل', 'الألوان']);
+  assert.equal(w[0].start, 0);
+  assert.ok(Math.abs(w[2].start - 1.05) < 0.01, `ضوء at ${w[2].start}`);
+  assert.ok(Math.abs(w[3].start - 1.35) < 0.01);
+  assert.ok(w[5].weak && w[5].start >= w[4].end - 1e-9 && w[5].start <= w[6].start, 'missing word interpolated + weak');
+  assert.ok(!w[0].weak && !w[3].weak);
+  for (let i = 1; i < w.length; i++) assert.ok(w[i].start >= w[i - 1].start, 'monotonic');
+});
+
+test('ElevenLabs characters → words', () => {
+  const chars = [...'ab cd'].map((c, i) => ({ c, start: i * 0.1, end: i * 0.1 + 0.1 }));
+  assert.deepEqual(charsToWords(chars).map((w) => [w.text, +w.start.toFixed(2), +w.end.toFixed(2)]), [['ab', 0, 0.2], ['cd', 0.3, 0.5]]);
+});
+
+const words = Array.from({ length: 30 }, (_, i) => ({ i, text: 'w' + i, start: i * 0.4, end: i * 0.4 + 0.35 }));
+test('storyboard repair: indices, sorting, intro at 0, no triple template', () => {
+  const raw = {
+    scenes: [
+      { type: 'stat', template: 'gauge', at: 999, value: 5 },
+      { type: 'concept', template: 'cards', at: 4, items: [{ label: 'a', icon: 'Heart!' }] },
+      { type: 'process', template: 'cards', at: 10, items: [{ label: 'b' }] },
+      { type: 'weird', template: 'cards', at: 16, items: [{ label: 'c' }] },
+      { type: 'compare', template: 'chart', at: 22, items: [{ label: 'x' }] },
+      { type: 'stat', template: 'meter', at: 25, value: 7 },
+    ],
+    accents: [[3, 'accent'], [3, 'blue'], [99, 'accent'], [5, 'neon']],
+  };
+  const { storyboard: sb, fixes } = repairStoryboard(raw, words);
+  assert.equal(sb.scenes[0].at, 0);
+  assert.equal(sb.scenes[0].type, 'intro');
+  for (let i = 1; i < sb.scenes.length; i++) assert.ok(sb.scenes[i].at > sb.scenes[i - 1].at);
+  assert.ok(sb.scenes.every((s) => s.at < words.length));
+  for (let i = 2; i < sb.scenes.length; i++) assert.ok(!(sb.scenes[i].template === sb.scenes[i - 1].template && sb.scenes[i].template === sb.scenes[i - 2].template));
+  assert.equal(sb.scenes.find((s) => s.template === 'chart'), undefined, 'chart without numbers is replaced');
+  assert.ok(sb.scenes.some((s) => s.template === 'meter' && s.max >= s.value));
+  assert.ok(fixes.some((f) => f.includes('999')) && fixes.some((f) => f.includes('merged')), 'out-of-range clamped, too-short last scene merged');
+  assert.deepEqual(sb.accents, [[3, 'accent'], [5, 'accent'], [29, 'accent']]);
+  assert.equal(sb.scenes[0].items[0]?.icon ?? sb.scenes.flatMap((s) => s.items).find((it) => it.label === 'a').icon, 'heart');
+  assert.ok(fixes.length > 3);
+});
+
+test('storyboard repair: zoom needs 2 items, body needs an organ', () => {
+  const { storyboard: sb } = repairStoryboard({ scenes: [{ type: 'intro', template: 'zoom', at: 0, items: [{ label: 'x', icon: 'leaf' }] }, { type: 'concept', template: 'body', at: 12, items: [] }] }, words);
+  assert.equal(sb.scenes[0].items.length, 2);
+  assert.equal(sb.scenes[1].template, 'zoom');
+});
+
+test('extractJson tolerates fences and trailing commas', () => {
+  assert.deepEqual(extractJson('Sure!\n```json\n{"a":[1,2,],}\n```'), { a: [1, 2] });
+});
+
+test('icons: nouns resolve across the three sets, payload has only used icons', () => {
+  assert.equal(resolveIconKey('heart'), 'hi:heart-organ');
+  assert.equal(resolveIconKey('DNA'), 'hd:dna');
+  assert.ok(resolveIconKey('volcano').startsWith('tb:'));
+  assert.equal(resolveIconKey('zzzz-not-a-thing'), 'hd:dot');
+  const pay = iconsFor(['sun', 'sun', 'lungs']);
+  assert.deepEqual(Object.keys(pay).sort(), ['lungs', 'sun']);
+  assert.ok(pay.sun.p.length > 0 && [24, 48].includes(pay.lungs.v));
+});
+
+test('settings: keys masked to last 4, masked values never overwrite', () => {
+  updateSettings({ llm: { apiKey: 'sk-abcdef-1234', baseUrl: 'http://x/v1' }, seriesTag: 'سلسلة' });
+  const pub = getPublicSettings();
+  assert.equal(pub.llm.apiKey, '••••1234');
+  assert.ok(!JSON.stringify(pub).includes('abcdef'));
+  updateSettings({ llm: { apiKey: '••••1234' } });
+  assert.equal(getSettings().llm.apiKey, 'sk-abcdef-1234');
+  updateSettings({ llm: { apiKey: '' } });
+  assert.equal(getPublicSettings().llm.apiKey, process.env.LLM_API_KEY ? getPublicSettings().llm.apiKey : '');
+});
+
+console.log(`\n${n} unit tests passed`);

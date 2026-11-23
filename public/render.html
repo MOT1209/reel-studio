@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Reel Studio — render</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0C1014; overflow: hidden; }
+  canvas { display: block; width: 1080px; height: 1920px; }
+  body.fit canvas { width: auto; height: 100vh; margin: 0 auto; }
+  #bar { position: fixed; bottom: 0; left: 0; right: 0; display: none; gap: 8px; padding: 8px; background: #161C22cc; align-items: center; font: 14px system-ui; color: #F4F3EE; direction: ltr; }
+  body.fit #bar { display: flex; }
+  #bar input[type=range] { flex: 1; }
+  #bar button { background: #27B8C7; border: 0; border-radius: 6px; padding: 6px 12px; color: #0C1014; font-weight: 700; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<div id="bar"><button id="play">▶</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time">0.00</span></div>
+<script src="/render.js"></script>
+</body>
+</html>

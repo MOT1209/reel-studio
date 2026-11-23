@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reel Studio v1</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot"></span> Reel Studio <small>v1</small></div>
+  <div id="health" class="health">…</div>
+  <button id="btnSettings" class="ghost">⚙ الإعدادات</button>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <form id="newForm" class="panel">
+      <h3>ريل جديد</h3>
+      <label>الموضوع
+        <textarea id="topic" rows="2" required placeholder="مثلاً: ليه بنتاوب لما حد يتاوب؟"></textarea>
+      </label>
+      <label>مدة الفيديو
+        <select id="seconds">
+          <option value="10">10 ثواني</option><option value="20">20 ثانية</option><option value="30" selected>30 ثانية</option>
+          <option value="45">45 ثانية</option><option value="60">60 ثانية</option>
+        </select>
+      </label>
+      <fieldset>
+        <legend>الصوت</legend>
+        <label class="row"><input type="radio" name="voiceMode" value="tts" checked> ElevenLabs (TTS)</label>
+        <label class="row"><input type="radio" name="voiceMode" value="upload"> ملف صوتي من عندي</label>
+        <input type="file" id="voiceFile" accept="audio/*,video/mp4" hidden>
+      </fieldset>
+      <fieldset>
+        <legend>استنى موافقتي بعد:</legend>
+        <div class="approvals" id="newApprovals"></div>
+      </fieldset>
+      <button type="submit" class="primary">ابدأ ▶</button>
+      <p class="err" id="newErr"></p>
+    </form>
+    <div class="panel">
+      <h3>المشاريع</h3>
+      <ul id="projects" class="projects"></ul>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="empty">اختار مشروع أو ابدأ ريل جديد.</div>
+  </main>
+</div>
+
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h2>الإعدادات</h2>
+    <p class="hint">المفاتيح بتتحفظ في <code>data/settings.json</code> على جهازك بس، وبتظهر هنا مخفية (آخر 4 حروف). اتركها فاضية عشان تفضل زي ما هي.</p>
+    <section>
+      <h4>LLM — FreeLLMAPI أو أي API متوافق مع OpenAI</h4>
+      <label>Base URL <input name="llm.baseUrl" dir="ltr"></label>
+      <label>API key <input name="llm.apiKey" dir="ltr" autocomplete="off"></label>
+      <div class="two">
+        <label>Model <input name="llm.model" dir="ltr"></label>
+        <label>Temperature <input name="llm.temperature" type="number" step="0.1" min="0" max="2" dir="ltr"></label>
+      </div>
+      <p class="hint">FreeLLMAPI: <code dir="ltr">http://127.0.0.1:31415/v1</code> بموديل <code>auto</code> — <a href="https://github.com/tashfeenahmed/freellmapi" target="_blank" rel="noopener">github.com/tashfeenahmed/freellmapi</a></p>
+    </section>
+    <section>
+      <h4>ElevenLabs — الصوت</h4>
+      <label>API key <input name="elevenlabs.apiKey" dir="ltr" autocomplete="off"></label>
+      <div class="two">
+        <label>Voice
+          <select name="elevenlabs.voiceId" id="voiceSelect" dir="ltr"></select>
+        </label>
+        <label>Model <input name="elevenlabs.modelId" dir="ltr"></label>
+      </div>
+      <button type="button" id="btnVoices" class="ghost">تحميل الأصوات</button> <span id="voicesMsg" class="hint"></span>
+      <p class="hint">مفتاح من <a href="https://elevenlabs.io/app/developers/" target="_blank" rel="noopener">elevenlabs.io/app/developers</a></p>
+    </section>
+    <section>
+      <h4>Deepgram — توقيت الكلام للملفات المرفوعة</h4>
+      <label>API key <input name="deepgram.apiKey" dir="ltr" autocomplete="off"></label>
+      <div class="two">
+        <label>Model <input name="deepgram.model" dir="ltr"></label>
+        <label>Language <input name="deepgram.language" dir="ltr"></label>
+      </div>
+      <p class="hint">مفتاح من <a href="https://console.deepgram.com/" target="_blank" rel="noopener">console.deepgram.com</a></p>
+    </section>
+    <section>
+      <h4>الشكل</h4>
+      <label>فولدر الخط (اختياري — فيه ملفات .ttf/.otf عربي) <input name="fontFolder" dir="ltr" placeholder="C:\Fonts\MyArabicFont"></label>
+      <label>اسم السلسلة (يظهر فوق في الفيديو) <input name="seriesTag"></label>
+    </section>
+    <p class="err" id="settingsErr"></p>
+    <div class="actions">
+      <button value="cancel" class="ghost">إلغاء</button>
+      <button id="btnSaveSettings" value="default" class="primary">حفظ</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

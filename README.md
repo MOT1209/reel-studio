@@ -1,0 +1,64 @@
+# Reel Studio v1
+
+تطبيق محلي بيحوّل **موضوع** لريل علمي عمودي جاهز (1080×1920) بالعامية المصرية، من غير وش، بستايل رسوم تقنية غامقة.
+كل حاجة بتشتغل على جهازك؛ السيرفر الوحيد هو APIs اللي إنت بتختارها.
+
+```
+الموضوع → السكريبت → الصوت → التوقيت → الستوري بورد → الرندر → video.mp4
+```
+
+## التشغيل السريع (ويندوز)
+
+1. نزّل [Node.js 18+](https://nodejs.org/) و ffmpeg (`winget install Gyan.FFmpeg`).
+2. دبل كليك على **`start.bat`** — أول مرة بيعمل `npm run setup` (يسطّب Playwright و Chromium، ولو التحميل فشل بيستخدم Chrome اللي على جهازك)، وبعدين يفتح المتصفح على `http://127.0.0.1:4301`.
+3. من **⚙ الإعدادات** حط المفاتيح:
+   - **LLM**: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) على `http://127.0.0.1:31415/v1` بموديل `auto` — أو أي API متوافق مع OpenAI.
+   - **ElevenLabs**: مفتاح من [elevenlabs.io/app/developers](https://elevenlabs.io/app/developers/) ثم «تحميل الأصوات» واختار صوت.
+   - **Deepgram** (للملفات الصوتية المرفوعة بس): مفتاح من [console.deepgram.com](https://console.deepgram.com/).
+
+أو يدويًا: `npm run setup` ثم `npm start`.
+
+المفاتيح بتتحفظ في `data/settings.json` على جهازك، وممكن كمان تتحط في `.env` (شوف `.env.example`).
+المتصفح عمره ما بيشوف المفتاح كامل — بيظهر مخفي لآخر 4 حروف. السيرفر بيسمع على `127.0.0.1` بس.
+
+## المراحل
+
+| المرحلة | بتعمل إيه |
+|---|---|
+| **السكريبت** | الـ LLM بيكتب بالعامية المصرية حسب `references/script-style.md`: هوك ← «عارف ليه؟» ← تشبيه واحد بسطور قصيرة ← خلاصة. الناتج TITLE / SCRIPT / SOURCES، حوالي 2.6 كلمة/ثانية. الستريم بيظهر لايف وبلوكات `<think>` بتتشال. |
+| **الصوت** | ElevenLabs `with-timestamps` ← `voice.mp3` + توقيت كل حرف. أو ارفع تسجيلك إنت. |
+| **التوقيت** | محاذاة LCS على مستوى الحروف بين الكلام المتوقّت وكلمات السكريبت، فالكابشن بيفضل بإملاء السكريبت. الكلمات الضعيفة بتتعلّم. للملف المرفوع بيستخدم Deepgram nova-3 (ar). |
+| **الستوري بورد** | الـ LLM بيرجّع JSON بالمشاهد والقوالب والأيقونات؛ بيتصلّح تلقائيًا (فهارس صح، ترتيب، أول مشهد intro عند 0، مفيش قالب 3 مرات ورا بعض) وبعدين مراجعة ذاتية تانية من الـ LLM. |
+| **الرندر** | `render.html` بيرسم كل فريم بـ `window.drawFrame(t)` على كانفاس 720×1280 × 1.5، 30 فريم/ث، H.264 yuv420p، والصوت + مؤثرات whoosh/tick متولّدة ومظبوطة على −14 LUFS. |
+
+لكل مرحلة: حالة (مستني / شغال / مستني موافقتك / تمام / خطأ)، سجل لايف، وتقدر تختار «استنى موافقتي» أو يكمّل لوحده.
+تقدر تعدّل السكريبت والتوقيت والستوري بورد، تعيد أي مرحلة، أو تلغي اللي شغالة. في معاينة حيّة بالصوت قبل الرندر.
+
+**القوالب:** `body` · `zoom` · `flow` · `cycle` · `timeline` · `chart` · `layers` · `cards` · `meter`
+**أنواع المشاهد:** intro · question · concept · process · compare · stat · recap
+
+**الأيقونات:** مكتبة محلية واحدة `assets/icons/icons.json` (مجموعة مرسومة يدويًا + [Health Icons](https://healthicons.org) CC0 + [Tabler Icons](https://tabler.io/icons) MIT، والرخص في `assets/icons/LICENSES.md`). الـ LLM بيطلب الأيقونة باسم إنجليزي بسيط (heart, sun, cell)، والرندر بيوصله بس الأيقونات اللي المشروع بيستخدمها. لإعادة البناء: `npm run build-icons`.
+
+**الخط:** IBM Plex Sans Arabic (رخصة OFL، في `assets/fonts` مع `OFL.txt`). تقدر تحط فولدر خط عربي تاني من الإعدادات.
+
+## الاختبارات (من غير إنترنت)
+
+```bash
+npm test                 # unit tests: <think>، parsing، LCS، إصلاح الستوري بورد، الأيقونات، إخفاء المفاتيح
+npm run e2e              # مشروع 10 ث كامل على الـ mocks + فحص التزامن والصيغة والـ LUFS → output/test-reel-10s.mp4
+npm run templates        # مشروع لكل قالب + contact sheet في output/templates/
+npm run mock             # tools/mock-apis.mjs على :4399 (LLM + ElevenLabs + Deepgram مزيفين)
+```
+
+عشان تشغّل التطبيق كله على الـ mocks:
+```bash
+npm run mock
+LLM_BASE_URL=http://127.0.0.1:4399/v1 ELEVENLABS_BASE_URL=http://127.0.0.1:4399 DEEPGRAM_BASE_URL=http://127.0.0.1:4399 npm start
+```
+(كل الـ base URLs ممكن تتغيّر من متغيرات البيئة، وبتغلب على الإعدادات.)
+
+## ملاحظات
+
+- الرندر بيشغّل كذا صفحة Chromium بالتوازي (`RS_RENDER_WORKERS`)؛ 10 ثواني بتاخد حوالي دقيقة على جهاز 4 أنوية.
+- `RS_CAPTURE=screenshot` بيستخدم screenshot من Playwright بدل التقاط الكانفاس (أبطأ، نفس النتيجة).
+- الملفات: `data/projects/<id>/` فيها `project.json` و `voice.mp3` و `video.mp4` و `contact.jpg`.
