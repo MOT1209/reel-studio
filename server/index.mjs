@@ -1,4 +1,4 @@
-// Reel Studio v1 — local HTTP server (127.0.0.1 only). No framework.
+// Reel Studio — local HTTP server (127.0.0.1 only). No framework.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -335,6 +335,6 @@ const server = http.createServer(async (req, res) => {
 });
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
-  console.log(`Reel Studio v1 → http://${HOST}:${PORT}`);
+  console.log(`Reel Studio v2 → http://${HOST}:${PORT}`);
   if (!ff) console.warn('⚠ ffmpeg not found in PATH (set FFMPEG_PATH) — rendering will fail.');
 });

@@ -1,4 +1,4 @@
-# Reel Studio — Phase 0 audit and development plan
+# Reel Studio — audit, phase reports and release notes
 
 Date: 2026-11-23 · Code audited: `9293977` (main) · Fixes: this branch.
 
@@ -51,31 +51,65 @@ Bundled assets: IBM Plex Sans Arabic (OFL), icon sets (CC0 / MIT, `assets/icons/
 | 12 | low | JSON repair stripped `//…`, so it cut `https://` URLs inside strings; empty word list → crash | comments only after JSON punctuation; clear error | `storyboard JSON…` |
 | 13 | medium | `npm run templates` was broken: it called `chromium.launch()` without the Chrome/Edge fallback, and it didn't set `script: auto`, so every project waited for approval forever (10-minute timeout) | `launchBrowser` + full approvals + fails at once if another stage is waiting | templates 9/9 |
 
-## 3. Remaining technical debt (not done yet — planned in the phases)
-- **Structured logging**: the stage logs are text lines; the server uses `console.error`. → Phase 1b: a small JSON-lines logger, `data/logs/`, with key redaction.
-- **Secret storage**: masked in the UI and 0600 on disk, but not encrypted. Windows DPAPI/Keychain need a native dependency or a PowerShell bridge. → a decision for the owner (see §5).
-- **Rendering layout is fixed at 1080×1920** (`W/H` constants in render.mjs and coordinates in render.js). 16:9 and 1:1 need a layout refactor, not a flag.
-- **No timeline data model**: the storyboard is a list of scenes tied to word indices. A real editor (tracks, clips, trim, undo) needs a separate "edit decision list" that render.js reads. This is the biggest architectural change in the plan.
-- **Mixed Arabic/English layout**: render.js picks `direction` per word (`isArabic`), not per bidi paragraph; a line mixing English terms and numbers inside Arabic can come out in the wrong order. → Phase 2.
-- **Text wrapping** is done by measuring words (`measureText`); no kashida, no proper handling of punctuation at the start of a line.
-- The UI is one `app.js` file (457 lines) building strings with `innerHTML` (consistently escaped); it can't take an editor and libraries without being split into modules.
+## 3. Technical debt from the audit — status
+| Item | Status |
+|---|---|
+| Structured logging | ✔ `server/logger.mjs` — JSON lines, rotation, redaction (test: `logs: …`) |
+| Secret storage | ✔ 0600 + atomic + masked + redacted. **Not encrypted at rest** (decision below) |
+| Fixed 1080×1920 layout | ✔ layout engine: 9:16 / 1:1 / 16:9 at 720p/1080p |
+| No timeline data model | ✔ `p.edit` (export, trim, audio, music, overlays, typography, transitions) + scenes + word timing, one validated save |
+| Mixed Arabic/English in captions | ✔ word-level UAX #9 (`public/bidi.js`) |
+| Text wrapping / kashida | ◐ wrapping respects logical order and keeps punctuation attached to its word; no kashida justification |
+| Single-file UI | ✔ split into `ui.js`, `editor.js`, `views/*.js` |
 
-## 4. Development plan (prioritised; each phase ends with tests + a report + your review)
+## 4. Decisions taken (the owner asked to proceed on my judgement)
+1. **Secrets:** stay plain JSON with 0600 + masking + log redaction. No native dependency; DPAPI can be added later without changing the file format.
+2. **Image providers:** all three behind one adapter interface; each turns on when its key is set; automatic visuals use Pexels → Pixabay → Unsplash.
+3. **Music:** the user's own library (uploaded with its licence recorded) — no provider offers a clear-licence music API.
+4. **Editor:** a real edit model on top of the narration-driven scenes (not a free-form NLE): the voice drives time, scenes snap to words, everything else is tracks on top. This keeps captions in sync by construction.
+5. **MCP:** Streamable HTTP only — a stdio transport would mean spawning arbitrary programs, which the brief forbids.
 
-| Phase | Deliverable | Acceptance criteria | Main risk |
-|---|---|---|---|
-| **1 ✔ (this branch)** | Fix the defects above | unit 13/13, robustness 14/14, e2e 37/37, templates 9/9 | — |
-| 1b | JSON logger + key redaction + one config module | a test proves no key appears in any log | small |
-| 2 | Arabic engine: paragraph-level bidi (UAX #9 via the browser, or a small `bidi-js` library), line breaking that respects punctuation, MSA/dialect script modes, optional tashkeel, LLM spelling/grammar correction with diff and approval, SRT/VTT | real Arabic/English/number sentences rendered and checked by pixels + order; SRT/VTT verified | the LLM's correction quality — every correction is shown to the user, nothing is applied silently |
-| 3 | Font library (Cairo, Tajawal, Amiri, Noto Sans/Naskh/Kufi Arabic, Scheherazade New, Reem Kufi, Aref Ruqaa — all **OFL**, bundled with their licences), preview + weights + subtitle presets; asset library with providers (Pexels, Pixabay, Unsplash) behind adapters, keys on the server, caching, licence and attribution stored with each asset | font embedding proved in the MP4; search with a real key (needs your keys) | the image providers' terms differ: Unsplash requires attribution and hotlinking from its API; none of them is "free for every use" |
-| 4 | Production engine: a research step with **sources marked "unverified"**, scene→asset matching, background music (from a library you supply, or Pixabay Music by hand — no free music API with a clear licence) | e2e with images and music | — |
-| 5 | Editor: an EDL data model (tracks: video/image/audio/text/subtitle), timeline UI, trim/split/move, undo/redo, autosave; render.js reads the EDL | every edit shows up in the rendered video (e2e test) | the biggest phase; split into 5a model+render, 5b UI |
-| 6 | Export: 9:16 / 16:9 / 1:1, 720p/1080p, quality presets, resume after an interruption, temp-file cleanup | ffprobe per preset, RAM measured | the layout refactor in §3 |
-| 7 | Skills/MCP: **declarative** skills (prompt + JSON schema for input and output, no code), an MCP client (stdio/HTTP) with an allow-list of tools and per-tool permissions, an execution log | no path runs arbitrary code; a test of a rejected permission | MCP is a large attack surface — stays off by default |
-| 8 | Release: a single test command, docs, release checklist | everything green | — |
+## 5. Phase reports
 
-## 5. Decisions needed from the owner before Phase 2/3
-1. **Secret encryption on Windows**: (a) leave it as is (0600 + masking), (b) DPAPI through PowerShell without new dependencies, (c) a native library.
-2. **Image providers**: which ones to enable first, and the keys (Pexels and Pixabay give free keys right away; Unsplash needs app approval for production).
-3. **Music**: a local library you supply, or a specific licensed provider?
-4. **The editor**: start with a simple timeline on top of the current scenes (faster), or a full EDL right away (heavier, but no second rewrite)? The recommendation is the full EDL.
+### Phase 1 — foundation and security ✔
+Implemented: the 13 fixes above + JSON logger. Files: `server/{index,pipeline,render,settings,storyboard,youtube,logger}.mjs`, `public/{index,render}.html`, `tools/robustness.mjs`. Tests: robustness 14/14 (12 of them fail on the original code), e2e 37/37 (was failing).
+
+### Phase 2 — Arabic engine ✔
+Implemented: `public/bidi.js` (word-level UAX #9 used by the caption layout), `server/subtitles.mjs` (SRT/VTT matching the burned captions, RLM, BOM, trim offset, Arabic-Indic digits), `server/arabic.mjs` (dialect detection, tashkeel strip/detect, digits, sentence split, word diff; LLM rewrites correct / tashkeel / MSA / Egyptian / simplify, validated and returned as proposals), research pass + dialect option in the script stage. Evidence: `tools/arabic-test.mjs` 12/12 incl. glyph shaping measured in the render browser on real sentences (joined forms narrower than isolated, لا ligature, ZWNJ changes the shape).
+Known limits: dialect detection is a marker-word heuristic (Egyptian vs MSA); correction and tashkeel quality depend on the LLM — every result is shown as a diff and needs approval; tashkeel output is checked to keep the same letters.
+
+### Phase 3 — fonts and assets ✔
+Implemented: 9 OFL families bundled (+ IBM Plex), manifest-only font serving, font import with a declared embedding right, typography model; asset library (streamed uploads, magic sniffing, ffprobe, thumbnails, folders/tags/search, licence on every asset); Pexels / Pixabay / Unsplash adapters (server-side keys, cache, 429 handling, Arabic query translation, SSRF-safe downloads, Unsplash download registration + attribution). Evidence: `tools/library-test.mjs` 10/10; `tools/export-test.mjs` proves the chosen fonts are the files loaded by the renderer.
+Known limits: provider APIs were exercised against mocks built from their documented response shapes — no real key was available here. Unsplash production use needs Unsplash's app approval.
+
+### Phase 4 — production engine ✔
+Implemented: research (unverified, with confidence and "source to check"), photo/type templates, automatic visual selection with licence capture and graceful fallback, pronunciation dictionary, voice speed/stability/style, music with side-chain ducking and fades, credits collected for the description. Evidence: export test (music ducked, −14 LUFS), library test.
+
+### Phase 5 — editor ✔
+Implemented: `public/editor.js` — six tracks, drag/trim/split/merge/swap, word timing drag, overlays, music, trim handles, zoom, inspector, undo/redo, autosave with server-side validation, live preview in the real renderer. Evidence: `tools/ui-test.mjs` 11/11 (add text → saved; undo/redo; aspect → preview canvas 1920×1080; trim drag → saved; scene template → saved, render reset), `tools/export-test.mjs` (edits visible in the MP4).
+Known limits: the narration is the master clock — you can trim the head/tail but not cut out the middle of the voice; no multi-select or ripple edit; video overlays are silent; music is not audible in the preview (it is in the export).
+
+### Phase 6 — rendering and export ✔
+Implemented: 9:16 / 1:1 / 16:9 × 720p / 1080p, 24/25/30/60 fps, quality presets, segmented rendering with resume after cancel/crash, temp cleanup, downscaled images and on-disk clip frames (bounded memory), concurrency-safe image scaling. Evidence: export test 7/7 (ffprobe per format, duration after trim, loudness, recovery reuses 1/2 segments), e2e 37/37. 10-second 1080p reel renders in ≈ 12 s here (2 pages).
+
+### Phase 7 — skills and MCP ✔
+Implemented: declarative skills (prompt / MCP), validation (all-or-nothing import), enable/disable, export, run log; MCP Streamable HTTP client with masked + redacted secrets, tools disabled until allowed, schema-checked arguments, result limits, call log. Evidence: `tools/skills-test.mjs` 10/10 (a "delete_everything" tool never reaches the server until allowed; revoking a tool blocks the skill using it).
+
+### Phase 8 — testing and release ✔
+`npm test` (unit 13 · Arabic 12 · library 10 · skills 10 · robustness 14), `npm run e2e` (37), `npm run test:export` (7), `npm run test:ui` (11), `npm run templates` (9) — all green on this machine. `npm audit`: 0 vulnerabilities, one runtime dependency (playwright, Apache-2.0).
+
+## 6. Known issues and limits
+- Secrets are not encrypted at rest (see decision 1).
+- Real-provider integrations (Pexels / Pixabay / Unsplash / MCP servers / ElevenLabs / Deepgram / YouTube) are tested against mocks here; first real use should be watched in `data/logs/server.log`.
+- Caption layout has no kashida justification; very long English-only captions use the same line rules as Arabic.
+- The editor is narration-driven (see Phase 5 limits).
+- Playwright's own Chromium could not be downloaded in this environment; tests ran with the system Chrome fallback — the same path Windows users get when the download fails.
+
+## 7. Release checklist
+- [x] `npm test`, `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
+- [x] `npm audit --omit=dev` → 0 vulnerabilities
+- [x] Fonts bundled only with their OFL licence files; icon licences in `assets/icons/LICENSES.md`
+- [x] No secret reaches the browser (settings, MCP, providers tested) or the logs (redaction tested)
+- [x] README updated (setup, sections, editor, Arabic, security, tests)
+- [ ] First run with real keys on the owner's machine (LLM, ElevenLabs, one image provider) — watch `data/logs/server.log`
+- [ ] Optional: DPAPI encryption of `data/*.json` on Windows
