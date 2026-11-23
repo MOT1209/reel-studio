@@ -14,12 +14,15 @@ import * as P from './pipeline.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
 import * as AR from './arabic.mjs';
 import { buildCues, toSrt, toVtt } from './subtitles.mjs';
+import * as F from './fonts.mjs';
+import * as A from './assets.mjs';
+import * as PV from './providers.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
 P.setServerPort(PORT);
 const PUBLIC = path.join(ROOT, 'public');
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.webp': 'image/webp', '.gif': 'image/gif', '.mov': 'video/quicktime', '.webm': 'video/webm', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.vtt': 'text/vtt; charset=utf-8', '.srt': 'application/x-subrip; charset=utf-8' };
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
@@ -139,6 +142,40 @@ async function route(req, res) {
       if (m === 'DELETE') { await unlinkYoutube(); return json(res, 200, youtubeStatus()); }
     }
     if (a === 'icons' && id === 'licenses') return json(res, 200, iconLicenses());
+    // ---- fonts -------------------------------------------------------------------------
+    if (a === 'fonts') {
+      if (!id && m === 'GET') return json(res, 200, { fonts: F.listFonts(), defaults: F.TYPO_DEFAULTS, styles: F.CAPTION_STYLES, typography: F.typographyFor(null) });
+      if (!id && m === 'POST') {
+        const buf = await readBody(req, 20 * 1024 * 1024);
+        return json(res, 201, F.importFont({ name: safeDecode(String(req.headers['x-font-name'] || '')), file: safeDecode(String(req.headers['x-filename'] || '')), buf, weight: String(req.headers['x-font-weight'] || '400'), license: String(req.headers['x-font-license'] || '') }));
+      }
+      if (id && m === 'DELETE') { F.deleteFont(id); return json(res, 200, { ok: true }); }
+    }
+    // ---- asset library -------------------------------------------------------------------
+    if (a === 'assets') {
+      if (!id && m === 'GET') return json(res, 200, A.listAssets(Object.fromEntries(url.searchParams)));
+      if (!id && m === 'POST') {
+        const tmp = await A.streamToTemp(req, A.LIMITS.video);
+        const h = (k) => safeDecode(String(req.headers[k] || ''));
+        const meta = await A.addAssetFromFile(tmp, {
+          name: h('x-filename'), folder: h('x-folder'), tags: h('x-tags'), source: { type: 'upload' },
+          license: { name: h('x-license-name') || 'ملك المستخدم', commercial: h('x-license-commercial') === 'false' ? false : h('x-license-commercial') === 'true' ? true : 'check', attribution: h('x-license-attribution') || null, notes: h('x-license-notes') || null },
+        });
+        return json(res, 201, meta);
+      }
+      const asset = A.getAsset(id);
+      if (!asset) return json(res, 404, { error: 'asset not found' });
+      if (!b && m === 'GET') return json(res, 200, asset);
+      if (!b && m === 'PATCH') return json(res, 200, A.updateAsset(id, await readJson(req)));
+      if (!b && m === 'DELETE') { A.deleteAsset(id); return json(res, 200, { ok: true }); }
+      if (b === 'file') return sendFile(req, res, A.assetFile(asset), { cache: 'max-age=86400' });
+      if (b === 'thumb' && asset.thumb) return sendFile(req, res, path.join(A.assetDir(id), 'thumb.jpg'), { cache: 'max-age=86400' });
+    }
+    if (a === 'providers') {
+      if (!id && m === 'GET') return json(res, 200, PV.providerStatus());
+      if (b === 'search' && m === 'GET') return json(res, 200, await PV.search(id, url.searchParams.get('q'), Object.fromEntries(url.searchParams)));
+      if (b === 'import' && m === 'POST') { const body = await readJson(req); return json(res, 201, await PV.importResult(id, body.item, { folder: body.folder || 'stock' })); }
+    }
     if (a === 'logs' && m === 'GET') {
       let lines = [];
       try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
@@ -229,6 +266,11 @@ async function route(req, res) {
 <div style="text-align:center"><p style="color:${ok ? '#36C98F' : '#F28A30'}">${safe}</p><p style="color:#9AA5AE;font-size:14px">تقدر تقفل الصفحة دي وترجع لـ Reel Studio.</p></div>
 <script>try{window.opener&&window.opener.postMessage({youtube:${ok}},location.origin)}catch(e){};${ok ? 'setTimeout(()=>window.close(),1500)' : ''}</script></body></html>`);
     }
+  }
+  if (parts[0] === 'fonts' && parts[1] && parts[2]) {
+    const f = F.fontFile(parts[1], parts[2]);
+    if (!f) return json(res, 404, { error: 'font not found' });
+    return sendFile(req, res, f, { cache: 'max-age=86400' });
   }
   if (parts[0] === 'font' && parts[1]) {
     const fonts = resolveFonts();

@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
-import { chatStream, ttsWithTimestamps, transcribeWords } from './apis.mjs';
+import { chatStream, ttsWithTimestamps, transcribeWords, applyPronunciation } from './apis.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
@@ -335,8 +335,9 @@ const STAGE_FN = {
       return;
     }
     const s = getSettings();
-    log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId}`);
-    const { audio, chars } = await ttsWithTimestamps(s, p.script.text, { signal });
+    const spoken = applyPronunciation(p.script.text, s.pronunciation);
+    log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
+    const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
     fs.writeFileSync(out, audio);
     const timed = charsToWords(chars);
     fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));

@@ -176,6 +176,48 @@ async function streamText(res, text, model = 'mock-llm') {
   res.end('data: [DONE]\n\n');
 }
 
+// ---- fake Pexels / Pixabay / Unsplash ---------------------------------------------------------
+const media = {};
+async function mediaFile(kind) {
+  if (media[kind]) return media[kind];
+  const out = path.join(os.tmpdir(), `mock-media-${process.pid}.${kind === 'video' ? 'mp4' : 'jpg'}`);
+  await ff(kind === 'video'
+    ? ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=540x960:rate=30:duration=3', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', out]
+    : ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1080x1620:rate=1:duration=1', '-frames:v', '1', out]);
+  return (media[kind] = fs.readFileSync(out));
+}
+const stockStats = { unsplashDownloads: 0, requests: 0, rateLimitNext: 0 };
+async function stockMock(req, res, url) {
+  const p = url.pathname, base = `http://127.0.0.1:${PORT}`, q = url.searchParams;
+  if (p === '/media/_stats') return json(res, 200, stockStats);
+  if (p === '/media/_ratelimit') { stockStats.rateLimitNext = 1; return json(res, 200, { ok: true }); }
+  if (p.startsWith('/media/')) {
+    const buf = await mediaFile(p.endsWith('.mp4') ? 'video' : 'image');
+    res.writeHead(200, { 'Content-Type': p.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg', 'Content-Length': buf.length });
+    return res.end(buf);
+  }
+  stockStats.requests++;
+  if (stockStats.rateLimitNext) { stockStats.rateLimitNext = 0; res.writeHead(429, { 'Retry-After': '42', 'Content-Type': 'application/json' }); return res.end('{}'); }
+  const query = q.get('query') || q.get('q') || '';
+  if (p === '/pexels/v1/search') {
+    if (!req.headers.authorization) return json(res, 401, {});
+    return json(res, 200, { total_results: 2, photos: [1, 2].map((i) => ({ id: 100 + i, width: 1080, height: 1620, url: `https://www.pexels.com/photo/${100 + i}/`, photographer: `Mock Photographer ${i}`, photographer_url: 'https://www.pexels.com/@mock', alt: `${query} ${i}`, src: { medium: `${base}/media/p${i}.jpg`, large2x: `${base}/media/p${i}.jpg`, original: `${base}/media/p${i}.jpg` } })) });
+  }
+  if (p === '/pexels/videos/search') {
+    return json(res, 200, { total_results: 1, videos: [{ id: 900, width: 540, height: 960, duration: 3, url: 'https://www.pexels.com/video/900/', image: `${base}/media/v.jpg`, user: { name: 'Mock Filmmaker', url: 'https://www.pexels.com/@film' }, video_files: [{ file_type: 'video/mp4', width: 540, height: 960, link: `${base}/media/v.mp4` }] }] });
+  }
+  if (p === '/pixabay/api/' || p === '/pixabay/api/videos/') {
+    if (!q.get('key')) return json(res, 400, {});
+    return json(res, 200, { totalHits: 1, hits: [{ id: 555, pageURL: 'https://pixabay.com/photos/mock-555/', user: 'mockuser', user_id: 7, tags: query, webformatURL: `${base}/media/x.jpg`, largeImageURL: `${base}/media/x.jpg`, imageWidth: 1080, imageHeight: 1620, duration: 3, videos: { medium: { url: `${base}/media/x.mp4`, width: 540, height: 960, thumbnail: `${base}/media/x.jpg` } } }] });
+  }
+  if (p === '/unsplash/search/photos') {
+    if (!/^Client-ID /.test(req.headers.authorization || '')) return json(res, 401, {});
+    return json(res, 200, { total: 1, results: [{ id: 'uns1', width: 1080, height: 1620, alt_description: query, urls: { raw: `${base}/media/u.jpg?ixid=1`, small: `${base}/media/u.jpg` }, links: { html: 'https://unsplash.com/photos/uns1', download_location: `${base}/unsplash/photos/uns1/download` }, user: { name: 'Mock Unsplasher', links: { html: 'https://unsplash.com/@mock' } } }] });
+  }
+  if (p === '/unsplash/photos/uns1/download') { stockStats.unsplashDownloads++; return json(res, 200, { url: `${base}/media/u.jpg` }); }
+  return json(res, 404, { error: 'mock stock: ' + p });
+}
+
 // ---- fake YouTube ------------------------------------------------------------------------
 const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set(), denyAll: false, revokeAfterChunks: 0 };
 const sha256url = (s) => crypto.createHash('sha256').update(s).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -260,6 +302,8 @@ const server = http.createServer(async (req, res) => {
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
     }
+    // ---- stock media providers -------------------------------------------------------
+    if (url.pathname.startsWith('/pexels/') || url.pathname.startsWith('/pixabay/') || url.pathname.startsWith('/unsplash/') || url.pathname.startsWith('/media/')) return await stockMock(req, res, url);
     // ---- YouTube (OAuth + Data API v3) ----------------------------------------------
     if (url.pathname.startsWith('/yt/')) return youtubeMock(req, res, url);
     if (req.method === 'GET' && url.pathname === '/v1/models') {

@@ -174,7 +174,10 @@ export async function ttsWithTimestamps(settings, text, { signal } = {}) {
   const res = await fetch(url, {
     method: 'POST', signal,
     headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ text, model_id: modelId || 'eleven_multilingual_v2', voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.2, use_speaker_boost: true } }),
+    body: JSON.stringify({ text, model_id: modelId || 'eleven_multilingual_v2', voice_settings: {
+      stability: settings.elevenlabs.stability ?? 0.45, similarity_boost: 0.8, style: settings.elevenlabs.style ?? 0.2, use_speaker_boost: true,
+      ...(Number(settings.elevenlabs.speed) && Number(settings.elevenlabs.speed) !== 1 ? { speed: Number(settings.elevenlabs.speed) } : {}),
+    } }),
   });
   if (!res.ok) throw new Error(`ElevenLabs ${await failText(res)}`);
   const j = await res.json();
@@ -199,4 +202,19 @@ export async function transcribeWords(settings, audioBuf, mime, { signal } = {})
   const j = await res.json();
   const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];
   return words.map((w) => ({ text: w.punctuated_word || w.word, start: w.start, end: w.end, confidence: w.confidence }));
+}
+
+/**
+ * Pronunciation dictionary ("word = spoken form" per line) applied to the text sent to TTS only.
+ * The captions keep the script spelling: timing aligns the spoken characters back onto script words.
+ */
+export function applyPronunciation(text, dict) {
+  const rules = String(dict || '').split('\n').map((l) => l.split('=')).filter((x) => x.length === 2)
+    .map(([a, b]) => [a.trim(), b.trim()]).filter(([a, b]) => a && b && a.length <= 60 && b.length <= 120);
+  let out = String(text);
+  for (const [from, to] of rules) {
+    const esc = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(^|[\\s«"(])${esc}(?=$|[\\s.،,!؟?:»")])`, 'gu'), `$1${to}`);
+  }
+  return { text: out, applied: rules.length };
 }
