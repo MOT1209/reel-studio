@@ -38,6 +38,7 @@
         <div class="tools"><button type="button" class="small" data-all="auto">كله تلقائي</button><button type="button" class="small" data-all="wait">كله بموافقتي</button></div>
         <div class="approvals" id="newApprovals"></div>
       </fieldset>
+      <label class="row" id="newPublishRow"><input type="checkbox" id="newPublish"> انشر على يوتيوب بعد الرندر</label>
       <button type="submit" class="primary">ابدأ ▶</button>
       <p class="err" id="newErr"></p>
     </form>
@@ -61,6 +62,7 @@
       <button type="button" data-tab="look">الشكل والألوان</button>
       <button type="button" data-tab="render">الصوت والرندر</button>
       <button type="button" data-tab="approvals">الموافقات</button>
+      <button type="button" data-tab="youtube">يوتيوب</button>
     </nav>
 
     <div class="tab" data-tab="keys">
@@ -149,6 +151,34 @@
       <p class="hint">الموافقات الافتراضية لأي مشروع جديد. «موافقتي» = المرحلة تقف وتستنى تراجعها وتعدّلها.</p>
       <div class="tools"><button type="button" class="small" data-defall="auto">كله تلقائي</button><button type="button" class="small" data-defall="wait">كله بموافقتي</button></div>
       <div id="defApprovals" class="approvals"></div>
+    </div>
+
+    <div class="tab" data-tab="youtube" hidden>
+      <div id="ytStatus" class="ytstatus"></div>
+      <details id="ytGuide">
+        <summary>إزاي تجيب Client ID و Client secret (مرة واحدة، حوالي 5 دقايق)</summary>
+        <ol class="guide">
+          <li>افتح <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Google Cloud Console</a> واعمل مشروع جديد (أي اسم).</li>
+          <li>فعّل <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">YouTube Data API v3</a> ← Enable.</li>
+          <li><a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener">OAuth consent screen</a>: نوع External، واكتب اسم التطبيق وإيميلك، وفي Audience ← Test users ضيف الإيميل اللي عليه القناة.</li>
+          <li><a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a> ← Create client ← النوع <b>Desktop app</b> ← Create.</li>
+          <li>انسخ <b>Client ID</b> و <b>Client secret</b> هنا، ودوس «حفظ واربط القناة».</li>
+        </ol>
+        <p class="hint">⚠ جوجل بيخلّي أي فيديو بيترفع من مشروع API مش متراجع (unverified) <b>Private</b> لحد ما المشروع يعدّي مراجعة YouTube API audit. عشان تنشر Public أو Unlisted على طول، قدّم على المراجعة من <a href="https://support.google.com/youtube/contact/yt_api_form" target="_blank" rel="noopener">الفورم ده</a>، أو غيّر الخصوصية بإيدك من YouTube Studio. الحصة اليومية حوالي 6 فيديوهات لكل مشروع.</p>
+      </details>
+      <label>Client ID <input name="youtube.clientId" dir="ltr" autocomplete="off" placeholder="xxxx.apps.googleusercontent.com"></label>
+      <label>Client secret <input name="youtube.clientSecret" dir="ltr" autocomplete="off"></label>
+      <div class="tools">
+        <button type="button" id="btnYtLink" class="primary">حفظ واربط القناة</button>
+        <button type="button" id="btnYtUnlink" class="danger" hidden>فك الربط</button>
+      </div>
+      <div class="two">
+        <label>الخصوصية الافتراضية
+          <select name="youtube.privacy"><option value="private">Private (خاص)</option><option value="unlisted">Unlisted (بالرابط بس)</option><option value="public">Public (عام)</option></select>
+        </label>
+        <label>Tags (مفصولة بفاصلة) <input name="youtube.tags"></label>
+      </div>
+      <label class="row"><input type="checkbox" name="youtube.autoPublish"> انشر تلقائيًا بعد ما الرندر يخلص (للمشاريع الجديدة)</label>
     </div>
 
     <p class="err" id="settingsErr"></p>

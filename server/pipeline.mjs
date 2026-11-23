@@ -8,6 +8,7 @@ import { chatStream, ttsWithTimestamps, transcribeWords } from './apis.mjs';
 import { scriptMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
+import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
 import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
@@ -67,9 +68,10 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     id, topic, seconds, createdAt: new Date().toISOString(), updatedAt: null,
     voiceMode: voiceMode === 'upload' ? 'upload' : 'tts', upload: null,
     approvals: Object.fromEntries(STAGES.map((s) => [s, (approvals[s] || getSettings().approvals?.[s]) === 'wait' ? 'wait' : 'auto'])),
-    options: { forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null },
+    options: { forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish },
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null,
+    publish: { status: 'idle', log: [] },
   };
   fs.mkdirSync(projectDir(id), { recursive: true });
   cache.set(id, p);
@@ -139,11 +141,15 @@ export function runPipeline(id) {
       running.delete(id);
       save(p);
     }
+    if (p.stages.render.status === 'done' && p.options?.publish && !p.publish?.videoId && p.publish?.status !== 'running' && youtubeStatus().linked) {
+      publishProject(id).catch(() => {});
+    }
   })();
   return true;
 }
 
 export async function cancel(id) {
+  cancelPublish(id);
   const r = running.get(id);
   if (!r) return false;
   r.controller?.abort();
@@ -363,6 +369,59 @@ const STAGE_FN = {
     log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved`);
   },
 };
+
+// ---- publish (YouTube) ------------------------------------------------------------
+const publishing = new Map(); // id → AbortController
+function plog(p, line) {
+  p.publish = p.publish || { status: 'idle', log: [] };
+  const entry = `[${new Date().toISOString().slice(11, 19)}] ${line}`;
+  p.publish.log.push(entry); if (p.publish.log.length > 100) p.publish.log.splice(0, p.publish.log.length - 100);
+  bus(p.id).emit('event', { type: 'log', data: { stage: 'publish', line: entry } });
+}
+/** Uploads the rendered video. Resolves when done; errors are stored on p.publish. */
+export async function publishProject(id, { privacy } = {}) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  if (p.stages.render.status !== 'done' || !p.render) throw httpError(409, 'الرندر لسه ما خلصش');
+  if (publishing.has(id)) throw httpError(409, 'النشر شغال بالفعل');
+  const st = youtubeStatus();
+  if (!st.linked) throw httpError(409, 'القناة مش مربوطة — اربطها من الإعدادات ← يوتيوب');
+  const priv = ['private', 'unlisted', 'public'].includes(privacy) ? privacy : getSettings().youtube.privacy || 'private';
+  const ctl = new AbortController();
+  publishing.set(id, ctl);
+  p.publish = { ...(p.publish || {}), status: 'running', error: null, progress: 0, log: p.publish?.log || [] };
+  const meta = videoMetadata(p);
+  plog(p, `▶ رفع على قناة «${st.channel?.title || '?'}» (${priv}) — "${meta.title}"`);
+  save(p);
+  let last = 0;
+  try {
+    const r = await uploadVideo(path.join(projectDir(id), 'video.mp4'), meta, {
+      privacy: priv, signal: ctl.signal,
+      onProgress: (f) => {
+        p.publish.progress = f;
+        if (f - last >= 0.1 || f === 1) { last = f; bus(id).emit('event', { type: 'progress', data: { stage: 'publish', frame: Math.round(f * 100), total: 100 } }); }
+      },
+    });
+    Object.assign(p.publish, { status: 'done', videoId: r.videoId, url: r.url, privacy: r.privacy, channel: st.channel, at: new Date().toISOString() });
+    plog(p, `✔ اتنشر: ${r.url} (${r.privacy})`);
+  } catch (e) {
+    const cancelled = ctl.signal.aborted;
+    Object.assign(p.publish, { status: cancelled ? 'idle' : 'error', error: cancelled ? null : e.message });
+    plog(p, cancelled ? '■ النشر اتلغى' : `✖ ${e.message}`);
+  } finally {
+    publishing.delete(id);
+    save(p);
+  }
+  return p.publish;
+}
+export function setPublishOption(id, on) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  p.options = { ...(p.options || {}), publish: !!on };
+  save(p);
+  return p;
+}
+export function cancelPublish(id) { publishing.get(id)?.abort(); }
 
 /** Everything render.html needs; times are resolved here so the page stays deterministic. */
 export function renderData(p) {

@@ -12,7 +12,7 @@ const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 
 export function run(cmd, args, { signal, input, collect = true } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { windowsHide: true });
+    const p = spawn(cmd, args, { windowsHide: true, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => { if (collect) out += d; });
     p.stderr.on('data', (d) => { err += d; if (err.length > 200000) err = err.slice(-100000); });
@@ -117,7 +117,14 @@ export async function launchBrowser(log = () => {}) {
 // Frame capture: "canvas" (default) grabs the canvas pixels as JPEG inside the page;
 // "screenshot" uses Playwright page screenshots (slower, identical output).
 const CAPTURE = process.env.RS_CAPTURE === 'screenshot' ? 'screenshot' : 'canvas';
-const WORKERS = Math.max(1, Math.min(4, Number(process.env.RS_RENDER_WORKERS) || Math.max(1, os.cpus().length - 1)));
+// Parallel pages: by CPU cores, but each headless page needs ~400 MB — on a memory-starved machine
+// extra pages only cause swapping (everything, the server included, slows to a crawl).
+function workerCount() {
+  if (Number(process.env.RS_RENDER_WORKERS)) return Math.max(1, Math.min(4, Number(process.env.RS_RENDER_WORKERS)));
+  const byCpu = Math.max(1, os.cpus().length - 1);
+  const byMem = Math.max(1, Math.floor((os.freemem() / 1024 ** 2 - 300) / 400));
+  return Math.max(1, Math.min(4, byCpu, byMem));
+}
 
 async function openWorker(browser, url, errors) {
   const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
@@ -153,9 +160,10 @@ export async function renderFrames({ url, out, duration, fps: FPS_ = FPS, signal
   try {
     const errors = [];
     const total = Math.ceil(duration * FPS_);
-    const nWorkers = Math.min(WORKERS, Math.max(1, Math.floor(total / 30)));
+    const nWorkers = Math.min(workerCount(), Math.max(1, Math.floor(total / 30)));
     const pages = await Promise.all(Array.from({ length: nWorkers }, () => openWorker(browser, url, errors)));
-    log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''}`);
+    log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''} · free RAM ${(os.freemem() / 1024 ** 3).toFixed(1)} GB`);
+    if (os.freemem() < 1024 ** 3) log('⚠ الذاكرة الفاضية أقل من 1 GB — الرندر هيبقى بطيء؛ اقفل برامج تانية لو تقدر');
     ff = spawn(FFMPEG, ['-hide_banner', '-y', '-f', 'image2pipe', '-framerate', String(FPS_), '-c:v', 'mjpeg', '-i', '-',
       '-vf', 'scale=in_range=full:out_range=tv,format=yuv420p',
       '-c:v', 'libx264', '-preset', 'faster', '-crf', '18', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(FPS_), '-movflags', '+faststart', out], { windowsHide: true });

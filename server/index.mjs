@@ -5,6 +5,7 @@ import path from 'node:path';
 import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
 import { listVoices, testLlm, testElevenLabs, testDeepgram } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
+import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
 
 const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram };
 import { iconLicenses } from './icons.mjs';
@@ -122,6 +123,10 @@ async function route(req, res) {
         return json(res, 200, { ok: true });
       }
     }
+    if (a === 'youtube') {
+      if (m === 'GET') return json(res, 200, youtubeStatus());
+      if (m === 'DELETE') { await unlinkYoutube(); return json(res, 200, youtubeStatus()); }
+    }
     if (a === 'icons' && id === 'licenses') return json(res, 200, iconLicenses());
     if (a === 'projects') {
       if (!id) {
@@ -149,6 +154,20 @@ async function route(req, res) {
         P.saveUpload(id, buf, decodeURIComponent(req.headers['x-filename'] || ''), req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
+      if (b === 'publish' && m === 'POST') {
+        if (stage === 'cancel') { P.cancelPublish(id); return json(res, 200, { ok: true }); }
+        const body = await readJson(req);
+        let early = null;
+        P.publishProject(id, body).catch((e) => { early = e; });
+        await new Promise((r) => setImmediate(r)); // validation errors reject synchronously
+        if (early) throw early;
+        return json(res, 202, { started: true });
+      }
+      if (b === 'options' && m === 'PUT') {
+        const body = await readJson(req);
+        if (typeof body.publish === 'boolean') P.setPublishOption(id, body.publish);
+        return json(res, 200, P.publicProject(p));
+      }
       if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p));
       if (b === 'files' && stage && FILE_RE.test(stage)) return sendFile(req, res, path.join(P.projectDir(id), stage));
       if (b === 'stages' && P.STAGES.includes(stage)) {
@@ -160,6 +179,21 @@ async function route(req, res) {
     return json(res, 404, { error: 'unknown endpoint' });
   }
 
+  if (parts[0] === 'oauth' && parts[1] === 'youtube') {
+    const redirectUri = `http://127.0.0.1:${PORT}/oauth/youtube/callback`;
+    if (parts[2] === 'start') { res.writeHead(302, { Location: startAuth(redirectUri), 'Cache-Control': 'no-store' }); return res.end(); }
+    if (parts[2] === 'callback') {
+      let ok = true, msg;
+      try { const ch = await finishAuth(Object.fromEntries(url.searchParams)); msg = `اتربطت قناة «${ch.title}» ✔`; }
+      catch (e) { ok = false; msg = e.message; }
+      const safe = String(msg).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(`<!DOCTYPE html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>YouTube</title>
+<body style="background:#0C1014;color:#F4F3EE;font:18px system-ui;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center"><p style="color:${ok ? '#36C98F' : '#F28A30'}">${safe}</p><p style="color:#9AA5AE;font-size:14px">تقدر تقفل الصفحة دي وترجع لـ Reel Studio.</p></div>
+<script>try{window.opener&&window.opener.postMessage({youtube:${ok}},location.origin)}catch(e){};${ok ? 'setTimeout(()=>window.close(),1500)' : ''}</script></body></html>`);
+    }
+  }
   if (parts[0] === 'font' && parts[1]) {
     const fonts = resolveFonts();
     const name = path.basename(parts[1]);

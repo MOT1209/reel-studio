@@ -48,8 +48,27 @@ export function stripThink(text) {
  * Streams a chat completion. onDelta(visibleText) receives text with <think> removed.
  * Works with SSE streams and with servers that ignore `stream` and return plain JSON.
  */
-export async function chatStream(settings, messages, { onDelta = () => {}, signal, temperature, maxTokens = 4096 } = {}) {
+export async function chatStream(settings, messages, { onDelta = () => {}, signal, temperature, maxTokens = 4096, idleMs = Number(process.env.LLM_IDLE_TIMEOUT_MS) || 120000 } = {}) {
   const { baseUrl, apiKey, model } = settings.llm;
+  // Abort when the caller cancels OR when the server goes silent for idleMs (a stalled provider must not hang a stage).
+  const ctl = new AbortController();
+  let timedOut = false, timer;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; ctl.abort(); }, idleMs); };
+  const onParent = () => ctl.abort();
+  if (signal?.aborted) ctl.abort(); else signal?.addEventListener('abort', onParent, { once: true });
+  arm();
+  try {
+    return await chatStreamInner(settings, messages, { onDelta, signal: ctl.signal, temperature, maxTokens, baseUrl, apiKey, model, arm });
+  } catch (e) {
+    if (timedOut && !signal?.aborted) throw new Error(`LLM ما ردّش لمدة ${Math.round(idleMs / 1000)} ثانية — جرّب تاني أو غيّر الموديل`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onParent);
+  }
+}
+
+async function chatStreamInner(settings, messages, { onDelta, signal, temperature, maxTokens, baseUrl, apiKey, model, arm }) {
   const res = await fetch(`${trimSlash(baseUrl)}/chat/completions`, {
     method: 'POST',
     signal,
@@ -72,6 +91,7 @@ export async function chatStream(settings, messages, { onDelta = () => {}, signa
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
+    arm(); // data arrived — reset the inactivity timer
     pending += dec.decode(value, { stream: true });
     let nl;
     while ((nl = pending.indexOf('\n')) >= 0) {

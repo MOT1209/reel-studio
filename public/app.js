@@ -42,7 +42,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (voiceMode === 'upload' && !file) { $('#newErr').textContent = 'اختار ملف الصوت الأول.'; return; }
   const approvals = Object.fromEntries([...document.querySelectorAll('[data-appr]')].map((c) => [c.dataset.appr, c.checked ? 'wait' : 'auto']));
   try {
-    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload' }) });
+    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked } }) });
     if (voiceMode === 'upload') {
       await api(`/api/projects/${p.id}/upload`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(file.name) } });
       await api(`/api/projects/${p.id}/run`, { method: 'POST' });
@@ -88,7 +88,7 @@ function openProject(id) {
   es.addEventListener('log', (ev) => {
     const { stage, line } = JSON.parse(ev.data);
     if (!current) return;
-    current.stages[stage].log.push(line);
+    (stage === 'publish' ? (current.publish = current.publish || { log: [] }).log : current.stages[stage].log).push(line);
     if (stage === selStage) { const el = $('#log'); if (el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; } }
   });
   es.addEventListener('llm', (ev) => {
@@ -99,7 +99,9 @@ function openProject(id) {
     if (el) { el.textContent = live.llm[stage]; el.scrollTop = el.scrollHeight; }
   });
   es.addEventListener('progress', (ev) => {
-    live.progress = JSON.parse(ev.data);
+    const pg = JSON.parse(ev.data);
+    if (pg.stage === 'publish') { const b = $('#pubBar'); if (b) b.style.width = pg.frame + '%'; return; }
+    live.progress = pg;
     const pct = (100 * live.progress.frame) / live.progress.total;
     const b = $('#renderBar'); if (b) b.style.width = pct.toFixed(1) + '%';
     const t = $('#renderPct'); if (t) t.textContent = `${live.progress.frame} / ${live.progress.total} فريم`;
@@ -236,9 +238,32 @@ function renderStagePanel() {
         <h4>Contact sheet</h4><div class="preview"><img src="${file('contact.jpg')}" alt="contact sheet"></div>`;
     }
   }
+  if (s === 'render' && p.render) {
+    const pb = p.publish || { status: 'idle', log: [] };
+    html += '<div class="publish"><h4>النشر على يوتيوب</h4>';
+    if (pb.status === 'done') html += '<p>✔ اتنشر (' + esc(pb.privacy) + ') على «' + esc(pb.channel?.title || '') + '»: <a href="' + esc(pb.url) + '" target="_blank" rel="noopener">' + esc(pb.url) + '</a></p>';
+    if (pb.status === 'running') html += '<div class="bar"><i id="pubBar" style="width:' + Math.round((pb.progress || 0) * 100) + '%"></i></div><p class="hint">بيرفع… <button class="small danger" id="btnPubCancel">إلغاء</button></p>';
+    if (pb.status === 'error') html += '<p class="err">' + esc(pb.error) + '</p>';
+    if (pb.status !== 'running') html += '<div class="row2"><select id="pubPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select>'
+      + '<button id="btnPublish" class="primary">' + (pb.status === 'done' ? 'انشر نسخة تانية' : '⬆ انشر على يوتيوب') + '</button><span class="hint" id="pubHint"></span></div>';
+    html += '<label class="row"><input type="checkbox" id="optPublish" ' + (p.options?.publish ? 'checked' : '') + '> انشر تلقائيًا لما الرندر يخلص</label>';
+    if (pb.log?.length) html += '<div class="log">' + esc(pb.log.join('\n')) + '</div>';
+    html += '</div>';
+  }
   if (p.script?.sources?.length && s === 'render') html += `<div class="sources"><h4>المصادر</h4>${p.script.sources.map((x) => `<div>${esc(x)}</div>`).join('')}</div>`;
   el.innerHTML = html;
   bindStageButtons();
+  $('#btnPublish')?.addEventListener('click', async () => {
+    const priv = $('#pubPrivacy').value;
+    if (priv === 'public' && !confirm('هيتنشر Public على قناتك. متأكد؟')) return;
+    act(() => api('/api/projects/' + p.id + '/publish', { method: 'POST', body: JSON.stringify({ privacy: priv }) }));
+  });
+  if ($('#pubPrivacy')) {
+    api('/api/settings').then((st) => { $('#pubPrivacy').value = st.youtube?.privacy || 'private'; }).catch(() => {});
+    loadYt().then((y) => { if (!y.linked && $('#btnPublish')) { $('#btnPublish').disabled = true; $('#pubHint').textContent = 'اربط قناتك الأول: الإعدادات ← يوتيوب'; } });
+  }
+  $('#btnPubCancel')?.addEventListener('click', () => act(() => api('/api/projects/' + p.id + '/publish/cancel', { method: 'POST' })));
+  $('#optPublish')?.addEventListener('change', (e) => act(() => api('/api/projects/' + p.id + '/options', { method: 'PUT', body: JSON.stringify({ publish: e.target.checked }) })));
   $('#saveScript')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/script`, { method: 'PUT', body: JSON.stringify({ title: $('#edTitle').value, text: $('#edText').value, sources: $('#edSources').value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
   $('#saveTiming')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/timing`, { method: 'PUT', body: JSON.stringify({ words: p.words.map((w) => ({ start: Number($(`[data-w="${w.i}"]`).value) })) }) })));
   $('#saveSb')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/storyboard`, { method: 'PUT', body: JSON.stringify({ storyboard: $('#edSb').value }) })));
@@ -304,8 +329,8 @@ async function openSettings(tab = 'keys') {
   $('#settingsErr').textContent = '';
   dlg.querySelectorAll('.testres').forEach((x) => { x.textContent = ''; x.className = 'testres'; });
   S = await api('/api/settings');
-  for (const sec of ['llm', 'elevenlabs', 'deepgram']) for (const [k, v] of Object.entries(S[sec])) {
-    if (k === 'apiKey') { const el = field(sec + '.apiKey'); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.apiKey`]})` : 'مش متسجل'; }
+  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube']) for (const [k, v] of Object.entries(S[sec])) {
+    if (k === 'apiKey' || k === 'clientSecret') { const el = field(sec + '.' + k); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.${k}`]})` : 'مش متسجل'; }
     else setField(`${sec}.${k}`, v);
   }
   for (const [k, src] of Object.entries(S._source)) if (src === 'env (locked)') { const el = field(k); if (el) { el.disabled = true; el.title = 'محدد من متغير بيئة'; } }
@@ -319,18 +344,19 @@ async function openSettings(tab = 'keys') {
   styleLoaded = false;
   showTab(tab);
   dlg.showModal();
+  loadYt();
   loadStyle().catch((e) => { $('#settingsErr').textContent = e.message; });
 }
 field('audio.sfxVolume').addEventListener('input', (e) => { $('#sfxVal').textContent = Math.round(e.target.value * 100) + '%'; });
 $('#btnSettings').addEventListener('click', () => openSettings().catch((e) => alert(e.message)));
 
 function collectSettings() {
-  const body = { llm: {}, elevenlabs: {}, deepgram: {}, look: {}, audio: {}, render: {} };
+  const body = { llm: {}, elevenlabs: {}, deepgram: {}, youtube: {}, look: {}, audio: {}, render: {} };
   dlg.querySelectorAll('[name]').forEach((el) => {
     if (el.disabled) return;
     const [a, b] = el.name.split('.');
     const v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? Number(el.value) : el.value;
-    if (b) { if (b === 'apiKey' && !v) return; body[a][b] = v; } else body[a] = v;
+    if (b) { if ((b === 'apiKey' || b === 'clientSecret') && !v) return; body[a][b] = v; } else body[a] = v;
   });
   // only colours that differ from the chosen preset are saved, so switching themes later stays clean
   const preset = S._themes[body.look.theme] || {};
@@ -375,6 +401,44 @@ $('#btnVoices').addEventListener('click', async () => {
   } catch (err) { out.className = 'testres bad'; out.textContent = '✖ ' + err.message; }
 });
 
+// ---------- youtube ----------
+let YT = { linked: false };
+async function loadYt() {
+  try { YT = await api('/api/youtube'); } catch { YT = { linked: false }; }
+  const box = $('#ytStatus');
+  if (box) {
+    box.innerHTML = YT.linked
+      ? (YT.channel?.thumbnail ? '<img src="' + esc(YT.channel.thumbnail) + '" alt="">' : '') + '<span class="ok">✔ مربوط بقناة «' + esc(YT.channel?.title || '?') + '»</span>'
+      : '<span class="bad">' + (YT.configured ? 'القناة مش مربوطة — دوس «حفظ واربط القناة»' : 'لسه مفيش Client ID و Client secret — اتبع الخطوات تحت') + '</span>';
+    $('#btnYtUnlink').hidden = !YT.linked;
+    $('#btnYtLink').textContent = YT.linked ? 'اربط قناة تانية' : 'حفظ واربط القناة';
+    if (!YT.configured) $('#ytGuide').open = true;
+  }
+  const row = $('#newPublishRow');
+  if (row) { $('#newPublish').disabled = !YT.linked; row.title = YT.linked ? '' : 'اربط قناتك من الإعدادات ← يوتيوب'; row.style.opacity = YT.linked ? 1 : 0.5; }
+  return YT;
+}
+$('#btnYtLink').addEventListener('click', async () => {
+  $('#settingsErr').textContent = '';
+  try {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify(collectSettings()) });
+    const st = await loadYt();
+    if (!st.configured) { $('#settingsErr').textContent = 'اكتب Client ID و Client secret الأول.'; return; }
+    window.open('/oauth/youtube/start', 'ytlink', 'width=520,height=720');
+    const t0 = Date.now();
+    const poll = setInterval(async () => {
+      const s2 = await loadYt();
+      if ((s2.linked && s2.channel?.id !== st.channel?.id) || Date.now() - t0 > 180000) clearInterval(poll);
+    }, 2000);
+  } catch (e) { $('#settingsErr').textContent = e.message; }
+});
+window.addEventListener('message', (e) => { if (e.origin === location.origin && e.data && 'youtube' in e.data) loadYt(); });
+$('#btnYtUnlink').addEventListener('click', async () => {
+  if (!confirm('تفك ربط القناة؟ مش هتقدر تنشر لحد ما تربطها تاني.')) return;
+  await act(() => api('/api/youtube', { method: 'DELETE' }));
+  loadYt();
+});
+
 // ---------- boot ----------
 async function applyDefaultApprovals() {
   try {
@@ -385,6 +449,7 @@ async function applyDefaultApprovals() {
 document.querySelectorAll('[data-all]').forEach((b) => b.addEventListener('click', () => document.querySelectorAll('[data-appr]').forEach((c) => { c.checked = b.dataset.all === 'wait'; })));
 renderNewApprovals();
 applyDefaultApprovals();
+loadYt().then(async () => { try { const st = await api('/api/settings'); if (YT.linked) $('#newPublish').checked = !!st.youtube?.autoPublish; } catch {} });
 health();
 loadProjects().then(() => {
   const id = new URLSearchParams(location.search).get('p');

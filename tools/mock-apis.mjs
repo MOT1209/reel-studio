@@ -6,6 +6,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 const PORT = Number(process.env.MOCK_PORT || 4399);
@@ -175,6 +176,62 @@ async function streamText(res, text, model = 'mock-llm') {
   res.end('data: [DONE]\n\n');
 }
 
+// ---- fake YouTube ------------------------------------------------------------------------
+const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set() };
+const sha256url = (s) => crypto.createHash('sha256').update(s).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+async function youtubeMock(req, res, url) {
+  const p = url.pathname, auth = req.headers.authorization || '';
+  const authed = () => yt.tokens.has(auth.replace(/^Bearer /, ''));
+  if (p === '/yt/auth' && req.method === 'GET') { // consent screen → immediate "Allow"
+    const q = url.searchParams;
+    if (!q.get('client_id') || !q.get('code_challenge') || q.get('code_challenge_method') !== 'S256') return json(res, 400, { error: 'invalid_request' });
+    const code = 'mock-code-' + crypto.randomBytes(6).toString('hex');
+    yt.codes.set(code, { challenge: q.get('code_challenge'), redirect: q.get('redirect_uri') });
+    res.writeHead(302, { Location: `${q.get('redirect_uri')}?code=${code}&state=${encodeURIComponent(q.get('state'))}&scope=${encodeURIComponent(q.get('scope'))}` });
+    return res.end();
+  }
+  if (p === '/yt/token' && req.method === 'POST') {
+    const f = new URLSearchParams((await readBody(req)).toString());
+    if (!f.get('client_secret')) return json(res, 401, { error: 'invalid_client' });
+    if (f.get('grant_type') === 'authorization_code') {
+      const c = yt.codes.get(f.get('code'));
+      if (!c || c.redirect !== f.get('redirect_uri') || sha256url(f.get('code_verifier') || '') !== c.challenge) return json(res, 400, { error: 'invalid_grant', error_description: 'bad code/verifier' });
+      yt.codes.delete(f.get('code'));
+    } else if (f.get('grant_type') !== 'refresh_token' || f.get('refresh_token') !== 'mock-refresh') return json(res, 400, { error: 'invalid_grant' });
+    const at = 'mock-access-' + crypto.randomBytes(6).toString('hex');
+    yt.tokens.add(at);
+    return json(res, 200, { access_token: at, expires_in: 3599, token_type: 'Bearer', ...(f.get('grant_type') === 'authorization_code' ? { refresh_token: 'mock-refresh' } : {}) });
+  }
+  if (p === '/yt/revoke') return json(res, 200, {});
+  if (p === '/yt/api/channels') {
+    if (!authed()) return json(res, 401, { error: { message: 'unauthorized' } });
+    return json(res, 200, { items: [{ id: 'UCmock', snippet: { title: 'قناة تجريبية', thumbnails: { default: { url: '' } } } }] });
+  }
+  if (p === '/yt/upload/videos' && req.method === 'POST') {
+    if (!authed()) return json(res, 401, { error: { message: 'unauthorized' } });
+    const meta = JSON.parse((await readBody(req)).toString('utf8'));
+    const sid = crypto.randomBytes(5).toString('hex');
+    yt.sessions.set(sid, { meta, total: Number(req.headers['x-upload-content-length']), got: [] });
+    res.writeHead(200, { Location: `http://127.0.0.1:${PORT}/yt/session/${sid}` });
+    return res.end();
+  }
+  const sm = p.match(/^\/yt\/session\/(\w+)$/);
+  if (sm && req.method === 'PUT') {
+    const s = yt.sessions.get(sm[1]);
+    if (!s || !authed()) return json(res, 404, { error: { message: 'no session' } });
+    const m = String(req.headers['content-range']).match(/bytes (\d+)-(\d+)\/(\d+)/);
+    const body = await readBody(req);
+    if (!m || Number(m[2]) - Number(m[1]) + 1 !== body.length) return json(res, 400, { error: { message: 'bad range' } });
+    s.got.push(body);
+    const have = s.got.reduce((a, b) => a + b.length, 0);
+    if (have < s.total) { res.writeHead(308, { Range: `bytes=0-${have - 1}` }); return res.end(); }
+    yt.last = { meta: s.meta, bytes: have, chunks: s.got.length, mp4: Buffer.concat(s.got).subarray(4, 8).toString() };
+    return json(res, 200, { id: 'mockVid' + sm[1], status: { privacyStatus: s.meta.status.privacyStatus }, snippet: s.meta.snippet });
+  }
+  if (p === '/yt/_last') return json(res, 200, yt.last);
+  return json(res, 404, { error: 'mock yt: ' + p });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
@@ -191,6 +248,8 @@ const server = http.createServer(async (req, res) => {
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
     }
+    // ---- YouTube (OAuth + Data API v3) ----------------------------------------------
+    if (url.pathname.startsWith('/yt/')) return youtubeMock(req, res, url);
     if (req.method === 'GET' && url.pathname === '/v1/models') {
       return json(res, 200, { object: 'list', data: ['auto', 'mock-llm', 'mock-llm-mini'].map((id) => ({ id, object: 'model' })) });
     }

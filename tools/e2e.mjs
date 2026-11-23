@@ -40,7 +40,8 @@ async function api(p, opts = {}) {
 async function waitFor(desc, fn, timeoutMs = 120000) {
   const t0 = Date.now();
   for (;;) {
-    const v = await fn().catch(() => null);
+    // network hiccups are retried; a fatal error (failed stage) stops the wait at once
+    const v = await fn().catch((e) => { if (e.fatal) throw e; return null; });
     if (v) return v;
     if (Date.now() - t0 > timeoutMs) throw new Error(`timeout waiting for ${desc}`);
     await sleep(500);
@@ -54,10 +55,12 @@ async function main() {
   start('node', ['server/index.mjs'], {
     RS_PORT: String(PORT), RS_DATA_DIR: DATA,
     LLM_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`, ELEVENLABS_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`, DEEPGRAM_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
-    LLM_API_KEY: '', ELEVENLABS_API_KEY: '', DEEPGRAM_API_KEY: '', ELEVENLABS_VOICE_ID: '',
+    LLM_API_KEY: '', ELEVENLABS_API_KEY: '', DEEPGRAM_API_KEY: '', ELEVENLABS_VOICE_ID: '', YOUTUBE_CLIENT_ID: '', YOUTUBE_CLIENT_SECRET: '',
+    YT_AUTH_URL: `http://127.0.0.1:${MOCK_PORT}/yt/auth`, YT_TOKEN_URL: `http://127.0.0.1:${MOCK_PORT}/yt/token`, YT_REVOKE_URL: `http://127.0.0.1:${MOCK_PORT}/yt/revoke`,
+    YT_API_URL: `http://127.0.0.1:${MOCK_PORT}/yt/api`, YT_UPLOAD_URL: `http://127.0.0.1:${MOCK_PORT}/yt/upload`, YT_CHUNK_BYTES: String(512 * 1024),
   }, 'app');
-  await waitFor('server', () => api('/api/health'), 20000);
-  await waitFor('mock', () => fetch(`http://127.0.0.1:${MOCK_PORT}/v1/voices`, { headers: { 'xi-api-key': 'x' } }).then((r) => r.ok), 20000);
+  await waitFor('server', () => api('/api/health'), 90000);
+  await waitFor('mock', () => fetch(`http://127.0.0.1:${MOCK_PORT}/v1/voices`, { headers: { 'xi-api-key': 'x' } }).then((r) => r.ok), 90000);
   const h = await api('/api/health');
   check('server up, ffmpeg found', !!h.ffmpeg, h.ffmpeg?.slice(0, 40));
 
@@ -105,7 +108,7 @@ async function main() {
   check('series question present', /عارف ليه؟/.test(proj.script.text));
   await api(`/api/projects/${p.id}/stages/script/approve`, { method: 'POST' });
   const t0 = Date.now();
-  await waitFor('render', async () => { const s = await stageOf(p.id); if (Object.values(s).some((x) => x.status === 'error')) throw new Error(JSON.stringify(s)); return s.render.status === 'done'; }, 10 * 60000);
+  await waitFor('render', async () => { const s = await stageOf(p.id); if (Object.values(s).some((x) => x.status === 'error')) throw Object.assign(new Error('stage failed: ' + JSON.stringify(Object.fromEntries(Object.entries(s).map(([k, x]) => [k, x.error || x.status])))), { fatal: true }); return s.render.status === 'done'; }, 10 * 60000);
   proj = await api(`/api/projects/${p.id}`);
   sseCtl.abort();
   check('all 5 stages done', Object.values(proj.stages).every((s) => s.status === 'done'), `render took ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -163,11 +166,35 @@ async function main() {
   fs.copyFileSync(video, path.join(ROOT, 'output', `${OUT_NAME}.mp4`));
   fs.copyFileSync(path.join(dir, 'contact.jpg'), path.join(ROOT, 'output', `${OUT_NAME}-contact.jpg`));
 
+  // --- YouTube: link (OAuth + PKCE, mocked consent) → publish → unlink -------------------
+  const ytBefore = await api('/api/youtube');
+  check('youtube: not configured/linked by default', !ytBefore.configured && !ytBefore.linked);
+  await api('/api/settings', { method: 'PUT', body: JSON.stringify({ youtube: { clientId: 'mock-client.apps.googleusercontent.com', clientSecret: 'GOCSPX-mock-SECRET-7777', privacy: 'unlisted' } }) });
+  check('youtube: client secret masked like the other keys', !JSON.stringify(await api('/api/settings')).includes('SECRET-7777'));
+  let hop = await fetch(`${BASE}/oauth/youtube/start`, { redirect: 'manual' });
+  hop = await fetch(hop.headers.get('location'), { redirect: 'manual' }); // Google consent (mock) → redirect back
+  const cb = await fetch(hop.headers.get('location'), { redirect: 'manual' });
+  const cbHtml = await cb.text();
+  const ytNow = await api('/api/youtube');
+  check('youtube: channel linked through the OAuth callback', cb.status === 200 && ytNow.linked && ytNow.channel?.title === 'قناة تجريبية', ytNow.channel?.title);
+  check('youtube: tokens never sent to the browser', !/mock-refresh|mock-access/.test(JSON.stringify(ytNow) + cbHtml));
+  const replay = await fetch(hop.headers.get('location'), { redirect: 'manual' });
+  check('youtube: OAuth state is single-use (replay refused)', replay.status === 400);
+  await api(`/api/projects/${p.id}/publish`, { method: 'POST', body: '{}' });
+  await waitFor('publish', async () => { const x = (await api(`/api/projects/${p.id}`)).publish; if (x.status === 'error') throw Object.assign(new Error(x.error), { fatal: true }); return x.status === 'done'; }, 60000);
+  const pub = (await api(`/api/projects/${p.id}`)).publish;
+  const last = await (await fetch(`http://127.0.0.1:${MOCK_PORT}/yt/_last`)).json();
+  check('youtube: video uploaded (resumable, chunked) with title/#shorts/privacy', pub.url?.startsWith('https://youtu.be/') && last.bytes === fs.statSync(video).size && last.chunks > 1
+    && last.meta.snippet.title.includes(proj.script.title) && last.meta.snippet.title.includes('#shorts') && last.meta.status.privacyStatus === 'unlisted' && last.mp4 === 'ftyp',
+    `${pub.url} · ${last.chunks} chunks · ${last.meta.status.privacyStatus}`);
+  await api('/api/youtube', { method: 'DELETE' });
+  check('youtube: unlink removes the stored token', !(await api('/api/youtube')).linked);
+
   // --- project 2: uploaded voice-over → Deepgram timing, approvals, cancel ---------------
   const p2 = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 10, voiceMode: 'upload', autostart: false, approvals: { script: 'auto', voice: 'auto', timing: 'wait', storyboard: 'auto', render: 'auto' } }) });
   await fetch(`${BASE}/api/projects/${p2.id}/upload`, { method: 'POST', headers: { Origin: BASE, 'Content-Type': 'audio/mpeg', 'X-Filename': 'my-voice.mp3' }, body: fs.readFileSync(path.join(dir, 'voice.mp3')) });
   await api(`/api/projects/${p2.id}/run`, { method: 'POST' });
-  await waitFor('p2 timing review', async () => { const s = await stageOf(p2.id); if (Object.values(s).some((x) => x.status === 'error')) throw new Error(JSON.stringify(s)); return s.timing.status === 'review'; }, 60000);
+  await waitFor('p2 timing review', async () => { const s = await stageOf(p2.id); if (Object.values(s).some((x) => x.status === 'error')) throw Object.assign(new Error('stage failed: ' + JSON.stringify(Object.fromEntries(Object.entries(s).map(([k, x]) => [k, x.error || x.status])))), { fatal: true }); return s.timing.status === 'review'; }, 60000);
   const q = await api(`/api/projects/${p2.id}`);
   const diffs = q.words.map((w, i) => Math.abs(w.start - proj.words[i].start));
   check('upload → Deepgram words aligned onto script spelling', q.words.length === proj.words.length && q.words.every((w, i) => w.text === proj.words[i].text), `${q.timing.weak} weak, match ${q.timing.matchAvg}`);

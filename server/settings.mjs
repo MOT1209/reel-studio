@@ -23,6 +23,7 @@ export const DEFAULTS = {
   llm: { baseUrl: 'http://127.0.0.1:31415/v1', apiKey: '', model: 'auto', temperature: 0.8 },
   elevenlabs: { baseUrl: 'https://api.elevenlabs.io', apiKey: '', voiceId: '', modelId: 'eleven_multilingual_v2' },
   deepgram: { baseUrl: 'https://api.deepgram.com', apiKey: '', model: 'nova-3', language: 'ar' },
+  youtube: { clientId: '', clientSecret: '', privacy: 'private', autoPublish: false, tags: 'علوم, shorts, science', categoryId: '27' },
   fontFolder: '',
   seriesTag: 'علوم في دقيقة',
   look: { theme: 'dark', colors: {}, grid: true },
@@ -54,11 +55,11 @@ export function resolvePalette(look = getSettings().look) {
 export const STAGE_NAMES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 
 // Secret fields: [section, field, envVar]
-const SECRETS = [['llm', 'apiKey', 'LLM_API_KEY'], ['elevenlabs', 'apiKey', 'ELEVENLABS_API_KEY'], ['deepgram', 'apiKey', 'DEEPGRAM_API_KEY']];
+const SECRETS = [['llm', 'apiKey', 'LLM_API_KEY'], ['elevenlabs', 'apiKey', 'ELEVENLABS_API_KEY'], ['deepgram', 'apiKey', 'DEEPGRAM_API_KEY'], ['youtube', 'clientSecret', 'YOUTUBE_CLIENT_SECRET']];
 // Base URLs: env always wins (lets tools/mock-apis.mjs and tests redirect everything).
 const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', 'ELEVENLABS_BASE_URL'], ['deepgram', 'baseUrl', 'DEEPGRAM_BASE_URL']];
 // Other plain fields with env fallbacks (settings.json wins when set).
-const PLAIN_ENV = [['llm', 'model', 'LLM_MODEL'], ['elevenlabs', 'voiceId', 'ELEVENLABS_VOICE_ID'], ['elevenlabs', 'modelId', 'ELEVENLABS_MODEL_ID'], ['deepgram', 'model', 'DEEPGRAM_MODEL']];
+const PLAIN_ENV = [['llm', 'model', 'LLM_MODEL'], ['elevenlabs', 'voiceId', 'ELEVENLABS_VOICE_ID'], ['elevenlabs', 'modelId', 'ELEVENLABS_MODEL_ID'], ['deepgram', 'model', 'DEEPGRAM_MODEL'], ['youtube', 'clientId', 'YOUTUBE_CLIENT_ID']];
 
 function readStored() {
   try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return {}; }
@@ -103,7 +104,7 @@ export function getPublicSettings() {
 export function updateSettings(patch) {
   const stored = readStored();
   const next = structuredClone(stored);
-  for (const sec of ['llm', 'elevenlabs', 'deepgram']) {
+  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube']) {
     if (!patch?.[sec] || typeof patch[sec] !== 'object') continue;
     next[sec] = next[sec] || {};
     for (const [f, v] of Object.entries(patch[sec])) {
@@ -113,6 +114,10 @@ export function updateSettings(patch) {
         if (typeof v !== 'string' || v.startsWith('••••')) continue; // unchanged
         if (v.trim() === '') { delete next[sec][f]; continue; } // cleared
         next[sec][f] = v.trim();
+      } else if (f === 'autoPublish') {
+        next[sec][f] = v === true || v === 'true';
+      } else if (f === 'privacy') {
+        if (['private', 'unlisted', 'public'].includes(v)) next[sec][f] = v;
       } else if (f === 'temperature') {
         const t = Number(v); if (Number.isFinite(t)) next[sec][f] = Math.max(0, Math.min(2, t));
       } else if (typeof v === 'string') next[sec][f] = v.trim();
