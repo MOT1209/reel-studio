@@ -25,7 +25,33 @@ export const DEFAULTS = {
   deepgram: { baseUrl: 'https://api.deepgram.com', apiKey: '', model: 'nova-3', language: 'ar' },
   fontFolder: '',
   seriesTag: 'علوم في دقيقة',
+  look: { theme: 'dark', colors: {}, grid: true },
+  audio: { sfxVolume: 0.6, whoosh: true, tick: true },
+  render: { fps: 30 },
+  approvals: { script: 'wait', voice: 'auto', timing: 'auto', storyboard: 'auto', render: 'auto' },
 };
+
+// ---- look: theme presets (render.js draws with whatever palette it receives) ----------------
+export const THEMES = {
+  dark: { // dark technical illustration (default series look)
+    bg: '#0C1014', card: '#161C22', elev: '#202830', text: '#F4F3EE', sec: '#9AA5AE',
+    accent: '#27B8C7', blue: '#5978FF', success: '#36C98F', warning: '#F28A30',
+  },
+  paper: { // flat illustration on cream paper (red/orange for what matters, blue for imaging)
+    bg: '#F2E9D8', card: '#FBF6EC', elev: '#EDE3D1', text: '#1F1B16', sec: '#7A7062',
+    accent: '#E4572E', blue: '#2F6DB5', success: '#2E9E6B', warning: '#D9822B',
+  },
+};
+export const COLOR_KEYS = Object.keys(THEMES.dark);
+const HEX = /^#[0-9a-fA-F]{6}$/;
+/** Effective palette: preset + user overrides. */
+export function resolvePalette(look = getSettings().look) {
+  const base = THEMES[look.theme] || THEMES.dark;
+  const out = { ...base };
+  for (const k of COLOR_KEYS) if (HEX.test(look.colors?.[k] || '')) out[k] = look.colors[k];
+  return out;
+}
+export const STAGE_NAMES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 
 // Secret fields: [section, field, envVar]
 const SECRETS = [['llm', 'apiKey', 'LLM_API_KEY'], ['elevenlabs', 'apiKey', 'ELEVENLABS_API_KEY'], ['deepgram', 'apiKey', 'DEEPGRAM_API_KEY']];
@@ -70,7 +96,7 @@ export function getPublicSettings() {
     s[sec][f] = mask(s[sec][f]);
   }
   for (const [sec, f, env] of URL_ENV) if (process.env[env]) source[`${sec}.${f}`] = 'env (locked)';
-  return { ...s, _source: source };
+  return { ...s, _source: source, _themes: THEMES, _palette: resolvePalette(s.look) };
 }
 
 /** Partial update from the Settings screen. Masked/empty secrets mean "keep". */
@@ -94,6 +120,26 @@ export function updateSettings(patch) {
   }
   if (typeof patch?.fontFolder === 'string') next.fontFolder = patch.fontFolder.trim();
   if (typeof patch?.seriesTag === 'string') next.seriesTag = patch.seriesTag.trim().slice(0, 40);
+  if (patch?.look && typeof patch.look === 'object') {
+    const L = (next.look = { ...(next.look || {}) });
+    if (THEMES[patch.look.theme]) L.theme = patch.look.theme;
+    if (typeof patch.look.grid === 'boolean') L.grid = patch.look.grid;
+    if (patch.look.colors && typeof patch.look.colors === 'object') {
+      L.colors = {};
+      for (const k of COLOR_KEYS) if (HEX.test(patch.look.colors[k] || '')) L.colors[k] = patch.look.colors[k].toUpperCase();
+    }
+  }
+  if (patch?.audio && typeof patch.audio === 'object') {
+    const A = (next.audio = { ...(next.audio || {}) });
+    const v = Number(patch.audio.sfxVolume);
+    if (Number.isFinite(v)) A.sfxVolume = Math.max(0, Math.min(1, v));
+    for (const k of ['whoosh', 'tick']) if (typeof patch.audio[k] === 'boolean') A[k] = patch.audio[k];
+  }
+  if (patch?.render && [24, 30, 60].includes(Number(patch.render.fps))) next.render = { ...(next.render || {}), fps: Number(patch.render.fps) };
+  if (patch?.approvals && typeof patch.approvals === 'object') {
+    next.approvals = { ...DEFAULTS.approvals, ...(next.approvals || {}) };
+    for (const s of STAGE_NAMES) if (patch.approvals[s]) next.approvals[s] = patch.approvals[s] === 'wait' ? 'wait' : 'auto';
+  }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
   return getPublicSettings();

@@ -15,6 +15,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const TOPIC = process.env.E2E_TOPIC || 'ليه السما لونها أزرق؟';
+const OUT_NAME = `test-reel-10s${process.env.E2E_THEME && process.env.E2E_THEME !== 'dark' ? '-' + process.env.E2E_THEME : ''}`;
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? '✔' : '✖'} ${name}${detail ? ' — ' + detail : ''}`); };
@@ -70,6 +71,22 @@ async function main() {
   const xo = await fetch(BASE + '/api/settings', { method: 'PUT', headers: { Origin: 'http://evil.example', 'Content-Type': 'application/json' }, body: '{}' });
   check('cross-origin writes are refused', xo.status === 403);
 
+  // --- connection tests, style, auto length -------------------------------------------
+  const tests = {};
+  for (const svc of ['llm', 'elevenlabs', 'deepgram']) tests[svc] = await api(`/api/test/${svc}`, { method: 'POST', body: '{}' });
+  check('«اختبار الاتصال» works for LLM / ElevenLabs / Deepgram', Object.values(tests).every((r) => r.ok), Object.values(tests).map((r) => r.message).join(' | '));
+  const badKey = await api('/api/test/deepgram', { method: 'POST', body: JSON.stringify({ baseUrl: 'http://127.0.0.1:1' }) });
+  check('connection test reports a dead endpoint instead of crashing', badKey.ok === false, badKey.message.slice(0, 60));
+  const style = await api('/api/style');
+  check('style guide + reference scripts readable from the app', style.style.includes('عارف ليه') && style.examples.length >= 1, `${style.examples.length} example(s)`);
+  const pa = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 'auto', approvals: { script: 'wait' } }) });
+  await waitFor('auto script review', async () => (await stageOf(pa.id)).script.status === 'review', 60000);
+  const pav = await api(`/api/projects/${pa.id}`);
+  check('length "auto": the LLM picks the length', pav.seconds === 'auto' && pav.script.words > 30 && pav.stages.script.log.some((l) => /length: auto/.test(l)), `${pav.script.words} words ≈ ${(pav.script.words / 2.6).toFixed(0)} s`);
+  await api(`/api/projects/${pa.id}`, { method: 'DELETE' });
+  // paper theme for the main reel (the renderer must take its palette from settings)
+  await api('/api/settings', { method: 'PUT', body: JSON.stringify({ look: { theme: process.env.E2E_THEME || 'dark' } }) });
+
   // --- project 1: TTS, wait for script approval, then full auto ----------------------
   const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 10, approvals: { script: 'wait' } }) });
   // SSE: collect event types while it runs
@@ -122,7 +139,7 @@ async function main() {
   await page.goto(`${BASE}/render.html?project=${p.id}`);
   await page.waitForFunction(() => window.__ready || window.__error);
   const syncRes = await page.evaluate(() => {
-    const W = window.renderData.words, FPS = 30, bad = [];
+    const W = window.renderData.words, FPS = window.renderData.fps, bad = [];
     let maxLag = 0;
     for (const w of W) {
       const first = Math.ceil(w.start * FPS - 1e-9); // first frame index at/after onset
@@ -143,11 +160,11 @@ async function main() {
   check('voice ↔ word timing: audible onsets match caption onsets', med < 0.04 && mx < 0.1, `median ${(med * 1000).toFixed(0)} ms, max ${(mx * 1000).toFixed(0)} ms`);
 
   fs.mkdirSync(path.join(ROOT, 'output'), { recursive: true });
-  fs.copyFileSync(video, path.join(ROOT, 'output', 'test-reel-10s.mp4'));
-  fs.copyFileSync(path.join(dir, 'contact.jpg'), path.join(ROOT, 'output', 'test-reel-10s-contact.jpg'));
+  fs.copyFileSync(video, path.join(ROOT, 'output', `${OUT_NAME}.mp4`));
+  fs.copyFileSync(path.join(dir, 'contact.jpg'), path.join(ROOT, 'output', `${OUT_NAME}-contact.jpg`));
 
   // --- project 2: uploaded voice-over → Deepgram timing, approvals, cancel ---------------
-  const p2 = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 10, voiceMode: 'upload', autostart: false, approvals: { timing: 'wait' } }) });
+  const p2 = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 10, voiceMode: 'upload', autostart: false, approvals: { script: 'auto', voice: 'auto', timing: 'wait', storyboard: 'auto', render: 'auto' } }) });
   await fetch(`${BASE}/api/projects/${p2.id}/upload`, { method: 'POST', headers: { Origin: BASE, 'Content-Type': 'audio/mpeg', 'X-Filename': 'my-voice.mp3' }, body: fs.readFileSync(path.join(dir, 'voice.mp3')) });
   await api(`/api/projects/${p2.id}/run`, { method: 'POST' });
   await waitFor('p2 timing review', async () => { const s = await stageOf(p2.id); if (Object.values(s).some((x) => x.status === 'error')) throw new Error(JSON.stringify(s)); return s.timing.status === 'review'; }, 60000);
@@ -167,7 +184,7 @@ async function main() {
   await api(`/api/projects/${p2.id}`, { method: 'DELETE' });
 
   const failed = results.filter((r) => !r.ok);
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed. Reel: output/test-reel-10s.mp4`);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed. Reel: output/${OUT_NAME}.mp4`);
   cleanup();
   process.exit(failed.length ? 1 : 0);
 }

@@ -4,14 +4,35 @@ import path from 'node:path';
 import { ROOT } from './settings.mjs';
 
 export const WORDS_PER_SECOND = 2.6;
-export const LENGTHS = [10, 20, 30, 45, 60];
+export const LENGTHS = [10, 20, 30, 45, 60, 'auto'];
+export const STYLE_FILE = path.join(ROOT, 'references', 'script-style.md');
+export const EXAMPLES_DIR = path.join(ROOT, 'references', 'examples');
+
+/** Reference scripts the user dropped in references/examples (*.md / *.txt), newest style first. */
+export function readExamples(maxChars = 12000) {
+  if (!fs.existsSync(EXAMPLES_DIR)) return [];
+  const out = [];
+  let total = 0;
+  for (const f of fs.readdirSync(EXAMPLES_DIR).filter((x) => /\.(md|txt)$/i.test(x) && !/^readme/i.test(x)).sort()) {
+    const text = fs.readFileSync(path.join(EXAMPLES_DIR, f), 'utf8').trim();
+    if (!text || total + text.length > maxChars) continue;
+    out.push({ file: f, text }); total += text.length;
+  }
+  return out;
+}
 
 export function scriptMessages(topic, seconds) {
-  const style = fs.readFileSync(path.join(ROOT, 'references', 'script-style.md'), 'utf8');
-  const target = Math.round(seconds * WORDS_PER_SECOND);
+  const style = fs.readFileSync(STYLE_FILE, 'utf8');
+  const examples = readExamples();
+  const ex = examples.length
+    ? `\n\n## Reference scripts from this series (match their voice, rhythm and structure — never copy them)\n${examples.map((e, i) => `### Example ${i + 1}\n${e.text}`).join('\n\n')}`
+    : '';
+  const length = seconds === 'auto'
+    ? `LENGTH_SECONDS: auto — choose what the topic needs, between 20 and 60 s\nTARGET_WORDS: auto (≈ 2.6 words per second of your chosen length; usually 50–130)`
+    : `LENGTH_SECONDS: ${seconds}\nTARGET_WORDS: ${Math.round(seconds * WORDS_PER_SECOND)} (stay within ±10%; count only the SCRIPT words)`;
   return [
-    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}` },
-    { role: 'user', content: `TOPIC: ${topic}\nLENGTH_SECONDS: ${seconds}\nTARGET_WORDS: ${target} (stay within ±10%; count only the SCRIPT words)\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
+    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}` },
+    { role: 'user', content: `TOPIC: ${topic}\n${length}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
   ];
 }
 

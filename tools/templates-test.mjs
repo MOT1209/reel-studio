@@ -1,5 +1,5 @@
 // One test project per storyboard template (offline mocks), then a contact sheet of frames for each:
-//   node tools/templates-test.mjs [template …] [--render]
+//   node tools/templates-test.mjs [template …] [--render] [--theme=paper]
 // Sheets land in output/templates/<template>.jpg. With --render each project is also rendered to MP4.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -44,6 +44,9 @@ fs.mkdirSync(OUT, { recursive: true });
 start(['tools/mock-apis.mjs'], { MOCK_PORT: String(MOCK_PORT) });
 start(['server/index.mjs'], { RS_PORT: String(PORT), RS_DATA_DIR: DATA, LLM_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`, ELEVENLABS_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`, DEEPGRAM_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`, ELEVENLABS_API_KEY: 'mock', ELEVENLABS_VOICE_ID: 'mock-voice-eg', DEEPGRAM_API_KEY: 'mock', LLM_API_KEY: '' });
 for (let i = 0; i < 60; i++) { try { await fetch(BASE + '/api/health'); break; } catch { await sleep(300); } }
+const theme = (args.find((a) => a.startsWith('--theme=')) || '').slice(8);
+if (theme) await api('/api/settings', { method: 'PUT', body: JSON.stringify({ look: { theme } }) });
+const suffix = theme ? `-${theme}` : '';
 
 const { chromium } = await import('playwright');
 const browser = await chromium.launch({ args: ['--disable-gpu'] });
@@ -69,7 +72,7 @@ for (const template of list) {
     await page.screenshot({ path: f, type: 'jpeg', quality: 85 });
     frames.push(f);
   }
-  const sheet = path.join(OUT, `${template}.jpg`);
+  const sheet = path.join(OUT, `${template}${suffix}.jpg`);
   execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', '1', '-i', path.join(dir, 'f%02d.jpg'), '-vf', 'scale=270:480,tile=6x2:padding=6:color=0x0C1014', '-frames:v', '1', sheet]);
   if (fullRender) fs.copyFileSync(path.join(DATA, 'projects', p.id, 'video.mp4'), path.join(OUT, `${template}.mp4`));
   console.log(`✔ ${template.padEnd(9)} ${proj.storyboard.scenes.length} scenes · ${dur.toFixed(1)} s → ${path.relative(ROOT, sheet)}`);

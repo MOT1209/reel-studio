@@ -67,13 +67,14 @@ function tick() {
 }
 
 /** Writes a mono 48 kHz 16-bit WAV with whooshes on scene cuts and soft ticks on pops. */
-export function writeSfx(file, duration, cuts, ticks) {
+export function writeSfx(file, duration, cuts, ticks, volume = 0.6) {
+  const vol = Math.max(0, Math.min(1, Number(volume))) / 0.6; // 0.6 = the reference mix level
   const n = Math.ceil(duration * SR), buf = new Float32Array(n);
   const add = (sig, at, gain) => { const o = Math.round(at * SR); for (let i = 0; i < sig.length; i++) { const k = o + i; if (k >= 0 && k < n) buf[k] += sig[i] * gain; } };
-  cuts.forEach((t, i) => add(whoosh(i + 7), t - 0.36, 0.55)); // envelope peaks ~0.36 s in → lands on the cut
+  cuts.forEach((t, i) => add(whoosh(i + 7), t - 0.36, 0.55 * vol)); // envelope peaks ~0.36 s in → lands on the cut
   const tk = tick();
   let lastTick = -1;
-  for (const t of ticks) { if (t - lastTick < 0.25) continue; add(tk, t, 0.35); lastTick = t; }
+  for (const t of ticks) { if (t - lastTick < 0.25) continue; add(tk, t, 0.35 * vol); lastTick = t; }
   const wav = Buffer.alloc(44 + n * 2);
   wav.write('RIFF', 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write('WAVE', 8); wav.write('fmt ', 12);
   wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(SR, 24);
@@ -146,18 +147,18 @@ async function captureFrame(page, t) {
   return Buffer.from(b64, 'base64');
 }
 
-export async function renderFrames({ url, out, duration, signal, log = () => {}, onFrame = () => {} }) {
+export async function renderFrames({ url, out, duration, fps: FPS_ = FPS, signal, log = () => {}, onFrame = () => {} }) {
   const browser = await launchBrowser(log);
   let ff;
   try {
     const errors = [];
-    const total = Math.ceil(duration * FPS);
+    const total = Math.ceil(duration * FPS_);
     const nWorkers = Math.min(WORKERS, Math.max(1, Math.floor(total / 30)));
     const pages = await Promise.all(Array.from({ length: nWorkers }, () => openWorker(browser, url, errors)));
     log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''}`);
-    ff = spawn(FFMPEG, ['-hide_banner', '-y', '-f', 'image2pipe', '-framerate', String(FPS), '-c:v', 'mjpeg', '-i', '-',
+    ff = spawn(FFMPEG, ['-hide_banner', '-y', '-f', 'image2pipe', '-framerate', String(FPS_), '-c:v', 'mjpeg', '-i', '-',
       '-vf', 'scale=in_range=full:out_range=tv,format=yuv420p',
-      '-c:v', 'libx264', '-preset', 'faster', '-crf', '18', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(FPS), '-movflags', '+faststart', out], { windowsHide: true });
+      '-c:v', 'libx264', '-preset', 'faster', '-crf', '18', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(FPS_), '-movflags', '+faststart', out], { windowsHide: true });
     let ffErr = '';
     ff.stderr.on('data', (d) => { ffErr = (ffErr + d).slice(-4000); });
     const ffDone = new Promise((res, rej) => { ff.on('close', (c) => (c === 0 ? res() : rej(new Error(`ffmpeg exited ${c}: ${ffErr}`)))); ff.on('error', rej); });
@@ -173,7 +174,7 @@ export async function renderFrames({ url, out, duration, signal, log = () => {},
         const i = next++;
         if (i >= total) return;
         while (i - written > nWorkers * 4) await new Promise((r) => setTimeout(r, 5)); // bounded look-ahead
-        ready.set(i, await captureFrame(page, i / FPS));
+        ready.set(i, await captureFrame(page, i / FPS_));
         wake?.();
       }
     };

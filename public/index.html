@@ -24,6 +24,7 @@
         <select id="seconds">
           <option value="10">10 ثواني</option><option value="20">20 ثانية</option><option value="30" selected>30 ثانية</option>
           <option value="45">45 ثانية</option><option value="60">60 ثانية</option>
+          <option value="auto">أوتو — الـ LLM يحدد</option>
         </select>
       </label>
       <fieldset>
@@ -34,6 +35,7 @@
       </fieldset>
       <fieldset>
         <legend>استنى موافقتي بعد:</legend>
+        <div class="tools"><button type="button" class="small" data-all="auto">كله تلقائي</button><button type="button" class="small" data-all="wait">كله بموافقتي</button></div>
         <div class="approvals" id="newApprovals"></div>
       </fieldset>
       <button type="submit" class="primary">ابدأ ▶</button>
@@ -53,43 +55,102 @@
 <dialog id="settings">
   <form method="dialog" id="settingsForm">
     <h2>الإعدادات</h2>
-    <p class="hint">المفاتيح بتتحفظ في <code>data/settings.json</code> على جهازك بس، وبتظهر هنا مخفية (آخر 4 حروف). اتركها فاضية عشان تفضل زي ما هي.</p>
-    <section>
-      <h4>LLM — FreeLLMAPI أو أي API متوافق مع OpenAI</h4>
-      <label>Base URL <input name="llm.baseUrl" dir="ltr"></label>
-      <label>API key <input name="llm.apiKey" dir="ltr" autocomplete="off"></label>
-      <div class="two">
-        <label>Model <input name="llm.model" dir="ltr"></label>
-        <label>Temperature <input name="llm.temperature" type="number" step="0.1" min="0" max="2" dir="ltr"></label>
-      </div>
-      <p class="hint">FreeLLMAPI: <code dir="ltr">http://127.0.0.1:31415/v1</code> بموديل <code>auto</code> — <a href="https://github.com/tashfeenahmed/freellmapi" target="_blank" rel="noopener">github.com/tashfeenahmed/freellmapi</a></p>
-    </section>
-    <section>
-      <h4>ElevenLabs — الصوت</h4>
-      <label>API key <input name="elevenlabs.apiKey" dir="ltr" autocomplete="off"></label>
-      <div class="two">
-        <label>Voice
-          <select name="elevenlabs.voiceId" id="voiceSelect" dir="ltr"></select>
-        </label>
-        <label>Model <input name="elevenlabs.modelId" dir="ltr"></label>
-      </div>
-      <button type="button" id="btnVoices" class="ghost">تحميل الأصوات</button> <span id="voicesMsg" class="hint"></span>
-      <p class="hint">مفتاح من <a href="https://elevenlabs.io/app/developers/" target="_blank" rel="noopener">elevenlabs.io/app/developers</a></p>
-    </section>
-    <section>
-      <h4>Deepgram — توقيت الكلام للملفات المرفوعة</h4>
-      <label>API key <input name="deepgram.apiKey" dir="ltr" autocomplete="off"></label>
-      <div class="two">
-        <label>Model <input name="deepgram.model" dir="ltr"></label>
-        <label>Language <input name="deepgram.language" dir="ltr"></label>
-      </div>
-      <p class="hint">مفتاح من <a href="https://console.deepgram.com/" target="_blank" rel="noopener">console.deepgram.com</a></p>
-    </section>
-    <section>
-      <h4>الشكل</h4>
-      <label>فولدر الخط (اختياري — فيه ملفات .ttf/.otf عربي) <input name="fontFolder" dir="ltr" placeholder="C:\Fonts\MyArabicFont"></label>
+    <nav class="tabs" id="setTabs">
+      <button type="button" data-tab="keys" class="on">الاتصالات</button>
+      <button type="button" data-tab="style">ستايل السكريبت</button>
+      <button type="button" data-tab="look">الشكل والألوان</button>
+      <button type="button" data-tab="render">الصوت والرندر</button>
+      <button type="button" data-tab="approvals">الموافقات</button>
+    </nav>
+
+    <div class="tab" data-tab="keys">
+      <p class="hint">المفاتيح بتتحفظ في <code>data/settings.json</code> على جهازك بس، وبتظهر هنا مخفية (آخر 4 حروف). سيبها فاضية عشان تفضل زي ما هي.</p>
+      <section>
+        <h4>LLM — FreeLLMAPI أو أي API متوافق مع OpenAI</h4>
+        <label>Base URL <input name="llm.baseUrl" dir="ltr"></label>
+        <label>API key (في FreeLLMAPI: Keys → Unified API key) <input name="llm.apiKey" dir="ltr" autocomplete="off"></label>
+        <div class="two">
+          <label>Model <input name="llm.model" dir="ltr"></label>
+          <label>Temperature <input name="llm.temperature" type="number" step="0.1" min="0" max="2" dir="ltr"></label>
+        </div>
+        <div class="tools">
+          <button type="button" data-test="llm">اختبار الاتصال</button>
+          <a class="btnlink" href="https://github.com/tashfeenahmed/freellmapi" target="_blank" rel="noopener">↗ نزّل FreeLLMAPI</a>
+          <span class="testres" id="test-llm"></span>
+        </div>
+      </section>
+      <section>
+        <h4>ElevenLabs — الصوت</h4>
+        <label>API key <input name="elevenlabs.apiKey" dir="ltr" autocomplete="off"></label>
+        <div class="two">
+          <label>Voice <select name="elevenlabs.voiceId" id="voiceSelect" dir="ltr"></select></label>
+          <label>Model <input name="elevenlabs.modelId" dir="ltr"></label>
+        </div>
+        <div class="tools">
+          <button type="button" id="btnVoices">تحميل الأصوات</button>
+          <button type="button" data-test="elevenlabs">اختبار الاتصال</button>
+          <a class="btnlink" href="https://elevenlabs.io/app/developers/" target="_blank" rel="noopener">↗ هات مفتاح</a>
+          <span class="testres" id="test-elevenlabs"></span>
+        </div>
+      </section>
+      <section>
+        <h4>Deepgram — توقيت الكلام للملفات المرفوعة</h4>
+        <label>API key <input name="deepgram.apiKey" dir="ltr" autocomplete="off"></label>
+        <div class="two">
+          <label>Model <input name="deepgram.model" dir="ltr"></label>
+          <label>Language <input name="deepgram.language" dir="ltr"></label>
+        </div>
+        <div class="tools">
+          <button type="button" data-test="deepgram">اختبار الاتصال</button>
+          <a class="btnlink" href="https://console.deepgram.com/" target="_blank" rel="noopener">↗ هات مفتاح</a>
+          <span class="testres" id="test-deepgram"></span>
+        </div>
+      </section>
+    </div>
+
+    <div class="tab" data-tab="style" hidden>
+      <p class="hint">ده دليل الأسلوب اللي بيتبعت للـ LLM مع كل سكريبت (<code>references/script-style.md</code>). بيتحفظ لما تدوس «حفظ».</p>
+      <textarea id="styleText" rows="14" dir="auto"></textarea>
+      <h4>سكريبتات مرجعية (<code>references/examples</code>)</h4>
+      <p class="hint">حط 4–5 سكريبتات من بتوعك، وكل سكريبت جديد هيطلع بنفس النبرة والإيقاع.</p>
+      <ul id="examplesList" class="examples"></ul>
+      <label>اسم السكريبت <input id="exName" placeholder="مثلاً: ليه بنعطس"></label>
+      <textarea id="exText" rows="6" dir="auto" placeholder="TITLE: …&#10;SCRIPT:&#10;…&#10;SOURCES:&#10;- …"></textarea>
+      <div class="tools"><button type="button" id="btnAddExample">＋ أضف سكريبت مرجعي</button></div>
+    </div>
+
+    <div class="tab" data-tab="look" hidden>
+      <label>الثيم
+        <select name="look.theme" id="themeSelect">
+          <option value="dark">غامق تقني (Dark technical)</option>
+          <option value="paper">ورق كريمي فلات (زي «طب ازاي»)</option>
+        </select>
+      </label>
+      <div class="colors" id="colorGrid"></div>
+      <div class="tools"><button type="button" id="btnResetColors" class="small">رجّع ألوان الثيم</button></div>
+      <label class="row"><input type="checkbox" name="look.grid"> شبكة خفيفة في الخلفية</label>
       <label>اسم السلسلة (يظهر فوق في الفيديو) <input name="seriesTag"></label>
-    </section>
+      <label>فولدر الخط (اختياري — ملفات .ttf/.otf عربي) <input name="fontFolder" dir="ltr" placeholder="C:\Fonts\MyArabicFont"></label>
+    </div>
+
+    <div class="tab" data-tab="render" hidden>
+      <label>مستوى المؤثرات الصوتية <span id="sfxVal" class="hint"></span>
+        <input type="range" name="audio.sfxVolume" min="0" max="1" step="0.05">
+      </label>
+      <label class="row"><input type="checkbox" name="audio.whoosh"> whoosh على انتقال المشاهد</label>
+      <label class="row"><input type="checkbox" name="audio.tick"> tick خفيف لما العناصر تظهر</label>
+      <p class="hint">الصوت كله بيتظبط على −14 LUFS في الآخر.</p>
+      <label>الفريمات في الثانية
+        <select name="render.fps"><option value="24">24</option><option value="30">30 (مقترح)</option><option value="60">60 (أبطأ في الرندر ×2)</option></select>
+      </label>
+    </div>
+
+    <div class="tab" data-tab="approvals" hidden>
+      <p class="hint">الموافقات الافتراضية لأي مشروع جديد. «موافقتي» = المرحلة تقف وتستنى تراجعها وتعدّلها.</p>
+      <div class="tools"><button type="button" class="small" data-defall="auto">كله تلقائي</button><button type="button" class="small" data-defall="wait">كله بموافقتي</button></div>
+      <div id="defApprovals" class="approvals"></div>
+    </div>
+
     <p class="err" id="settingsErr"></p>
     <div class="actions">
       <button value="cancel" class="ghost">إلغاء</button>

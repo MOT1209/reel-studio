@@ -42,7 +42,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (voiceMode === 'upload' && !file) { $('#newErr').textContent = 'اختار ملف الصوت الأول.'; return; }
   const approvals = Object.fromEntries([...document.querySelectorAll('[data-appr]')].map((c) => [c.dataset.appr, c.checked ? 'wait' : 'auto']));
   try {
-    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload' }) });
+    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload' }) });
     if (voiceMode === 'upload') {
       await api(`/api/projects/${p.id}/upload`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(file.name) } });
       await api(`/api/projects/${p.id}/run`, { method: 'POST' });
@@ -59,7 +59,7 @@ async function loadProjects() {
   $('#projects').innerHTML = projects.length ? projects.map((p) => `
     <li data-id="${esc(p.id)}" class="${current?.id === p.id ? 'active' : ''}">
       <div class="t">${esc(p.title || p.topic)}</div>
-      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${p.seconds} ث · ${esc(p.createdAt.slice(0, 10))}</div>
+      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${p.seconds === 'auto' ? 'أوتو' : p.seconds + ' ث'} · ${esc(p.createdAt.slice(0, 10))}</div>
     </li>`).join('') : '<li class="hint">لسه مفيش مشاريع.</li>';
   document.querySelectorAll('#projects li[data-id]').forEach((li) => li.addEventListener('click', () => openProject(li.dataset.id)));
 }
@@ -119,10 +119,12 @@ function render() {
     <div class="phead">
       <div>
         <h2>${esc(p.script?.title || p.topic)}</h2>
-        <div class="sub">${esc(p.topic)} · ${p.seconds} ثانية · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
+        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds + ' ثانية'} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
       </div>
       <div class="btns">
         ${running ? `<button id="btnCancel" class="danger">■ إلغاء (${STAGE_AR[running]})</button>` : `<button id="btnRun" class="primary">▶ كمّل</button>`}
+        <button class="ghost small" data-pall="auto" title="كل المراحل تكمّل لوحدها">كله تلقائي</button>
+        <button class="ghost small" data-pall="wait" title="كل مرحلة تستنى موافقتك">كله بموافقتي</button>
         <button id="btnDelete" class="ghost danger">حذف</button>
       </div>
     </div>
@@ -157,6 +159,8 @@ function render() {
     if (e.target.matches('input')) return;
     selStage = el.dataset.stage; userPicked = true; render();
   }));
+  document.querySelectorAll('[data-pall]').forEach((b) => b.addEventListener('click', () =>
+    act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(STAGES.map((s) => [s, b.dataset.pall]))) }))));
   document.querySelectorAll('[data-wait]').forEach((c) => c.addEventListener('change', () =>
     act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify({ [c.dataset.wait]: c.checked ? 'wait' : 'auto' }) }))));
   renderStagePanel();
@@ -247,46 +251,140 @@ function renderStagePanel() {
 
 // ---------- settings ----------
 const dlg = $('#settings');
-function setField(name, v) { const el = $(`[name="${name}"]`, dlg); if (!el) return; if (el.tagName === 'SELECT') { if (v && ![...el.options].some((o) => o.value === v)) el.add(new Option(v, v)); el.value = v || ''; } else el.value = v ?? ''; }
-async function openSettings() {
+const COLOR_AR = { bg: 'الخلفية', card: 'الكارت', elev: 'العناصر', text: 'النص', sec: 'نص ثانوي', accent: 'لون أساسي', blue: 'لون تاني', success: 'نجاح', warning: 'تحذير' };
+let S = null; // last loaded public settings
+const field = (name) => $(`[name="${name}"]`, dlg);
+function setField(name, v) {
+  const el = field(name); if (!el) return;
+  if (el.type === 'checkbox') el.checked = !!v;
+  else if (el.tagName === 'SELECT') { const sv = String(v ?? ''); if (sv && ![...el.options].some((o) => o.value === sv)) el.add(new Option(sv, sv)); el.value = sv; }
+  else el.value = v ?? '';
+}
+function showTab(name) {
+  dlg.querySelectorAll('#setTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  dlg.querySelectorAll('.tab').forEach((t) => { t.hidden = t.dataset.tab !== name; });
+}
+dlg.querySelectorAll('#setTabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+function renderColors(palette) {
+  $('#colorGrid').innerHTML = Object.entries(palette).map(([k, v]) =>
+    `<label><input type="color" data-color="${k}" value="${esc(v)}"> ${COLOR_AR[k] || k} <code>${esc(v)}</code></label>`).join('');
+  $('#colorGrid').querySelectorAll('input').forEach((i) => i.addEventListener('input', () => { i.parentElement.querySelector('code').textContent = i.value.toUpperCase(); }));
+}
+$('#themeSelect').addEventListener('change', () => renderColors(S._themes[$('#themeSelect').value]));
+$('#btnResetColors').addEventListener('click', () => renderColors(S._themes[$('#themeSelect').value]));
+function renderDefApprovals(ap) {
+  $('#defApprovals').innerHTML = STAGES.map((s) => `<label class="row"><input type="checkbox" data-defappr="${s}" ${ap[s] === 'wait' ? 'checked' : ''}> ${STAGE_AR[s]}</label>`).join('');
+}
+dlg.querySelectorAll('[data-defall]').forEach((b) => b.addEventListener('click', () => dlg.querySelectorAll('[data-defappr]').forEach((c) => { c.checked = b.dataset.defall === 'wait'; })));
+
+let styleLoaded = false;
+async function loadStyle() {
+  const st = await api('/api/style');
+  $('#styleText').value = st.style;
+  styleLoaded = true;
+  $('#examplesList').innerHTML = st.examples.length
+    ? st.examples.map((e) => `<li><b dir="ltr">${esc(e.file)}</b><span>${esc(e.text.split('\n').slice(0, 3).join(' · '))}</span><button type="button" class="small danger" data-delex="${esc(e.file)}">حذف</button></li>`).join('')
+    : '<li class="hint">لسه مفيش سكريبتات مرجعية.</li>';
+  $('#examplesList').querySelectorAll('[data-delex]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('تحذف السكريبت المرجعي ده؟')) return;
+    await act(() => api('/api/style/examples/' + encodeURIComponent(b.dataset.delex), { method: 'DELETE' }));
+    loadStyle();
+  }));
+}
+$('#btnAddExample').addEventListener('click', async () => {
+  const text = $('#exText').value.trim();
+  if (!text) return;
+  await act(() => api('/api/style/examples', { method: 'POST', body: JSON.stringify({ name: $('#exName').value, text }) }));
+  $('#exText').value = ''; $('#exName').value = '';
+  loadStyle();
+});
+
+async function openSettings(tab = 'keys') {
   $('#settingsErr').textContent = '';
-  const s = await api('/api/settings');
-  for (const sec of ['llm', 'elevenlabs', 'deepgram']) for (const [k, v] of Object.entries(s[sec])) {
-    if (k === 'apiKey') { const el = $(`[name="${sec}.apiKey"]`, dlg); el.value = ''; el.placeholder = v ? `${v}  (${s._source[`${sec}.apiKey`]})` : 'مش متسجل'; }
+  dlg.querySelectorAll('.testres').forEach((x) => { x.textContent = ''; x.className = 'testres'; });
+  S = await api('/api/settings');
+  for (const sec of ['llm', 'elevenlabs', 'deepgram']) for (const [k, v] of Object.entries(S[sec])) {
+    if (k === 'apiKey') { const el = field(sec + '.apiKey'); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.apiKey`]})` : 'مش متسجل'; }
     else setField(`${sec}.${k}`, v);
   }
-  for (const [k, src] of Object.entries(s._source)) if (src === 'env (locked)') { const el = $(`[name="${k}"]`, dlg); if (el) { el.disabled = true; el.title = 'محدد من متغير بيئة'; } }
-  setField('fontFolder', s.fontFolder); setField('seriesTag', s.seriesTag);
+  for (const [k, src] of Object.entries(S._source)) if (src === 'env (locked)') { const el = field(k); if (el) { el.disabled = true; el.title = 'محدد من متغير بيئة'; } }
+  setField('fontFolder', S.fontFolder); setField('seriesTag', S.seriesTag);
+  setField('look.theme', S.look.theme); setField('look.grid', S.look.grid !== false);
+  renderColors(S._palette);
+  setField('audio.sfxVolume', S.audio.sfxVolume); setField('audio.whoosh', S.audio.whoosh); setField('audio.tick', S.audio.tick);
+  $('#sfxVal').textContent = Math.round(S.audio.sfxVolume * 100) + '%';
+  setField('render.fps', S.render.fps);
+  renderDefApprovals(S.approvals);
+  styleLoaded = false;
+  showTab(tab);
   dlg.showModal();
+  loadStyle().catch((e) => { $('#settingsErr').textContent = e.message; });
 }
+field('audio.sfxVolume').addEventListener('input', (e) => { $('#sfxVal').textContent = Math.round(e.target.value * 100) + '%'; });
 $('#btnSettings').addEventListener('click', () => openSettings().catch((e) => alert(e.message)));
-$('#btnSaveSettings').addEventListener('click', async (e) => {
-  e.preventDefault();
-  const body = { llm: {}, elevenlabs: {}, deepgram: {} };
+
+function collectSettings() {
+  const body = { llm: {}, elevenlabs: {}, deepgram: {}, look: {}, audio: {}, render: {} };
   dlg.querySelectorAll('[name]').forEach((el) => {
     if (el.disabled) return;
     const [a, b] = el.name.split('.');
-    if (b) { if (b === 'apiKey' && !el.value) return; body[a][b] = el.value; } else body[a] = el.value;
+    const v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? Number(el.value) : el.value;
+    if (b) { if (b === 'apiKey' && !v) return; body[a][b] = v; } else body[a] = v;
   });
-  try { await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) }); dlg.close(); health(); }
-  catch (err) { $('#settingsErr').textContent = err.message; }
-});
-$('#btnVoices').addEventListener('click', async () => {
-  $('#voicesMsg').textContent = 'بيحمّل…';
+  // only colours that differ from the chosen preset are saved, so switching themes later stays clean
+  const preset = S._themes[body.look.theme] || {};
+  body.look.colors = {};
+  dlg.querySelectorAll('[data-color]').forEach((i) => {
+    if (i.value.toUpperCase() !== String(preset[i.dataset.color]).toUpperCase()) body.look.colors[i.dataset.color] = i.value;
+  });
+  body.approvals = Object.fromEntries([...dlg.querySelectorAll('[data-defappr]')].map((c) => [c.dataset.defappr, c.checked ? 'wait' : 'auto']));
+  return body;
+}
+$('#btnSaveSettings').addEventListener('click', async (e) => {
+  e.preventDefault();
   try {
-    // save a newly typed key first so the server can use it
-    const k = $('[name="elevenlabs.apiKey"]', dlg).value;
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify(collectSettings()) });
+    if (styleLoaded && $('#styleText').value.trim()) await api('/api/style', { method: 'PUT', body: JSON.stringify({ style: $('#styleText').value }) });
+    dlg.close(); health(); applyDefaultApprovals();
+  } catch (err) { $('#settingsErr').textContent = err.message; }
+});
+dlg.querySelectorAll('[data-test]').forEach((b) => b.addEventListener('click', async () => {
+  const svc = b.dataset.test, out = $('#test-' + svc);
+  out.className = 'testres wait'; out.textContent = 'بيختبر…';
+  const body = {};
+  dlg.querySelectorAll(`[name^="${svc}."]`).forEach((el) => { if (!el.disabled && el.value) body[el.name.split('.')[1]] = el.value; });
+  try {
+    const r = await api('/api/test/' + svc, { method: 'POST', body: JSON.stringify(body) });
+    out.className = 'testres ' + (r.ok ? 'ok' : 'bad');
+    out.textContent = (r.ok ? '✔ ' : '✖ ') + r.message;
+    if (r.detail?.length) out.title = r.detail.join(', ');
+  } catch (err) { out.className = 'testres bad'; out.textContent = '✖ ' + err.message; }
+}));
+$('#btnVoices').addEventListener('click', async () => {
+  const out = $('#test-elevenlabs');
+  out.className = 'testres wait'; out.textContent = 'بيحمّل…';
+  try {
+    const k = field('elevenlabs.apiKey').value; // save a newly typed key first so the server can use it
     if (k) await api('/api/settings', { method: 'PUT', body: JSON.stringify({ elevenlabs: { apiKey: k } }) });
     const { voices } = await api('/api/voices');
     const sel = $('#voiceSelect'), cur = sel.value;
     sel.innerHTML = voices.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}${v.labels?.accent ? ' · ' + esc(v.labels.accent) : ''}</option>`).join('');
     if (cur && voices.some((v) => v.id === cur)) sel.value = cur;
-    $('#voicesMsg').textContent = `${voices.length} صوت`;
-  } catch (e) { $('#voicesMsg').textContent = e.message; }
+    out.className = 'testres ok'; out.textContent = `✔ ${voices.length} صوت`;
+  } catch (err) { out.className = 'testres bad'; out.textContent = '✖ ' + err.message; }
 });
 
 // ---------- boot ----------
+async function applyDefaultApprovals() {
+  try {
+    const st = await api('/api/settings');
+    document.querySelectorAll('[data-appr]').forEach((c) => { c.checked = st.approvals?.[c.dataset.appr] === 'wait'; });
+  } catch {}
+}
+document.querySelectorAll('[data-all]').forEach((b) => b.addEventListener('click', () => document.querySelectorAll('[data-appr]').forEach((c) => { c.checked = b.dataset.all === 'wait'; })));
 renderNewApprovals();
+applyDefaultApprovals();
 health();
 loadProjects().then(() => {
   const id = new URLSearchParams(location.search).get('p');

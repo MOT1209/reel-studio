@@ -3,7 +3,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
-import { listVoices } from './apis.mjs';
+import { listVoices, testLlm, testElevenLabs, testDeepgram } from './apis.mjs';
+import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
+
+const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram };
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as P from './pipeline.mjs';
@@ -85,6 +88,40 @@ async function route(req, res) {
       if (m === 'PUT') return json(res, 200, updateSettings(await readJson(req)));
     }
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
+    if (a === 'test' && m === 'POST' && TESTS[id]) {
+      // optional unsaved values from the Settings form (masked keys are ignored → saved key is used)
+      const body = await readJson(req);
+      const s = getSettings();
+      const sec = id === 'llm' ? 'llm' : id;
+      for (const [k, v] of Object.entries(body || {})) {
+        if (typeof v === 'string' && v.trim() && !v.startsWith('••••') && k in s[sec]) s[sec][k] = v.trim();
+      }
+      try { return json(res, 200, await TESTS[id](s)); }
+      catch (e) { return json(res, 200, { ok: false, message: e.message }); }
+    }
+    if (a === 'style') {
+      if (!id && m === 'GET') return json(res, 200, { style: fs.readFileSync(STYLE_FILE, 'utf8'), examples: readExamples(1e9).map((e) => ({ file: e.file, text: e.text })) });
+      if (!id && m === 'PUT') {
+        const { style } = await readJson(req);
+        if (typeof style !== 'string' || style.trim().length < 20) throw P.httpError(400, 'style guide is empty');
+        fs.writeFileSync(STYLE_FILE, style.replace(/\r\n/g, '\n'));
+        return json(res, 200, { ok: true });
+      }
+      if (id === 'examples' && m === 'POST') {
+        const { name, text } = await readJson(req);
+        if (typeof text !== 'string' || !text.trim()) throw P.httpError(400, 'example text is empty');
+        const safe = (String(name || '').replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 60) || `example-${Date.now()}`) + '.md';
+        fs.mkdirSync(EXAMPLES_DIR, { recursive: true });
+        fs.writeFileSync(path.join(EXAMPLES_DIR, safe), text.replace(/\r\n/g, '\n'));
+        return json(res, 201, { file: safe });
+      }
+      if (id === 'examples' && b && m === 'DELETE') {
+        const f = path.join(EXAMPLES_DIR, path.basename(b));
+        if (!/\.(md|txt)$/i.test(f) || !fs.existsSync(f)) throw P.httpError(404, 'example not found');
+        fs.rmSync(f);
+        return json(res, 200, { ok: true });
+      }
+    }
     if (a === 'icons' && id === 'licenses') return json(res, 200, iconLicenses());
     if (a === 'projects') {
       if (!id) {

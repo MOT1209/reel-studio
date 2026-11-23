@@ -3,12 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { DATA_DIR, getSettings, resolveFonts } from './settings.mjs';
+import { DATA_DIR, getSettings, resolveFonts, resolvePalette } from './settings.mjs';
 import { chatStream, ttsWithTimestamps, transcribeWords } from './apis.mjs';
 import { scriptMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
-import { FPS, run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
+import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -60,13 +60,13 @@ export function listProjects() {
 export function createProject({ topic, seconds = 30, approvals = {}, voiceMode = 'tts', options = {} }) {
   topic = String(topic || '').trim().slice(0, 300);
   if (!topic) throw httpError(400, 'topic is required');
-  seconds = Number(seconds);
+  seconds = seconds === 'auto' ? 'auto' : Number(seconds);
   if (!LENGTHS.includes(seconds)) throw httpError(400, `length must be one of ${LENGTHS.join(', ')}`);
   const id = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
   const p = {
     id, topic, seconds, createdAt: new Date().toISOString(), updatedAt: null,
     voiceMode: voiceMode === 'upload' ? 'upload' : 'tts', upload: null,
-    approvals: Object.fromEntries(STAGES.map((s) => [s, approvals[s] === 'wait' ? 'wait' : 'auto'])),
+    approvals: Object.fromEntries(STAGES.map((s) => [s, (approvals[s] || getSettings().approvals?.[s]) === 'wait' ? 'wait' : 'auto'])),
     options: { forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null },
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null,
@@ -239,17 +239,18 @@ export function setVoiceMode(id, mode) {
 const STAGE_FN = {
   async script(p, signal) {
     const s = getSettings();
-    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · target ${Math.round(p.seconds * WORDS_PER_SECOND)} words`);
+    const auto = p.seconds === 'auto';
+    const target = auto ? null : Math.round(p.seconds * WORDS_PER_SECOND);
+    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`}`);
     bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', reset: true } });
     const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds), {
       signal, onDelta: (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', delta: d } }),
     });
     const parsed = parseScript(text);
     const n = countWords(parsed.text);
-    const target = Math.round(p.seconds * WORDS_PER_SECOND);
     p.script = { ...parsed, words: n, model: model || s.llm.model };
-    log(p, 'script', `"${parsed.title}" — ${n} words (target ${target})${model ? ' · ' + model : ''}`);
-    if (Math.abs(n - target) > target * 0.25) log(p, 'script', `⚠ word count is ${n > target ? 'above' : 'below'} target by ${Math.abs(n - target)} — the video will be ~${(n / WORDS_PER_SECOND).toFixed(0)} s`);
+    log(p, 'script', `"${parsed.title}" — ${n} words ≈ ${(n / WORDS_PER_SECOND).toFixed(0)} s${target ? ` (target ${target})` : ''}${model ? ' · ' + model : ''}`);
+    if (target && Math.abs(n - target) > target * 0.25) log(p, 'script', `⚠ word count is ${n > target ? 'above' : 'below'} target by ${Math.abs(n - target)} — the video will be ~${(n / WORDS_PER_SECOND).toFixed(0)} s`);
     if (!/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
   },
 
@@ -335,13 +336,14 @@ const STAGE_FN = {
   async render(p, signal) {
     const dir = projectDir(p.id);
     const data = renderData(p);
-    const duration = data.duration;
+    const duration = data.duration, FPS = data.fps;
+    const audioCfg = getSettings().audio;
     log(p, 'render', `${duration.toFixed(2)} s · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · 1080×1920`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     let lastEmit = 0;
     await renderFrames({
       url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-      out: tmpVideo, duration, signal, log: (l) => log(p, 'render', l),
+      out: tmpVideo, duration, fps: FPS, signal, log: (l) => log(p, 'render', l),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
@@ -352,12 +354,12 @@ const STAGE_FN = {
     const cuts = data.scenes.slice(1).map((sc) => sc.start);
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) ticks.push(p.words[it.at].start); }));
-    writeSfx(path.join(dir, 'sfx.wav'), duration, cuts, ticks.sort((a, b) => a - b));
+    writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], audioCfg.sfxVolume);
     await mixAudio({ voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, signal, log: (l) => log(p, 'render', l) });
     await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration });
     fs.rmSync(tmpVideo, { force: true });
-    p.render = { file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), at: new Date().toISOString() };
+    p.render = { file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name, at: new Date().toISOString() };
     log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved`);
   },
 };
@@ -376,7 +378,8 @@ export function renderData(p) {
     items: s.items.map((it) => ({ ...it, t: it.at != null ? p.words[it.at].start : null })),
   }));
   return {
-    id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration, fps: FPS,
+    id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration, fps: getSettings().render.fps || 30,
+    theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     words: p.words.map(({ i, text, line, start, end }) => ({ i, text, line, start, end })),
     accents: p.storyboard.accents, scenes, icons: p.icons || {},
     fonts: { regular: `/font/${encodeURIComponent(fonts.regular)}`, bold: `/font/${encodeURIComponent(fonts.bold)}` },

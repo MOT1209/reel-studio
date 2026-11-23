@@ -91,6 +91,48 @@ export async function chatStream(settings, messages, { onDelta = () => {}, signa
   return { text: stripThink(raw), model: usedModel };
 }
 
+// ---- connection tests (Settings → «اختبار الاتصال») ---------------------------------
+const withTimeout = (ms) => AbortSignal.timeout(ms);
+
+/** LLM: lists /models; if the server has no /models, sends a 1-token chat. */
+export async function testLlm(settings) {
+  const { baseUrl, apiKey, model } = settings.llm;
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  try {
+    const res = await fetch(`${trimSlash(baseUrl)}/models`, { headers, signal: withTimeout(10000) });
+    if (res.ok) {
+      const j = await res.json();
+      const n = (j.data || j.models || []).length;
+      if (n) return { ok: true, message: `متصل — ${n} موديل متاح`, detail: (j.data || j.models).slice(0, 8).map((m) => m.id || m.name) };
+    } else if (res.status === 401 || res.status === 403) return { ok: false, message: `المفتاح مرفوض (${res.status})` };
+  } catch (e) {
+    if (e.name === 'TimeoutError' || /fetch failed|ECONNREFUSED/.test(e.message + (e.cause?.code || ''))) {
+      return { ok: false, message: `مش قادر يوصل لـ ${baseUrl} — اتأكد إن FreeLLMAPI شغال` };
+    }
+  }
+  const res = await fetch(`${trimSlash(baseUrl)}/chat/completions`, {
+    method: 'POST', signal: withTimeout(30000),
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify({ model: model || 'auto', messages: [{ role: 'user', content: 'ping' }], max_tokens: 5, stream: false }),
+  });
+  if (!res.ok) return { ok: false, message: `LLM ${await failText(res)}` };
+  return { ok: true, message: 'متصل — الموديل رد' };
+}
+
+export async function testElevenLabs(settings) {
+  const voices = await listVoices(settings);
+  return { ok: true, message: `متصل — ${voices.length} صوت`, detail: voices.slice(0, 8).map((v) => v.name) };
+}
+
+export async function testDeepgram(settings) {
+  const { baseUrl, apiKey } = settings.deepgram;
+  if (!apiKey) return { ok: false, message: 'مفيش مفتاح Deepgram' };
+  const res = await fetch(`${trimSlash(baseUrl)}/v1/projects`, { headers: { Authorization: `Token ${apiKey}` }, signal: withTimeout(10000) });
+  if (!res.ok) return { ok: false, message: `Deepgram ${await failText(res)}` };
+  const j = await res.json();
+  return { ok: true, message: `متصل — ${(j.projects || []).length} مشروع على الحساب` };
+}
+
 // ---- ElevenLabs --------------------------------------------------------------
 export async function listVoices(settings) {
   const { baseUrl, apiKey } = settings.elevenlabs;

@@ -44,20 +44,6 @@ SOURCES:
 - <source 2>
 ```
 
-## Example (≈ 30 s)
-```
-TITLE: ليه بنتاوب لما حد يتاوب؟
-SCRIPT:
-التثاؤب معدي… أكتر من أي فيروس.
-عارف ليه؟
-مخك فيه خلايا اسمها mirror neurons.
-الخلايا دي بتقلّد اللي بتشوفه من غير ما تاخد بالك.
-تخيّلها زي مراية جوه دماغك.
-تشوف حد بيتاوب… المراية تعكس الحركة.
-وجسمك ينفّذها على طول.
-وعشان كده الإحساس ده أقوى مع الناس اللي بتحبهم.
-يعني باختصار: مخك بيقلّد اللي حواليه… حتى التثاؤب.
-SOURCES:
-- Provine R. R., "Yawning", American Scientist (2005)
-- Platek S. et al., Cognitive Brain Research (2003)
-```
+## Reference scripts
+Example scripts in `references/examples/` (one `.md`/`.txt` per script) are appended to this guide automatically.
+Add 4–5 of your best scripts there so new scripts match your voice.

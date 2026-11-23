@@ -184,12 +184,19 @@ const server = http.createServer(async (req, res) => {
       const user = body.messages.filter((m) => m.role === 'user').pop()?.content || '';
       let reply;
       if (sys.includes('[[TASK:SCRIPT]]')) {
-        reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || 26);
+        reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
       else reply = 'mock reply';
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/models') {
+      return json(res, 200, { object: 'list', data: ['auto', 'mock-llm', 'mock-llm-mini'].map((id) => ({ id, object: 'model' })) });
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/projects') {
+      if (!/^Token /.test(req.headers.authorization || '')) return json(res, 401, { err_msg: 'missing token' });
+      return json(res, 200, { projects: [{ project_id: 'mock-project', name: 'Mock' }] });
     }
     if (req.method === 'GET' && url.pathname === '/v1/voices') {
       return json(res, 200, { voices: [{ voice_id: 'mock-voice-eg', name: 'Mock Egyptian Narrator', category: 'premade', labels: { accent: 'egyptian' } }, { voice_id: 'mock-voice-2', name: 'Mock Calm', category: 'premade', labels: {} }] });

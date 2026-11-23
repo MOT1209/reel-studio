@@ -125,4 +125,33 @@ test('settings: keys masked to last 4, masked values never overwrite', () => {
   assert.equal(getPublicSettings().llm.apiKey, process.env.LLM_API_KEY ? getPublicSettings().llm.apiKey : '');
 });
 
+const { resolvePalette, THEMES } = await import('../server/settings.mjs');
+const { scriptMessages, readExamples } = await import('../server/text.mjs');
+
+test('look: theme presets + validated colour overrides', () => {
+  assert.equal(resolvePalette({ theme: 'paper', colors: {} }).bg, THEMES.paper.bg);
+  const p = resolvePalette({ theme: 'dark', colors: { accent: '#ff0000', text: 'red; injection', nope: '#000000' } });
+  assert.equal(p.accent, '#ff0000');
+  assert.equal(p.text, THEMES.dark.text, 'invalid colour ignored');
+  assert.ok(!('nope' in p));
+  updateSettings({ look: { theme: 'paper', colors: { accent: '#123456', bg: 'bad' }, grid: false }, audio: { sfxVolume: 7, tick: false }, render: { fps: 61 }, approvals: { voice: 'wait', bogus: 'wait' } });
+  const s = getSettings();
+  assert.equal(s.look.theme, 'paper'); assert.equal(s.look.grid, false);
+  assert.deepEqual(s.look.colors, { accent: '#123456' });
+  assert.equal(s.audio.sfxVolume, 1); assert.equal(s.audio.tick, false);
+  assert.equal(s.render.fps, 30, 'unsupported fps rejected');
+  assert.equal(s.approvals.voice, 'wait'); assert.ok(!('bogus' in s.approvals));
+  updateSettings({ look: { theme: 'dark', colors: {}, grid: true }, approvals: { voice: 'auto' } });
+});
+
+test('script prompt: fixed length vs auto, reference scripts appended', () => {
+  const fixed = scriptMessages('x', 30);
+  assert.match(fixed[1].content, /TARGET_WORDS: 78/);
+  const auto = scriptMessages('x', 'auto');
+  assert.match(auto[1].content, /LENGTH_SECONDS: auto/);
+  const ex = readExamples();
+  assert.ok(ex.length >= 1 && ex.every((e) => !/readme/i.test(e.file)));
+  assert.ok(fixed[0].content.includes(ex[0].text.split('\n')[0]), 'examples included in system prompt');
+});
+
 console.log(`\n${n} unit tests passed`);

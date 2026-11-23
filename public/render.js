@@ -13,7 +13,15 @@
   const TRANS = 0.42; // scene transition length
   const FONT = 'ReelFont';
   const TYPE_LABEL = { intro: 'البداية', question: 'السؤال', concept: 'الفكرة', process: 'إزاي بيحصل', compare: 'مقارنة', stat: 'بالأرقام', recap: 'الخلاصة' };
-  const TONE = { accent: C.accent, blue: C.blue, success: C.success, warning: C.warning, underline: C.text };
+  let TONE = {};
+  let LIGHT = false, GRID = true; // set from the project's theme at boot
+  function applyTheme(theme) {
+    if (theme?.colors) for (const k of Object.keys(C)) if (/^#[0-9a-f]{6}$/i.test(theme.colors[k] || '')) C[k] = theme.colors[k];
+    GRID = theme?.grid !== false;
+    const n = parseInt(C.bg.slice(1), 16);
+    LIGHT = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255 > 0.5;
+    TONE = { accent: C.accent, blue: C.blue, success: C.success, warning: C.warning, underline: C.text };
+  }
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
@@ -612,15 +620,15 @@
     const bg = layer(DW * S, DH * S, (g) => {
       g.setTransform(S, 0, 0, S, 0, 0);
       g.fillStyle = C.bg; g.fillRect(0, 0, DW, DH);
-      g.strokeStyle = 'rgba(244,243,238,0.035)'; g.lineWidth = 1;
+      g.strokeStyle = hexA(C.text, LIGHT ? 0.06 : 0.035); g.lineWidth = 1;
       g.beginPath();
       for (let x = 0; x <= DW; x += 40) { g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, DH); }
       for (let y = 0; y <= DH; y += 40) { g.moveTo(0, y + 0.5); g.lineTo(DW, y + 0.5); }
-      g.stroke();
-      g.fillStyle = 'rgba(244,243,238,0.07)';
-      for (let x = 0; x <= DW; x += 160) for (let y = 0; y <= DH; y += 160) g.fillRect(x - 1.5, y - 1.5, 3, 3);
+      if (GRID) g.stroke();
+      g.fillStyle = hexA(C.text, LIGHT ? 0.12 : 0.07);
+      if (GRID) for (let x = 0; x <= DW; x += 160) for (let y = 0; y <= DH; y += 160) g.fillRect(x - 1.5, y - 1.5, 3, 3);
       const v = g.createRadialGradient(DW / 2, DH / 2, DH * 0.3, DW / 2, DH / 2, DH * 0.75);
-      v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.45)');
+      v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, LIGHT ? 'rgba(60,40,10,0.10)' : 'rgba(0,0,0,0.45)');
       g.fillStyle = v; g.fillRect(0, 0, DW, DH);
     });
     const glow = layer(256, 256, (g) => {
@@ -633,13 +641,13 @@
       g.setTransform(S, 0, 0, S, 0, 0);
       g.drawImage(glow, 260 - 620, 380 - 620, 1240, 1240);
       g.drawImage(glow, 560 - 500, 1100 - 500, 1000, 1000);
-      g.save(); g.shadowColor = 'rgba(0,0,0,0.5)'; g.shadowBlur = 40; g.shadowOffsetY = 16;
+      g.save(); g.shadowColor = LIGHT ? 'rgba(60,40,10,0.16)' : 'rgba(0,0,0,0.5)'; g.shadowBlur = 40; g.shadowOffsetY = 16;
       g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.fillStyle = C.card; g.fill(); g.restore();
       g.save(); g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.clip();
-      g.strokeStyle = 'rgba(244,243,238,0.03)'; g.lineWidth = 1; g.beginPath();
+      g.strokeStyle = hexA(C.text, LIGHT ? 0.05 : 0.03); g.lineWidth = 1; g.beginPath();
       for (let x = CARD.x + 24; x < CARD.x + CARD.w; x += 24) { g.moveTo(x, CARD.y + BAR); g.lineTo(x, CARD.y + CARD.h); }
       for (let y = CARD.y + BAR + 24; y < CARD.y + CARD.h; y += 24) { g.moveTo(CARD.x, y); g.lineTo(CARD.x + CARD.w, y); }
-      g.stroke(); g.restore();
+      if (GRID) g.stroke(); g.restore();
     });
     LAYERS = { bg, glow, card };
   }
@@ -649,14 +657,14 @@
   }
   function drawHeader(t) {
     // progress
-    ctx.fillStyle = 'rgba(244,243,238,0.08)'; rrect(36, 30, DW - 72, 5, 3); ctx.fill();
+    ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
     ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(t / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
     const tag = D.seriesTag || '';
     const tw = ctx.measureText(tag).width + 56;
-    rrect(DW - 36 - tw, 56, tw, 44, 22); ctx.fillStyle = C.card; ctx.fill(); ctx.strokeStyle = 'rgba(244,243,238,0.08)'; ctx.lineWidth = 1.5; ctx.stroke();
+    rrect(DW - 36 - tw, 56, tw, 44, 22); ctx.fillStyle = C.card; ctx.fill(); ctx.strokeStyle = hexA(C.text, 0.08); ctx.lineWidth = 1.5; ctx.stroke();
     const pa = 0.6 + 0.4 * Math.sin(t * 4);
     ctx.beginPath(); ctx.arc(DW - 36 - 24, 78, 6, 0, Math.PI * 2); ctx.fillStyle = hexA(C.accent, pa); ctx.fill();
     text(tag, DW - 36 - 40, 79, { size: 22, align: 'right', color: C.text });
@@ -699,7 +707,7 @@
     ctx.restore();
     // chrome: top bar, film perforations, registration marks
     ctx.save();
-    ctx.strokeStyle = 'rgba(244,243,238,0.07)'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = hexA(C.text, LIGHT ? 0.1 : 0.07); ctx.lineWidth = 1.5;
     rrect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(CARD.x, CARD.y + BAR); ctx.lineTo(CARD.x + CARD.w, CARD.y + BAR); ctx.stroke();
     const k = sceneIndexAt(t), sc = D.scenes[k];
@@ -713,7 +721,7 @@
     ctx.globalAlpha = 1;
     text(`${String(k + 1).padStart(2, '0')} / ${String(D.scenes.length).padStart(2, '0')}`, CARD.x + 22, CARD.y + 29, { size: 18, color: C.sec, align: 'left', weight: 400 });
     // perforations (film)
-    ctx.fillStyle = 'rgba(244,243,238,0.05)';
+    ctx.fillStyle = hexA(C.text, LIGHT ? 0.08 : 0.05);
     const off = (t * 22) % 36;
     for (let x = CARD.x + 30 - off; x < CARD.x + CARD.w - 20; x += 36) if (x > CARD.x + 14) { rrect(x, CARD.y + CARD.h - 20, 16, 8, 2); ctx.fill(); }
     // registration marks
@@ -748,6 +756,7 @@
     const res = await fetch(`/api/projects/${encodeURIComponent(id)}/render-data`);
     if (!res.ok) throw new Error(`render-data ${res.status}: ${(await res.text()).slice(0, 200)}`);
     D = await res.json();
+    applyTheme(D.theme);
     const faces = [new FontFace(FONT, `url(${D.fonts.regular})`, { weight: '400' }), new FontFace(FONT, `url(${D.fonts.bold})`, { weight: '700' })];
     for (const f of faces) { await f.load(); document.fonts.add(f); }
     await document.fonts.ready;
