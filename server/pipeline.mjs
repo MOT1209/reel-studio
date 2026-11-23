@@ -82,7 +82,8 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     },
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
-    script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, edit: {}, clips: {},
+    script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
+    edit: ['9:16', '1:1', '16:9'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
     publish: { status: 'idle', log: [] },
   };
   fs.mkdirSync(projectDir(id), { recursive: true });

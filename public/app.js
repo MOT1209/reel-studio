@@ -1,17 +1,30 @@
-// Reel Studio v1 — UI (vanilla JS, RTL Arabic). All LLM/user text is inserted escaped.
-const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
-const STAGE_AR = { script: 'السكريبت', voice: 'الصوت', timing: 'التوقيت', storyboard: 'الستوري بورد', render: 'الرندر' };
-const STATUS_AR = { idle: 'مستني', running: 'شغال…', review: 'مستني موافقتك', done: 'تمام', error: 'خطأ' };
-const $ = (s, r = document) => r.querySelector(s);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Reel Studio — UI shell (vanilla JS modules, RTL Arabic). All LLM/user text is inserted escaped.
+import { $, esc, api, toast, diffHtml, act as actToast } from './ui.js';
+import { mountEditor } from './editor.js';
+import { mountLibrary } from './views/library.js';
+import { mountFonts } from './views/fonts.js';
+import { mountVoice } from './views/voice.js';
+import { mountSkills } from './views/skills.js';
+import { mountDashboard } from './views/dashboard.js';
 
-async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { ...(opts.body && !(opts.body instanceof Blob) && !(opts.body instanceof File) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
-  const ct = res.headers.get('content-type') || '';
-  const body = ct.includes('json') ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(body?.error || body || res.statusText);
-  return body;
+const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
+const STAGE_AR = { script: 'السكريبت', voice: 'الصوت', timing: 'التوقيت', storyboard: 'الستوري بورد', render: 'الرندر', editor: 'المحرر' };
+const STATUS_AR = { idle: 'مستني', running: 'شغال…', review: 'مستني موافقتك', done: 'تمام', error: 'خطأ' };
+let FONTS = [];
+let editor = null; // { pid, inst }
+
+// ---------- views (hash routing) ----------
+const VIEWS = { dashboard: (el) => mountDashboard(el, { openProject: (id) => { location.hash = '#/projects'; openProject(id); } }), library: (el) => mountLibrary(el), fonts: mountFonts, voice: mountVoice, skills: mountSkills };
+async function route() {
+  const v = (location.hash.match(/^#\/(\w+)/) || [])[1] || 'projects';
+  const name = v in VIEWS || v === 'projects' ? v : 'projects';
+  if (name !== 'projects' && editor) closeEditor();
+  document.querySelectorAll('[data-view]').forEach((s) => { s.hidden = s.dataset.view !== name; });
+  document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === name));
+  if (VIEWS[name]) { const el = document.querySelector(`[data-view="${name}"]`); el.innerHTML = '<p class="hint">بيحمّل…</p>'; try { await VIEWS[name](el); } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; } }
 }
+window.addEventListener('hashchange', route);
+function closeEditor() { editor?.inst.destroy(); editor = null; document.querySelector('.layout')?.classList.remove('wide-editor'); }
 
 // ---------- state ----------
 let current = null; // project (public)
@@ -42,7 +55,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (voiceMode === 'upload' && !file) { $('#newErr').textContent = 'اختار ملف الصوت الأول.'; return; }
   const approvals = Object.fromEntries([...document.querySelectorAll('[data-appr]')].map((c) => [c.dataset.appr, c.checked ? 'wait' : 'auto']));
   try {
-    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked } }) });
+    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked, dialect: $('#dialect').value, research: $('#research').checked, aspect: $('#newAspect').value } }) });
     if (voiceMode === 'upload') {
       await api(`/api/projects/${p.id}/upload`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(file.name) } });
       await api(`/api/projects/${p.id}/run`, { method: 'POST' });
@@ -67,6 +80,7 @@ async function loadProjects() {
 // ---------- project view ----------
 function openProject(id) {
   if (es) es.close();
+  if (editor && editor.pid !== id) closeEditor();
   live.llm = { script: '', storyboard: '' }; live.progress = null; live.preview = null;
   es = new EventSource(`/api/projects/${encodeURIComponent(id)}/events`);
   es.addEventListener('state', (ev) => {
@@ -74,7 +88,7 @@ function openProject(id) {
     const first = !current || current.id !== p.id;
     current = p;
     if (first) selStage = STAGES.find((s) => ['running', 'review', 'error'].includes(p.stages[s].status)) || (p.stages.render.status === 'done' ? 'render' : 'script');
-    if (p.running && selStage !== p.running && !userPicked) selStage = p.running;
+    if (p.running && selStage !== p.running && !userPicked && selStage !== 'editor') selStage = p.running;
     // don't wipe a field the user is typing in; re-render when they leave it
     const ae = document.activeElement;
     if (!first && ae && $('#stagePanel')?.contains(ae) && /^(TEXTAREA|INPUT)$/.test(ae.tagName) && ae.type !== 'file') {
@@ -113,9 +127,43 @@ function openProject(id) {
 }
 let userPicked = false;
 
+const TABS = [...STAGES, 'editor'];
+function stagesHtml(p) {
+  return TABS.map((s, i) => {
+    if (s === 'editor') {
+      const ok = !!(p.storyboard && p.words);
+      return `<div class="stage editor-tab ${selStage === s ? 'sel' : ''} ${ok ? '' : 'off'}" data-stage="editor" title="${ok ? '' : 'بيتفتح بعد الستوري بورد'}"><div class="n">✎</div><div class="name">المحرر</div><span class="badge">${ok ? 'جاهز' : 'بعد الستوري بورد'}</span></div>`;
+    }
+    const st = p.stages[s];
+    return `<div class="stage ${s === selStage ? 'sel' : ''}" data-stage="${s}">
+      <div class="n">0${i + 1}</div>
+      <div class="name">${STAGE_AR[s]}</div>
+      <span class="badge ${st.status}">${STATUS_AR[st.status]}</span>
+      ${s === 'render' && st.status === 'running' ? `<div class="bar"><i id="renderBar" style="width:${live.progress ? (100 * live.progress.frame / live.progress.total).toFixed(1) : 0}%"></i></div>` : ''}
+      <label class="appr"><input type="checkbox" data-wait="${s}" ${p.approvals[s] === 'wait' ? 'checked' : ''}> استنى موافقتي</label>
+    </div>`;
+  }).join('');
+}
+function bindStages(p) {
+  document.querySelectorAll('.stage').forEach((el) => el.addEventListener('click', (e) => {
+    if (e.target.matches('input')) return;
+    if (el.dataset.stage === 'editor' && !(p.storyboard && p.words)) { toast('المحرر بيتفتح بعد ما الستوري بورد يخلص', 'bad'); return; }
+    if (selStage === 'editor' && el.dataset.stage !== 'editor') closeEditor();
+    selStage = el.dataset.stage; userPicked = true; render();
+  }));
+  document.querySelectorAll('[data-wait]').forEach((c) => c.addEventListener('change', () =>
+    act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify({ [c.dataset.wait]: c.checked ? 'wait' : 'auto' }) }))));
+}
+
 function render() {
   const p = current;
   if (!p) return;
+  // the editor keeps its own state (and its preview iframe): only refresh the stage strip around it
+  if (selStage === 'editor' && editor?.pid === p.id && $('#editorHost')) {
+    $('.stages').innerHTML = stagesHtml(p); bindStages(p);
+    $('#runBtns').innerHTML = runBtns(p); bindRunBtns(p);
+    return;
+  }
   const running = p.running;
   $('#main').innerHTML = `
     <div class="phead">
@@ -124,53 +172,43 @@ function render() {
         <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds + ' ثانية'} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
       </div>
       <div class="btns">
-        ${running ? `<button id="btnCancel" class="danger">■ إلغاء (${STAGE_AR[running]})</button>` : `<button id="btnRun" class="primary">▶ كمّل</button>`}
+        <span id="runBtns">${runBtns(p)}</span>
         <button class="ghost small" data-pall="auto" title="كل المراحل تكمّل لوحدها">كله تلقائي</button>
         <button class="ghost small" data-pall="wait" title="كل مرحلة تستنى موافقتك">كله بموافقتي</button>
         <button id="btnDelete" class="ghost danger">حذف</button>
       </div>
     </div>
-    <div class="stages">
-      ${STAGES.map((s, i) => {
-        const st = p.stages[s];
-        return `<div class="stage ${s === selStage ? 'sel' : ''}" data-stage="${s}">
-          <div class="n">0${i + 1}</div>
-          <div class="name">${STAGE_AR[s]}</div>
-          <span class="badge ${st.status}">${STATUS_AR[st.status]}</span>
-          ${s === 'render' && st.status === 'running' ? `<div class="bar"><i id="renderBar" style="width:${live.progress ? (100 * live.progress.frame / live.progress.total).toFixed(1) : 0}%"></i></div>` : ''}
-          <label class="appr"><input type="checkbox" data-wait="${s}" ${p.approvals[s] === 'wait' ? 'checked' : ''}> استنى موافقتي</label>
-        </div>`;
-      }).join('')}
-    </div>
-    <div class="work">
+    <div class="stages">${stagesHtml(p)}</div>
+    ${selStage === 'editor' ? '<div id="editorHost"></div>' : `<div class="work">
       <div class="panel" id="stagePanel"></div>
       <div class="panel">
         <h3>السجل — ${STAGE_AR[selStage]}</h3>
         <div class="log" id="log"></div>
       </div>
-    </div>`;
-  const log = $('#log'); log.textContent = p.stages[selStage].log.join('\n') + '\n'; log.scrollTop = log.scrollHeight;
-  $('#btnRun')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/run`, { method: 'POST' })));
-  $('#btnCancel')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/cancel`, { method: 'POST' })));
+    </div>`}`;
+  bindRunBtns(p);
+  document.querySelector('.layout').classList.toggle('wide-editor', selStage === 'editor'); // the editor needs the full width
+  if (selStage === 'editor') {
+    if (!FONTS.length) api('/api/fonts').then((r) => { FONTS = r.fonts; }).catch(() => {});
+    editor = { pid: p.id, inst: mountEditor($('#editorHost'), p, { fonts: FONTS }) };
+  } else { const log = $('#log'); log.textContent = p.stages[selStage].log.join('\n') + '\n'; log.scrollTop = log.scrollHeight; }
   $('#btnDelete').addEventListener('click', async () => {
     if (!confirm('تحذف المشروع ده وكل ملفاته؟')) return;
     await act(() => api(`/api/projects/${p.id}`, { method: 'DELETE' }));
-    if (es) es.close(); current = null; $('#main').innerHTML = '<div class="empty">اتحذف.</div>'; loadProjects();
+    closeEditor(); if (es) es.close(); current = null; $('#main').innerHTML = '<div class="empty">اتحذف.</div>'; loadProjects();
   });
-  document.querySelectorAll('.stage').forEach((el) => el.addEventListener('click', (e) => {
-    if (e.target.matches('input')) return;
-    selStage = el.dataset.stage; userPicked = true; render();
-  }));
+  bindStages(p);
   document.querySelectorAll('[data-pall]').forEach((b) => b.addEventListener('click', () =>
     act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(STAGES.map((s) => [s, b.dataset.pall]))) }))));
-  document.querySelectorAll('[data-wait]').forEach((c) => c.addEventListener('change', () =>
-    act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify({ [c.dataset.wait]: c.checked ? 'wait' : 'auto' }) }))));
-  renderStagePanel();
+  if (selStage !== 'editor') renderStagePanel();
+}
+const runBtns = (p) => (p.running ? `<button id="btnCancel" class="danger">■ إلغاء (${STAGE_AR[p.running]})</button>` : `<button id="btnRun" class="primary">▶ كمّل</button>`);
+function bindRunBtns(p) {
+  $('#btnRun')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/run`, { method: 'POST' })));
+  $('#btnCancel')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/cancel`, { method: 'POST' })));
 }
 
-async function act(fn) {
-  try { await fn(); } catch (e) { alert(e.message); }
-}
+const act = (fn) => actToast(fn);
 
 function stageButtons(s) {
   const p = current, st = p.stages[s];
@@ -201,7 +239,20 @@ function renderStagePanel() {
         <label>السكريبت (كل سطر = جملة كابشن) — ${p.script.words} كلمة ≈ ${(p.script.words / 2.6).toFixed(0)} ث
           <textarea id="edText" rows="10">${esc(p.script.text)}</textarea></label>
         <label>المصادر (سطر لكل مصدر) <textarea id="edSources" rows="3" dir="auto">${esc((p.script.sources || []).join('\n'))}</textarea></label>
-        <div class="tools"><button id="saveScript" ${p.running ? 'disabled' : ''}>💾 حفظ التعديل</button><span class="hint">الحفظ بيعيد المراحل اللي بعده.</span></div>`;
+        <div class="tools"><button id="saveScript" ${p.running ? 'disabled' : ''}>💾 حفظ التعديل</button><span class="hint">الحفظ بيعيد المراحل اللي بعده.</span></div>
+        <div class="artools"><span class="hint">أدوات العربي على السكريبت:</span>
+          <button class="small" data-arop="analyze">تحليل</button>
+          <button class="small ai" data-arop="correct">✦ تصحيح</button><button class="small ai" data-arop="tashkeel">✦ تشكيل</button>
+          <button class="small ai" data-arop="msa">✦ للفصحى</button><button class="small ai" data-arop="egyptian">✦ للعامية</button><button class="small ai" data-arop="simplify">✦ تبسيط</button>
+          <button class="small" data-arop="strip-tashkeel">شيل التشكيل</button></div>
+        <div id="arProposal"></div>`;
+    }
+    if (p.research) {
+      const C = { high: 'عالية', medium: 'متوسطة', low: 'ضعيفة' };
+      html += `<details class="research" ${p.research.facts.length ? '' : 'hidden'}><summary>ملاحظات البحث — <b>غير متحقق منها</b> (${p.research.facts.length})</summary>
+        <p class="warn">دي ملاحظات من الـ LLM للكاتب. اتأكد من أي معلومة من مصدر موثوق قبل النشر.</p>
+        <ul>${p.research.facts.map((f) => `<li><span class="conf ${esc(f.confidence)}">${C[f.confidence] || ''}</span> <span dir="ltr">${esc(f.claim)}</span>${f.source ? ` <span class="hint">— مصدر للمراجعة: ${esc(f.source)}</span>` : ''}</li>`).join('')}</ul>
+        ${p.research.misconceptions?.length ? `<p class="hint">مفاهيم غلط شائعة: ${p.research.misconceptions.map(esc).join(' · ')}</p>` : ''}</details>`;
     }
   } else if (s === 'voice') {
     html += `<fieldset><legend>مصدر الصوت</legend>
@@ -213,7 +264,8 @@ function renderStagePanel() {
     if (p.words) {
       html += `<p class="hint">${p.words.length} كلمة · متوسط التطابق ${Math.round((p.timing?.matchAvg || 0) * 100)}% · <span style="color:var(--warning)">${p.timing?.weak || 0} ضعيفة</span> (عليها إطار برتقالي). تقدر تعدّل بداية أي كلمة بالثواني.</p>
         <div class="words">${p.words.map((w) => `<span class="word ${w.weak ? 'weak' : ''}">${esc(w.text)}<input data-w="${w.i}" value="${fmt(w.start)}"></span>`).join('')}</div>
-        <div class="tools"><button id="saveTiming" ${p.running ? 'disabled' : ''}>💾 حفظ التوقيت</button></div>`;
+        <div class="tools"><button id="saveTiming" ${p.running ? 'disabled' : ''}>💾 حفظ التوقيت</button>
+          <a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.srt" download>⬇ ترجمة SRT</a><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.vtt" download>⬇ ترجمة VTT</a></div>`;
     }
   } else if (s === 'storyboard') {
     if (st.status === 'running' || (!p.storyboard && live.llm.storyboard)) html += `<div class="stream mono" id="stream-storyboard">${esc(live.llm.storyboard)}</div>`;
@@ -223,7 +275,7 @@ function renderStagePanel() {
         <span class="hint">${sc.items.map((it) => `${esc(it.label)}${it.icon ? ` [${esc(it.icon)}→${esc(p.iconKeys?.[it.icon] || '?')}]` : ''}`).join(' · ')}${sc.organ ? ` · organ: ${esc(sc.organ)}` : ''}${sc.value != null ? ` · ${sc.value}/${sc.max} ${esc(sc.unit)}` : ''}</span></div>`).join('')}</div>
         ${p.storyboardFixes?.length ? `<details><summary class="hint">تصليحات تلقائية (${p.storyboardFixes.length})</summary><ul class="fixes">${p.storyboardFixes.map((f) => `<li>${esc(f)}</li>`).join('')}</ul></details>` : ''}
         <label>JSON (تقدر تعدّله) <textarea id="edSb" rows="12" class="mono">${esc(JSON.stringify(p.storyboard, null, 1))}</textarea></label>
-        <div class="tools"><button id="saveSb" ${p.running ? 'disabled' : ''}>💾 حفظ وتحقق</button></div>
+        <div class="tools"><button id="saveSb" ${p.running ? 'disabled' : ''}>💾 حفظ وتحقق</button><button class="primary" data-goto="editor">✎ افتح في المحرر</button></div>
         <h4>معاينة حيّة (من غير رندر)</h4>
         <div class="preview"><iframe src="/render.html?project=${encodeURIComponent(p.id)}&play=1&v=${encodeURIComponent(p.updatedAt || '')}"></iframe></div>`;
     }
@@ -234,7 +286,9 @@ function renderStagePanel() {
     } else if (p.render) {
       html += `<div class="preview"><video controls src="${file('video.mp4')}"></video></div>
         <div class="tools"><a href="${file('video.mp4')}" download="${esc(p.id)}.mp4"><button>⬇ تحميل MP4</button></a></div>
-        <p class="hint">${fmt(p.render.duration)} ث · ${p.render.frames} فريم · 1080×1920 · H.264 · −14 LUFS</p>
+        <p class="hint">${fmt(p.render.duration)} ث · ${p.render.frames} فريم · ${p.render.width || 1080}×${p.render.height || 1920} (${esc(p.render.aspect || '9:16')}) · ${p.render.fps} fps · H.264 · −14 LUFS</p>
+        <div class="tools"><button data-goto="editor">✎ عدّل في المحرر</button><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.srt" download>SRT</a><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.vtt" download>VTT</a></div>
+        ${p.render.credits?.length ? `<div class="sources"><h4>حقوق الصور والموسيقى (أضفها للوصف)</h4>${p.render.credits.map((c) => `<div dir="auto">${esc(c)}</div>`).join('')}</div>` : ''}
         <h4>Contact sheet</h4><div class="preview"><img src="${file('contact.jpg')}" alt="contact sheet"></div>`;
     }
   }
@@ -264,6 +318,23 @@ function renderStagePanel() {
   }
   $('#btnPubCancel')?.addEventListener('click', () => act(() => api('/api/projects/' + p.id + '/publish/cancel', { method: 'POST' })));
   $('#optPublish')?.addEventListener('change', (e) => act(() => api('/api/projects/' + p.id + '/options', { method: 'PUT', body: JSON.stringify({ publish: e.target.checked }) })));
+  document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => { selStage = b.dataset.goto; userPicked = true; render(); }));
+  document.querySelectorAll('[data-arop]').forEach((b) => b.addEventListener('click', async () => {
+    const op = b.dataset.arop, text = $('#edText').value, box = $('#arProposal');
+    if (op === 'analyze') {
+      const r = await act(() => api('/api/arabic/analyze', { method: 'POST', body: JSON.stringify({ text }) }));
+      if (r) box.innerHTML = `<p class="hint">اللهجة: <b>${{ egyptian: 'عامية مصرية', msa: 'فصحى', mixed: 'مختلط', unknown: 'مش واضح' }[r.dialect]}</b> · ${r.words} كلمة · ${r.sentences.length} جملة · ${r.latinTerms} مصطلح إنجليزي</p>`;
+      return;
+    }
+    b.disabled = true; box.innerHTML = '<p class="hint">بيشتغل…</p>';
+    const r = await act(() => api('/api/arabic/' + op, { method: 'POST', body: JSON.stringify({ text }) }));
+    b.disabled = false;
+    if (!r) { box.innerHTML = ''; return; }
+    box.innerHTML = `<div class="proposal"><div class="diff" dir="auto">${diffHtml(r.diff)}</div>${r.warnings?.length ? `<p class="warn">${r.warnings.map(esc).join('<br>')}</p>` : ''}
+      <div class="tools"><button class="primary" id="arApply">طبّق على السكريبت</button><button id="arDiscard">تجاهل</button><span class="hint">بعد التطبيق دوس «حفظ التعديل».</span></div></div>`;
+    $('#arApply').addEventListener('click', () => { $('#edText').value = r.text; box.innerHTML = ''; toast('اتطبق — راجع ودوس حفظ'); });
+    $('#arDiscard').addEventListener('click', () => { box.innerHTML = ''; });
+  }));
   $('#saveScript')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/script`, { method: 'PUT', body: JSON.stringify({ title: $('#edTitle').value, text: $('#edText').value, sources: $('#edSources').value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
   $('#saveTiming')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/timing`, { method: 'PUT', body: JSON.stringify({ words: p.words.map((w) => ({ start: Number($(`[data-w="${w.i}"]`).value) })) }) })));
   $('#saveSb')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/storyboard`, { method: 'PUT', body: JSON.stringify({ storyboard: $('#edSb').value }) })));
@@ -329,8 +400,8 @@ async function openSettings(tab = 'keys') {
   $('#settingsErr').textContent = '';
   dlg.querySelectorAll('.testres').forEach((x) => { x.textContent = ''; x.className = 'testres'; });
   S = await api('/api/settings');
-  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube']) for (const [k, v] of Object.entries(S[sec])) {
-    if (k === 'apiKey' || k === 'clientSecret') { const el = field(sec + '.' + k); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.${k}`]})` : 'مش متسجل'; }
+  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash']) for (const [k, v] of Object.entries(S[sec])) {
+    if (k === 'apiKey' || k === 'clientSecret' || k === 'accessKey') { const el = field(sec + '.' + k); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.${k}`]})` : 'مش متسجل'; }
     else setField(`${sec}.${k}`, v);
   }
   for (const [k, src] of Object.entries(S._source)) if (src === 'env (locked)') { const el = field(k); if (el) { el.disabled = true; el.title = 'محدد من متغير بيئة'; } }
@@ -339,7 +410,8 @@ async function openSettings(tab = 'keys') {
   renderColors(S._palette);
   setField('audio.sfxVolume', S.audio.sfxVolume); setField('audio.whoosh', S.audio.whoosh); setField('audio.tick', S.audio.tick);
   $('#sfxVal').textContent = Math.round(S.audio.sfxVolume * 100) + '%';
-  setField('render.fps', S.render.fps);
+  setField('render.fps', S.render.fps); setField('render.aspect', S.render.aspect); setField('render.resolution', S.render.resolution); setField('render.quality', S.render.quality);
+  setField('audio.musicVolume', S.audio.musicVolume ?? 0.25); setField('audio.duck', S.audio.duck !== false);
   renderDefApprovals(S.approvals);
   styleLoaded = false;
   showTab(tab);
@@ -351,12 +423,12 @@ field('audio.sfxVolume').addEventListener('input', (e) => { $('#sfxVal').textCon
 $('#btnSettings').addEventListener('click', () => openSettings().catch((e) => alert(e.message)));
 
 function collectSettings() {
-  const body = { llm: {}, elevenlabs: {}, deepgram: {}, youtube: {}, look: {}, audio: {}, render: {} };
+  const body = { llm: {}, elevenlabs: {}, deepgram: {}, youtube: {}, pexels: {}, pixabay: {}, unsplash: {}, look: {}, audio: {}, render: {} };
   dlg.querySelectorAll('[name]').forEach((el) => {
     if (el.disabled) return;
     const [a, b] = el.name.split('.');
     const v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? Number(el.value) : el.value;
-    if (b) { if ((b === 'apiKey' || b === 'clientSecret') && !v) return; body[a][b] = v; } else body[a] = v;
+    if (b) { if ((b === 'apiKey' || b === 'clientSecret' || b === 'accessKey') && !v) return; body[a][b] = v; } else body[a] = v;
   });
   // only colours that differ from the chosen preset are saved, so switching themes later stays clean
   const preset = S._themes[body.look.theme] || {};
@@ -451,6 +523,7 @@ renderNewApprovals();
 applyDefaultApprovals();
 loadYt().then(async () => { try { const st = await api('/api/settings'); if (YT.linked) $('#newPublish').checked = !!st.youtube?.autoPublish; } catch {} });
 health();
+route();
 loadProjects().then(() => {
   const id = new URLSearchParams(location.search).get('p');
   if (id) openProject(id);

@@ -63,7 +63,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
     else if (e.audio.music && typeof e.audio.music === 'object') {
       const a = getAsset(e.audio.music.asset);
       if (!a || a.kind !== 'audio') throw Object.assign(new Error('الموسيقى لازم تكون ملف صوت من المكتبة'), { status: 400 });
-      out.audio.music = { asset: a.id, volume: num(e.audio.music.volume, 0, 1, 0.25), duck: e.audio.music.duck !== false, fadeIn: num(e.audio.music.fadeIn, 0, 5, 1), fadeOut: num(e.audio.music.fadeOut, 0, 5, 1.5) };
+      out.audio.music = { asset: a.id, name: a.name, volume: num(e.audio.music.volume, 0, 1, 0.25), duck: e.audio.music.duck !== false, fadeIn: num(e.audio.music.fadeIn, 0, 5, 1), fadeOut: num(e.audio.music.fadeOut, 0, 5, 1.5) };
     }
   }
   if (TRANSITIONS.includes(e.transition)) out.transition = e.transition;
@@ -82,7 +82,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
       else {
         const a = getAsset(o.asset);
         if (!a || a.kind !== o.kind) throw Object.assign(new Error(`عنصر ${o.kind} بيشاور على ملف مش موجود في المكتبة`), { status: 400 });
-        c.asset = a.id; c.offset = Math.max(0, Number(o.offset) || 0); // where inside the clip to start (video)
+        c.asset = a.id; c.name = a.name; c.offset = Math.max(0, Number(o.offset) || 0); // where inside the clip to start (video)
       }
       return c;
     });

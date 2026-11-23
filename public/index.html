@@ -3,18 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reel Studio v1</title>
+<title>Reel Studio</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="dot"></span> Reel Studio <small>v1</small></div>
+  <div class="brand"><span class="dot"></span> Reel Studio <small>v2</small></div>
+  <nav class="nav" id="nav">
+    <a href="#/dashboard" data-nav="dashboard">لوحة التحكم</a>
+    <a href="#/projects" data-nav="projects">المشاريع</a>
+    <a href="#/library" data-nav="library">المكتبة</a>
+    <a href="#/fonts" data-nav="fonts">الخطوط</a>
+    <a href="#/voice" data-nav="voice">الصوت واللغة</a>
+    <a href="#/skills" data-nav="skills">المهارات</a>
+  </nav>
   <div id="health" class="health">…</div>
   <button id="btnSettings" class="ghost">⚙ الإعدادات</button>
 </header>
 
-<div class="layout">
+<section class="view pad" data-view="dashboard" hidden></section>
+<section class="view pad" data-view="library" hidden></section>
+<section class="view pad" data-view="fonts" hidden></section>
+<section class="view pad" data-view="voice" hidden></section>
+<section class="view pad" data-view="skills" hidden></section>
+
+<div class="layout view" data-view="projects">
   <aside class="side">
     <form id="newForm" class="panel">
       <h3>ريل جديد</h3>
@@ -28,6 +42,15 @@
           <option value="auto">أوتو — الـ LLM يحدد</option>
         </select>
       </label>
+      <div class="two">
+        <label>اللغة
+          <select id="dialect"><option value="egyptian">عامية مصرية</option><option value="msa">فصحى مبسطة</option></select>
+        </label>
+        <label>المقاس
+          <select id="newAspect"><option value="9:16">9:16 ريلز/شورتس</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 يوتيوب</option></select>
+        </label>
+      </div>
+      <label class="row"><input type="checkbox" id="research" checked> بحث مبدئي قبل الكتابة (ملاحظات غير متحقق منها)</label>
       <fieldset>
         <legend>الصوت</legend>
         <label class="row"><input type="radio" name="voiceMode" value="tts" checked> ElevenLabs (TTS)</label>
@@ -64,6 +87,7 @@
       <button type="button" data-tab="render">الصوت والرندر</button>
       <button type="button" data-tab="approvals">الموافقات</button>
       <button type="button" data-tab="youtube">يوتيوب</button>
+      <button type="button" data-tab="libs">المكتبات</button>
     </nav>
 
     <div class="tab" data-tab="keys">
@@ -144,7 +168,7 @@
       <label class="row"><input type="checkbox" name="audio.tick"> tick خفيف لما العناصر تظهر</label>
       <p class="hint">الصوت كله بيتظبط على −14 LUFS في الآخر.</p>
       <label>الفريمات في الثانية
-        <select name="render.fps"><option value="24">24</option><option value="30">30 (مقترح)</option><option value="60">60 (أبطأ في الرندر ×2)</option></select>
+        <select name="render.fps"><option value="24">24</option><option value="25">25</option><option value="30">30 (مقترح)</option><option value="60">60 (أبطأ في الرندر ×2)</option></select>
       </label>
     </div>
 
@@ -180,6 +204,23 @@
         <label>Tags (مفصولة بفاصلة) <input name="youtube.tags"></label>
       </div>
       <label class="row"><input type="checkbox" name="youtube.autoPublish"> انشر تلقائيًا بعد ما الرندر يخلص (للمشاريع الجديدة)</label>
+    </div>
+
+    <div class="tab" data-tab="libs" hidden>
+      <p class="hint">مفاتيح مكتبات الصور والفيديو. بتتحفظ على جهازك بس وعمرها ما بتوصل للمتصفح. كل صورة بتتحفظ مع مصدرها ورخصتها.</p>
+      <section><h4>Pexels — صور وفيديو</h4><label>API key <input name="pexels.apiKey" dir="ltr" autocomplete="off"></label>
+        <a class="btnlink" href="https://www.pexels.com/api/" target="_blank" rel="noopener">↗ هات مفتاح مجاني</a></section>
+      <section><h4>Pixabay — صور وفيديو</h4><label>API key <input name="pixabay.apiKey" dir="ltr" autocomplete="off"></label>
+        <a class="btnlink" href="https://pixabay.com/api/docs/" target="_blank" rel="noopener">↗ هات مفتاح مجاني</a></section>
+      <section><h4>Unsplash — صور (الإسناد مطلوب)</h4><label>Access key <input name="unsplash.accessKey" dir="ltr" autocomplete="off"></label>
+        <a class="btnlink" href="https://unsplash.com/developers" target="_blank" rel="noopener">↗ سجّل تطبيق</a></section>
+      <section><h4>اختيار الصور تلقائيًا</h4><p class="hint">المشاهد اللي قالبها «صورة/فيديو» بتاخد أول نتيجة مناسبة من أول مكتبة متوصلة (Pexels ← Pixabay ← Unsplash). من غير مكتبة، المشهد بيتحوّل لقالب مرسوم.</p></section>
+      <section><h4>الرندر الافتراضي</h4>
+        <div class="two"><label>المقاس <select name="render.aspect"><option value="9:16">9:16</option><option value="1:1">1:1</option><option value="16:9">16:9</option></select></label>
+        <label>الدقة <select name="render.resolution"><option value="1080">1080p</option><option value="720">720p</option></select></label></div>
+        <label>الجودة <select name="render.quality"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select></label>
+        <label>مستوى الموسيقى الافتراضي <input type="range" name="audio.musicVolume" min="0" max="1" step="0.05"></label>
+        <label class="row"><input type="checkbox" name="audio.duck"> وطّي الموسيقى تحت صوت الراوي</label></section>
     </div>
 
     <p class="err" id="settingsErr"></p>
