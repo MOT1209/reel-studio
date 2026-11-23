@@ -17,6 +17,8 @@ import { buildCues, toSrt, toVtt } from './subtitles.mjs';
 import * as F from './fonts.mjs';
 import * as A from './assets.mjs';
 import * as PV from './providers.mjs';
+import * as SK from './skills.mjs';
+import * as MCP from './mcp.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
@@ -177,6 +179,32 @@ async function route(req, res) {
       if (b === 'search' && m === 'GET') return json(res, 200, await PV.search(id, url.searchParams.get('q'), Object.fromEntries(url.searchParams)));
       if (b === 'import' && m === 'POST') { const body = await readJson(req); return json(res, 201, await PV.importResult(id, body.item, { folder: body.folder || 'stock' })); }
     }
+    // ---- skills + MCP --------------------------------------------------------------------
+    if (a === 'skills') {
+      if (!id && m === 'GET') return json(res, 200, { skills: SK.listSkills(), runs: SK.runLog(50) });
+      if (!id && m === 'POST') return json(res, 201, SK.saveSkill(await readJson(req)));
+      if (id === 'import' && m === 'POST') return json(res, 201, { imported: SK.importSkills(await readJson(req)) });
+      if (id && !b && m === 'PUT') return json(res, 200, SK.saveSkill({ ...(await readJson(req)), id }, { replace: true }));
+      if (id && !b && m === 'PATCH') return json(res, 200, SK.setEnabled(id, (await readJson(req)).enabled));
+      if (id && !b && m === 'DELETE') { SK.deleteSkill(id); return json(res, 200, { ok: true }); }
+      if (id && b === 'export' && m === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="skill-${id}.json"` });
+        return res.end(JSON.stringify(SK.exportSkill(id), null, 2));
+      }
+      if (id && b === 'run' && m === 'POST') {
+        const ctl = new AbortController(); res.on('close', () => { if (!res.writableFinished) ctl.abort(); }); // client went away
+        return json(res, 200, await SK.runSkill(id, await readJson(req), { signal: ctl.signal }));
+      }
+    }
+    if (a === 'mcp') {
+      if (!id && m === 'GET') return json(res, 200, { servers: MCP.listServers(), calls: MCP.callLog(50) });
+      if (!id && m === 'POST') return json(res, 201, MCP.upsertServer(await readJson(req)));
+      if (id && !b && m === 'PUT') return json(res, 200, MCP.upsertServer({ ...(await readJson(req)), id }));
+      if (id && !b && m === 'DELETE') { MCP.removeServer(id); return json(res, 200, { ok: true }); }
+      if (id && b === 'sync' && m === 'POST') return json(res, 200, await MCP.syncServer(id));
+      if (id && b === 'permissions' && m === 'PUT') return json(res, 200, MCP.setPermissions(id, await readJson(req)));
+      if (id && b === 'call' && m === 'POST') { const body = await readJson(req); return json(res, 200, await MCP.callTool(id, body.tool, body.arguments || {})); }
+    }
     if (a === 'logs' && m === 'GET') {
       let lines = [];
       try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
@@ -189,7 +217,7 @@ async function route(req, res) {
       const local = { 'strip-tashkeel': AR.stripTashkeel, 'arabic-digits': AR.toArabicDigits, 'latin-digits': AR.toLatinDigits };
       if (local[id]) { const out = local[id](text); return json(res, 200, { op: id, text: out, diff: AR.wordDiff(text, out), warnings: [] }); }
       if (AR.OPS[id]) {
-        const ctl = new AbortController(); req.on('close', () => { if (!res.writableEnded) ctl.abort(); });
+        const ctl = new AbortController(); res.on('close', () => { if (!res.writableFinished) ctl.abort(); }); // client went away
         return json(res, 200, await AR.rewrite(id, text, { signal: ctl.signal }));
       }
       throw P.httpError(404, 'unknown Arabic operation');
