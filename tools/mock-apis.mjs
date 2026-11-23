@@ -248,6 +248,14 @@ const server = http.createServer(async (req, res) => {
         reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
+      else if (sys.includes('[[TASK:RESEARCH]]')) reply = JSON.stringify({ angle: 'الضوء الأزرق بيتشتت أكتر', facts: [
+        { claim: 'Sunlight contains all visible colours', confidence: 'high', source: 'NASA Space Place — Why is the sky blue?' },
+        { claim: 'Shorter (blue) wavelengths scatter more off air molecules (Rayleigh scattering)', confidence: 'high', source: 'Encyclopaedia Britannica — Rayleigh scattering' },
+        { claim: 'At sunset light crosses more air, so red dominates', confidence: 'medium', source: null }], misconceptions: ['السما مش بتعكس لون البحر'] });
+      else if (sys.includes('[[TASK:ARABIC:tashkeel]]')) reply = user.replace(/السما/g, 'السَّمَا').replace(/لونها/g, 'لَوْنُهَا');
+      else if (sys.includes('[[TASK:ARABIC:')) reply = user.replace(/\bانا\b/g, 'أنا').replace(/اللى/g, 'اللي').replace(/ازاي/g, 'إزاي');
+      else if (sys.includes('[[TASK:SKILL]]')) reply = sys.includes('JSON') ? JSON.stringify({ titles: ['عنوان ١', 'عنوان ٢', 'عنوان ٣'] }) : 'mock skill output: ' + user.slice(0, 40);
+      else if (sys.includes('[[TASK:TRANSLATE_QUERY]]')) reply = 'blue sky';
       else reply = 'mock reply';
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);

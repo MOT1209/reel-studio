@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR, getSettings, writeFileAtomic } from './settings.mjs';
+import { addSecret } from './logger.mjs';
 
 const URLS = () => ({
   auth: process.env.YT_AUTH_URL || 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -17,8 +18,11 @@ const TOKEN_FILE = path.join(DATA_DIR, 'youtube-token.json');
 const pending = new Map(); // state → { verifier, redirectUri, at }
 
 const b64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const readToken = () => { try { return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); } catch { return null; } };
-const writeToken = (t) => writeFileAtomic(TOKEN_FILE, JSON.stringify(t, null, 1), { mode: 0o600 });
+const readToken = () => { try { const t = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); addSecret(t.refresh_token); addSecret(t.access_token); return t; } catch { return null; } };
+function writeToken(t) {
+  addSecret(t.refresh_token); addSecret(t.access_token); // never logged
+  writeFileAtomic(TOKEN_FILE, JSON.stringify(t, null, 1), { mode: 0o600 });
+}
 
 function creds() {
   const { clientId, clientSecret } = getSettings().youtube;

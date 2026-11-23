@@ -553,10 +553,19 @@
     const sp = size * 0.3, lh = size * 1.42;
     const placed = [];
     const y0 = 1036 - ((lines.length - 1) * lh) / 2;
+    // line breaks are found in logical order; then each line is reordered for display (UAX #9 at word level),
+    // so an English term or a number inside an Arabic line keeps its reading order
+    const base = window.ReelBidi.baseDir(c.idx.map((i) => D.words[i].text));
     lines.forEach((ln, li) => {
       const total = ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
-      let x = DW / 2 + total / 2; // RTL: start at the right edge
-      for (const it of ln) { placed.push({ i: it.i, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
+      const order = window.ReelBidi.visualOrder(ln.map((x) => D.words[x.i].text), base);
+      if (base === 'rtl') {
+        let x = DW / 2 + total / 2; // start at the right edge
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
+      } else {
+        let x = DW / 2 - total / 2;
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
+      }
     });
     c.layout = { size, placed };
     return c.layout;

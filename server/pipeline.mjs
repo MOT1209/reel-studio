@@ -5,9 +5,10 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
 import { chatStream, ttsWithTimestamps, transcribeWords } from './apis.mjs';
-import { scriptMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
+import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
+import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
 import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
 
@@ -48,8 +49,8 @@ export function getProject(id) {
   if (!fs.existsSync(f)) return null;
   let p;
   try { p = JSON.parse(fs.readFileSync(f, 'utf8')); }
-  catch (e) { console.error(`project ${id}: unreadable project.json (${e.message}) — skipped`); return null; }
-  if (!p?.stages || !STAGES.every((s) => p.stages[s])) { console.error(`project ${id}: project.json has no stages — skipped`); return null; }
+  catch (e) { slog('error', 'unreadable project.json — skipped', { project: id, err: e }); return null; }
+  if (!p?.stages || !STAGES.every((s) => p.stages[s])) { slog('error', 'project.json has no stages — skipped', { project: id }); return null; }
   for (const s of STAGES) if (p.stages[s].status === 'running') { p.stages[s].status = 'error'; p.stages[s].error = 'interrupted (server restarted)'; }
   cache.set(id, p);
   return p;
@@ -71,7 +72,11 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     id, topic, seconds, createdAt: new Date().toISOString(), updatedAt: null,
     voiceMode: voiceMode === 'upload' ? 'upload' : 'tts', upload: null,
     approvals: Object.fromEntries(STAGES.map((s) => [s, (approvals[s] || getSettings().approvals?.[s]) === 'wait' ? 'wait' : 'auto'])),
-    options: { forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish },
+    options: {
+      forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish,
+      dialect: options.dialect === 'msa' ? 'msa' : 'egyptian', research: options.research !== false,
+    },
+    research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null,
     publish: { status: 'idle', log: [] },
@@ -93,7 +98,8 @@ export async function deleteProject(id) {
 export function httpError(status, message) { const e = new Error(message); e.status = status; return e; }
 
 function log(p, stage, line) {
-  const entry = `[${new Date().toISOString().slice(11, 19)}] ${line}`;
+  const entry = `[${new Date().toISOString().slice(11, 19)}] ${redact(line)}`;
+  if (/^[✖⚠]/.test(line)) slog(line.startsWith('✖') ? 'error' : 'warn', line, { project: p.id, stage });
   const L = p.stages[stage].log; L.push(entry); if (L.length > 400) L.splice(0, L.length - 400);
   bus(p.id).emit('event', { type: 'log', data: { stage, line: entry } });
 }
@@ -286,9 +292,26 @@ const STAGE_FN = {
     const s = getSettings();
     const auto = p.seconds === 'auto';
     const target = auto ? null : Math.round(p.seconds * WORDS_PER_SECOND);
-    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`}`);
+    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`} · ${p.options?.dialect === 'msa' ? 'فصحى' : 'عامية مصرية'}`);
     bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', reset: true } });
-    const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds), {
+    p.research = null;
+    if (p.options?.research !== false) {
+      // research pass: notes for the writer, shown to the user as UNVERIFIED (a failure only skips it)
+      try {
+        const r = await chatStream(s, researchMessages(p.topic), { signal, temperature: 0.2, maxTokens: 1500 });
+        const j = extractJson(r.text);
+        const facts = (Array.isArray(j.facts) ? j.facts : []).slice(0, 10).map((f) => ({
+          claim: String(f?.claim || '').slice(0, 300), confidence: ['high', 'medium', 'low'].includes(f?.confidence) ? f.confidence : 'low',
+          source: typeof f?.source === 'string' && f.source.trim() ? f.source.slice(0, 200) : null,
+        })).filter((f) => f.claim);
+        p.research = { angle: String(j.angle || '').slice(0, 200), facts, misconceptions: (Array.isArray(j.misconceptions) ? j.misconceptions : []).map(String).slice(0, 5), verified: false };
+        log(p, 'script', `research: ${facts.length} notes (unverified) · ${facts.filter((f) => f.confidence === 'high').length} high-confidence`);
+      } catch (e) {
+        if (signal.aborted) throw e;
+        log(p, 'script', `⚠ research pass skipped (${e.message})`);
+      }
+    }
+    const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds, { dialect: p.options?.dialect, research: p.research }), {
       signal, onDelta: (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', delta: d } }),
     });
     const parsed = parseScript(text);
@@ -296,7 +319,7 @@ const STAGE_FN = {
     p.script = { ...parsed, words: n, model: model || s.llm.model };
     log(p, 'script', `"${parsed.title}" — ${n} words ≈ ${(n / WORDS_PER_SECOND).toFixed(0)} s${target ? ` (target ${target})` : ''}${model ? ' · ' + model : ''}`);
     if (target && Math.abs(n - target) > target * 0.25) log(p, 'script', `⚠ word count is ${n > target ? 'above' : 'below'} target by ${Math.abs(n - target)} — the video will be ~${(n / WORDS_PER_SECOND).toFixed(0)} s`);
-    if (!/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
+    if (p.options?.dialect !== 'msa' && !/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
   },
 
   async voice(p, signal) {
@@ -413,7 +436,7 @@ const STAGE_FN = {
 const publishing = new Map(); // id → AbortController
 function plog(p, line) {
   p.publish = p.publish || { status: 'idle', log: [] };
-  const entry = `[${new Date().toISOString().slice(11, 19)}] ${line}`;
+  const entry = `[${new Date().toISOString().slice(11, 19)}] ${redact(line)}`;
   p.publish.log.push(entry); if (p.publish.log.length > 100) p.publish.log.splice(0, p.publish.log.length - 100);
   bus(p.id).emit('event', { type: 'log', data: { stage: 'publish', line: entry } });
 }
@@ -461,6 +484,12 @@ export function setPublishOption(id, on) {
   return p;
 }
 export function cancelPublish(id) { publishing.get(id)?.abort(); }
+
+/** Subtitle export follows the project's trim and digit style. */
+export function subtitleOptions(p) {
+  const e = p.edit || {};
+  return { offset: e.trim?.start || 0, end: e.trim?.end || Infinity, digits: e.typography?.digits || getSettings().look.typography?.digits || 'latin' };
+}
 
 /** Everything render.html needs; times are resolved here so the page stays deterministic. */
 export function renderData(p) {

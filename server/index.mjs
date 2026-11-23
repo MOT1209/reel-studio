@@ -11,6 +11,9 @@ const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as P from './pipeline.mjs';
+import { log as slog, redact, logFile } from './logger.mjs';
+import * as AR from './arabic.mjs';
+import { buildCues, toSrt, toVtt } from './subtitles.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
@@ -136,6 +139,24 @@ async function route(req, res) {
       if (m === 'DELETE') { await unlinkYoutube(); return json(res, 200, youtubeStatus()); }
     }
     if (a === 'icons' && id === 'licenses') return json(res, 200, iconLicenses());
+    if (a === 'logs' && m === 'GET') {
+      let lines = [];
+      try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
+      return json(res, 200, { lines: lines.filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { msg: l }; } }) });
+    }
+    if (a === 'arabic' && m === 'POST') {
+      const { text } = await readJson(req);
+      if (typeof text !== 'string') throw P.httpError(400, 'text is required');
+      if (id === 'analyze') return json(res, 200, { ...AR.detectDialect(text), sentences: AR.sentences(text), tashkeel: AR.hasTashkeel(text) });
+      const local = { 'strip-tashkeel': AR.stripTashkeel, 'arabic-digits': AR.toArabicDigits, 'latin-digits': AR.toLatinDigits };
+      if (local[id]) { const out = local[id](text); return json(res, 200, { op: id, text: out, diff: AR.wordDiff(text, out), warnings: [] }); }
+      if (AR.OPS[id]) {
+        const ctl = new AbortController(); req.on('close', () => { if (!res.writableEnded) ctl.abort(); });
+        return json(res, 200, await AR.rewrite(id, text, { signal: ctl.signal }));
+      }
+      throw P.httpError(404, 'unknown Arabic operation');
+    }
+    if (a === 'arabic' && id === 'ops' && m === 'GET') return json(res, 200, { ops: Object.fromEntries(Object.entries(AR.OPS).map(([k, v]) => [k, v.label])) });
     if (a === 'projects') {
       if (!id) {
         if (m === 'GET') return json(res, 200, { projects: P.listProjects() });
@@ -177,6 +198,13 @@ async function route(req, res) {
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p));
+      if ((b === 'subtitles.srt' || b === 'subtitles.vtt') && m === 'GET') {
+        if (!p.words?.length) throw P.httpError(409, 'timing is not done yet');
+        const cues = buildCues(p.words, P.subtitleOptions(p));
+        const vtt = b.endsWith('.vtt');
+        res.writeHead(200, { 'Content-Type': `${vtt ? 'text/vtt' : 'application/x-subrip'}; charset=utf-8`, 'Content-Disposition': `attachment; filename="${p.id}.${vtt ? 'vtt' : 'srt'}"`, 'Cache-Control': 'no-store' });
+        return res.end('\uFEFF' + (vtt ? toVtt(cues) : toSrt(cues)));
+      }
       if (b === 'files' && stage && FILE_RE.test(stage)) return sendFile(req, res, path.join(P.projectDir(id), stage));
       if (b === 'stages' && P.STAGES.includes(stage)) {
         if (action === 'approve' && m === 'POST') { await P.approve(id, stage); return json(res, 200, { ok: true }); }
@@ -216,16 +244,16 @@ async function route(req, res) {
   return sendFile(req, res, file);
 }
 
-process.on('unhandledRejection', (e) => console.error('unhandled rejection:', e?.message || e));
+process.on('unhandledRejection', (e) => slog('error', 'unhandled rejection', { err: e?.message || String(e) }));
 
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: only answer to our own host names.
   if (!ALLOWED_HOSTS.has(String(req.headers.host || ''))) { res.writeHead(421); return res.end('misdirected request'); }
   try { await route(req, res); }
   catch (e) {
-    if (!res.headersSent) json(res, e.status || 500, { error: e.message });
+    if (!res.headersSent) json(res, e.status || 500, { error: redact(e.message) });
     else res.end();
-    if (!e.status) console.error(e);
+    if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
 server.listen(PORT, HOST, async () => {

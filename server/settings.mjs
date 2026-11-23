@@ -101,6 +101,12 @@ export function getSettings() {
 
 export const mask = (k) => (k ? '••••' + String(k).slice(-4) : '');
 
+/** Every secret value currently in use (stored or from .env) — the logger redacts these. */
+export function secretValues() {
+  const s = getSettings();
+  return SECRETS.map(([sec, f]) => s[sec]?.[f]).filter((v) => typeof v === 'string' && v.length >= 6);
+}
+
 /** Settings safe for the browser: keys masked, plus where each value came from. */
 export function getPublicSettings() {
   const stored = readStored();
