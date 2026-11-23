@@ -130,7 +130,8 @@ async function openWorker(browser, url, errors) {
   const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   const page = await context.newPage();
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  // A failed favicon request is logged as a console error by Chrome/Edge — it must not abort a render.
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon\.ico/.test(m.location()?.url || '')) errors.push(m.text()); });
   await page.goto(url, { waitUntil: 'load' });
   await page.waitForFunction(() => window.__ready === true || window.__error, null, { timeout: 30000 });
   const pageErr = await page.evaluate(() => window.__error || null);
@@ -169,20 +170,27 @@ export async function renderFrames({ url, out, duration, fps: FPS_ = FPS, signal
       '-c:v', 'libx264', '-preset', 'faster', '-crf', '18', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(FPS_), '-movflags', '+faststart', out], { windowsHide: true });
     let ffErr = '';
     ff.stderr.on('data', (d) => { ffErr = (ffErr + d).slice(-4000); });
-    const ffDone = new Promise((res, rej) => { ff.on('close', (c) => (c === 0 ? res() : rej(new Error(`ffmpeg exited ${c}: ${ffErr}`)))); ff.on('error', rej); });
+    // ffmpeg can die at any moment (bad codec, disk full, killed): `failed` stops every loop below.
+    let failed = null, ffClosed = false;
+    const ffDone = new Promise((res, rej) => {
+      ff.on('close', (c) => { ffClosed = true; if (c === 0) res(); else { failed = failed || new Error(`ffmpeg exited ${c}: ${ffErr.slice(-800)}`); rej(failed); } });
+      ff.on('error', (e) => { ffClosed = true; failed = failed || new Error(`ffmpeg: ${e.message}`); rej(failed); });
+    });
     ffDone.catch(() => {}); // awaited below; avoid an unhandled rejection when the render is cancelled
     ff.stdin.on('error', () => {});
+    const stop = () => signal?.aborted || failed || errors.length;
     const t0 = Date.now();
     // Workers pull frame indices; the writer feeds ffmpeg strictly in order.
     const ready = new Map();
     let next = 0, written = 0, wake = null;
     const worker = async (page) => {
       for (;;) {
-        if (signal?.aborted || errors.length) return;
+        if (stop()) return;
         const i = next++;
         if (i >= total) return;
-        while (i - written > nWorkers * 4) await new Promise((r) => setTimeout(r, 5)); // bounded look-ahead
-        ready.set(i, await captureFrame(page, i / FPS_));
+        while (i - written > nWorkers * 4) { if (stop()) return; await new Promise((r) => setTimeout(r, 5)); } // bounded look-ahead
+        try { ready.set(i, await captureFrame(page, i / FPS_)); }
+        catch (e) { failed = failed || new Error(`frame ${i}: ${e.message.split('\n')[0]}`); wake?.(); return; }
         wake?.();
       }
     };
@@ -190,14 +198,20 @@ export async function renderFrames({ url, out, duration, fps: FPS_ = FPS, signal
       while (written < total) {
         if (signal?.aborted) throw new Error('cancelled');
         if (errors.length) throw new Error(`render.html error: ${errors[0]}`);
+        if (failed) throw failed;
         if (!ready.has(written)) { await new Promise((r) => { wake = r; setTimeout(r, 50); }); continue; }
         const jpg = ready.get(written); ready.delete(written);
-        if (!ff.stdin.write(jpg)) await new Promise((r) => ff.stdin.once('drain', r));
+        if (ffClosed) throw failed || new Error('ffmpeg closed its input early');
+        if (!ff.stdin.write(jpg)) {
+          // wait for drain — or for ffmpeg to die, otherwise this would wait forever
+          await new Promise((r) => { const t = setInterval(() => { if (ffClosed || signal?.aborted) { clearInterval(t); r(); } }, 100); ff.stdin.once('drain', () => { clearInterval(t); r(); }); });
+        }
         onFrame(written, total, written % 15 === 0 || written === total - 1 ? jpg : null);
         written++;
       }
     })();
-    await Promise.all([...pages.map(worker), writer]);
+    try { await Promise.all([...pages.map(worker), writer]); }
+    catch (e) { failed = failed || e; throw e; } // `failed` makes the remaining workers return
     ff.stdin.end();
     await ffDone;
     log(`encoded ${total} frames in ${((Date.now() - t0) / 1000).toFixed(1)} s`);

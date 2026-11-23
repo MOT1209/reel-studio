@@ -177,11 +177,13 @@ async function streamText(res, text, model = 'mock-llm') {
 }
 
 // ---- fake YouTube ------------------------------------------------------------------------
-const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set() };
+const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set(), denyAll: false, revokeAfterChunks: 0 };
 const sha256url = (s) => crypto.createHash('sha256').update(s).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 async function youtubeMock(req, res, url) {
   const p = url.pathname, auth = req.headers.authorization || '';
-  const authed = () => yt.tokens.has(auth.replace(/^Bearer /, ''));
+  const authed = () => !yt.denyAll && yt.tokens.has(auth.replace(/^Bearer /, ''));
+  // test controls: revoke every access token after N more chunks / reject every token
+  if (p === '/yt/_control' && req.method === 'POST') { Object.assign(yt, JSON.parse((await readBody(req)).toString() || '{}')); return json(res, 200, { ok: true }); }
   if (p === '/yt/auth' && req.method === 'GET') { // consent screen → immediate "Allow"
     const q = url.searchParams;
     if (!q.get('client_id') || !q.get('code_challenge') || q.get('code_challenge_method') !== 'S256') return json(res, 400, { error: 'invalid_request' });
@@ -218,11 +220,13 @@ async function youtubeMock(req, res, url) {
   const sm = p.match(/^\/yt\/session\/(\w+)$/);
   if (sm && req.method === 'PUT') {
     const s = yt.sessions.get(sm[1]);
-    if (!s || !authed()) return json(res, 404, { error: { message: 'no session' } });
+    if (!s) return json(res, 404, { error: { message: 'no session' } });
+    if (!authed()) return json(res, 401, { error: { message: 'unauthorized' } });
     const m = String(req.headers['content-range']).match(/bytes (\d+)-(\d+)\/(\d+)/);
     const body = await readBody(req);
     if (!m || Number(m[2]) - Number(m[1]) + 1 !== body.length) return json(res, 400, { error: { message: 'bad range' } });
     s.got.push(body);
+    if (yt.revokeAfterChunks && --yt.revokeAfterChunks === 0) yt.tokens.clear(); // token revoked before its expiry
     const have = s.got.reduce((a, b) => a + b.length, 0);
     if (have < s.total) { res.writeHead(308, { Range: `bytes=0-${have - 1}` }); return res.end(); }
     yt.last = { meta: s.meta, bytes: have, chunks: s.got.length, mp4: Buffer.concat(s.got).subarray(4, 8).toString() };

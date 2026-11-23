@@ -61,6 +61,20 @@ const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', '
 // Other plain fields with env fallbacks (settings.json wins when set).
 const PLAIN_ENV = [['llm', 'model', 'LLM_MODEL'], ['elevenlabs', 'voiceId', 'ELEVENLABS_VOICE_ID'], ['elevenlabs', 'modelId', 'ELEVENLABS_MODEL_ID'], ['deepgram', 'model', 'DEEPGRAM_MODEL'], ['youtube', 'clientId', 'YOUTUBE_CLIENT_ID']];
 
+/**
+ * Writes a file atomically (temp file + rename) so a crash mid-write never leaves half a JSON file.
+ * mode 0o600: on POSIX only the owner can read it (settings.json and the YouTube token hold secrets).
+ * On Windows the mode is ignored; the file inherits the user-profile ACL of the project folder.
+ */
+export function writeFileAtomic(file, data, { mode = 0o644 } = {}) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, data, { mode });
+  try { fs.renameSync(tmp, file); }
+  catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+  try { fs.chmodSync(file, mode); } catch {}
+}
+
 function readStored() {
   try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return {}; }
 }
@@ -145,8 +159,7 @@ export function updateSettings(patch) {
     next.approvals = { ...DEFAULTS.approvals, ...(next.approvals || {}) };
     for (const s of STAGE_NAMES) if (patch.approvals[s]) next.approvals[s] = patch.approvals[s] === 'wait' ? 'wait' : 'auto';
   }
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
+  writeFileAtomic(FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
   return getPublicSettings();
 }
 

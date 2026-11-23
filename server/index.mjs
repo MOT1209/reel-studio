@@ -35,17 +35,23 @@ async function readJson(req) {
   try { return JSON.parse(b.toString('utf8')); } catch { throw P.httpError(400, 'invalid JSON'); }
 }
 
+/** decodeURIComponent that answers 400 instead of crashing on malformed escapes ("%E0%A4%A"). */
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch { throw P.httpError(400, 'malformed URL encoding'); }
+}
+
 function sendFile(req, res, file, { cache = 'no-cache' } = {}) {
   let st;
   try { st = fs.statSync(file); } catch { return json(res, 404, { error: 'not found' }); }
   if (!st.isFile()) return json(res, 404, { error: 'not found' });
   const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
-  const range = req.headers.range && /bytes=(\d*)-(\d*)/.exec(req.headers.range);
-  if (range) {
-    const start = range[1] ? Number(range[1]) : st.size - Number(range[2]);
+  const range = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+  if (range && (range[1] || range[2])) {
+    const start = range[1] ? Number(range[1]) : Math.max(0, st.size - Number(range[2]));
     const end = range[1] && range[2] ? Math.min(Number(range[2]), st.size - 1) : st.size - 1;
     if (start >= st.size || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }); return res.end(); }
     res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1, 'Cache-Control': cache });
+    if (req.method === 'HEAD') return res.end();
     return fs.createReadStream(file, { start, end }).pipe(res);
   }
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes', 'Cache-Control': cache });
@@ -70,7 +76,7 @@ const FILE_RE = /^(voice\.mp3|video\.mp4|contact\.jpg|mix\.m4a|upload\.(mp3|wav|
 
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  const parts = url.pathname.split('/').filter(Boolean).map(safeDecode);
   const m = req.method;
 
   if (parts[0] === 'api') {
@@ -94,8 +100,10 @@ async function route(req, res) {
       const body = await readJson(req);
       const s = getSettings();
       const sec = id === 'llm' ? 'llm' : id;
+      const locked = getPublicSettings()._source;
       for (const [k, v] of Object.entries(body || {})) {
-        if (typeof v === 'string' && v.trim() && !v.startsWith('••••') && k in s[sec]) s[sec][k] = v.trim();
+        if (locked[`${sec}.${k}`] === 'env (locked)') continue; // a base URL pinned in .env cannot be redirected from the browser
+        if (typeof v === 'string' && v.trim() && !v.startsWith('••••') && Object.hasOwn(s[sec], k)) s[sec][k] = v.trim();
       }
       try { return json(res, 200, await TESTS[id](s)); }
       catch (e) { return json(res, 200, { ok: false, message: e.message }); }
@@ -148,10 +156,10 @@ async function route(req, res) {
       if (b === 'run' && m === 'POST') return json(res, 200, { started: P.runPipeline(id) });
       if (b === 'cancel' && m === 'POST') return json(res, 200, { cancelled: await P.cancel(id) });
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
-      if (b === 'voice-mode' && m === 'PUT') { P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
+      if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
       if (b === 'upload' && m === 'POST') {
         const buf = await readBody(req, 200 * 1024 * 1024);
-        P.saveUpload(id, buf, decodeURIComponent(req.headers['x-filename'] || ''), req.headers['content-type']);
+        await P.saveUpload(id, buf, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'publish' && m === 'POST') {

@@ -71,7 +71,8 @@ export function extractJson(text) {
   if (a < 0 || b <= a) throw new Error('No JSON object in LLM reply');
   t = t.slice(a, b + 1);
   try { return JSON.parse(t); } catch {}
-  const fixed = t.replace(/,\s*([}\]])/g, '$1').replace(/[“”]/g, '"').replace(/\/\/[^\n]*/g, '');
+  // line comments only when "//" starts the line or follows JSON punctuation — never inside "https://…"
+  const fixed = t.replace(/(^|[\[{,]\s*)\/\/[^\n]*/gm, '$1').replace(/,\s*([}\]])/g, '$1').replace(/[“”]/g, '"');
   return JSON.parse(fixed);
 }
 
@@ -86,6 +87,7 @@ const intIn = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.is
  */
 export function repairStoryboard(raw, words, { forceTemplate } = {}) {
   const fixes = [], notes = [];
+  if (!words?.length) throw new Error('storyboard needs timed words (timing produced none)');
   const n = words.length;
   const last = n - 1;
   const t0 = (i) => words[Math.max(0, Math.min(last, i))].start;

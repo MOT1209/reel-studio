@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { DATA_DIR, getSettings, resolveFonts, resolvePalette } from './settings.mjs';
+import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
 import { chatStream, ttsWithTimestamps, transcribeWords } from './apis.mjs';
 import { scriptMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
@@ -32,7 +32,7 @@ export function bus(id) {
 function save(p) {
   p.updatedAt = new Date().toISOString();
   const { lastPreview, ...persist } = p;
-  fs.writeFileSync(path.join(projectDir(p.id), 'project.json'), JSON.stringify(persist, null, 1));
+  writeFileAtomic(path.join(projectDir(p.id), 'project.json'), JSON.stringify(persist, null, 1));
   bus(p.id).emit('event', { type: 'state', data: publicProject(p) });
 }
 
@@ -46,7 +46,10 @@ export function getProject(id) {
   if (cache.has(id)) return cache.get(id);
   const f = path.join(projectDir(id), 'project.json');
   if (!fs.existsSync(f)) return null;
-  const p = JSON.parse(fs.readFileSync(f, 'utf8'));
+  let p;
+  try { p = JSON.parse(fs.readFileSync(f, 'utf8')); }
+  catch (e) { console.error(`project ${id}: unreadable project.json (${e.message}) — skipped`); return null; }
+  if (!p?.stages || !STAGES.every((s) => p.stages[s])) { console.error(`project ${id}: project.json has no stages — skipped`); return null; }
   for (const s of STAGES) if (p.stages[s].status === 'running') { p.stages[s].status = 'error'; p.stages[s].error = 'interrupted (server restarted)'; }
   cache.set(id, p);
   return p;
@@ -150,11 +153,25 @@ export function runPipeline(id) {
 
 export async function cancel(id) {
   cancelPublish(id);
+  return stopRun(id);
+}
+
+/** Aborts the running pipeline (not a publish) and waits until it has settled. */
+async function stopRun(id) {
   const r = running.get(id);
   if (!r) return false;
   r.controller?.abort();
   await r.promise.catch(() => {});
   return true;
+}
+
+/**
+ * An edit changes the input of every later stage. A stage still running on the old input would
+ * otherwise finish on stale data (e.g. timing aligned to the new script but the old voice).
+ */
+async function stopForEdit(p, why) {
+  const stage = running.get(p.id)?.stage;
+  if (await stopRun(p.id)) log(p, stage || 'script', `■ stopped: ${why}`);
 }
 
 export async function approve(id, stage) {
@@ -191,27 +208,25 @@ export function setApprovals(id, approvals) {
 export async function editStage(id, stage, body) {
   const p = getProject(id);
   if (!p) throw httpError(404, 'project not found');
-  if (running.get(id)?.stage === stage) throw httpError(409, `${stage} is running — cancel it first`);
+  if (!['script', 'timing', 'storyboard'].includes(stage)) throw httpError(400, `${stage} cannot be edited (re-run it instead)`);
+  validateEdit(p, stage, body);
+  await stopForEdit(p, `${stage} edited`);
   const st = p.stages[stage];
   if (stage === 'script') {
     const text = String(body?.text ?? '').trim();
-    if (!text) throw httpError(400, 'script text is empty');
     p.script = { ...(p.script || {}), title: String(body.title ?? p.script?.title ?? '').trim(), text, sources: Array.isArray(body.sources) ? body.sources.map(String) : p.script?.sources || [], edited: true, words: countWords(text) };
   } else if (stage === 'timing') {
-    if (!Array.isArray(body?.words) || body.words.length !== p.words?.length) throw httpError(400, 'words must be an array with the same length');
     body.words.forEach((w, i) => {
       const s = Number(w.start), e = Number(w.end);
       if (Number.isFinite(s)) p.words[i].start = +s.toFixed(3);
       if (Number.isFinite(e)) p.words[i].end = +Math.max(e, p.words[i].start + 0.05).toFixed(3);
       if (typeof w.text === 'string' && w.text.trim()) p.words[i].text = w.text.trim();
     });
-  } else if (stage === 'storyboard') {
-    if (!p.words) throw httpError(409, 'timing is not done yet');
-    const raw = typeof body?.storyboard === 'string' ? extractJson(body.storyboard) : body?.storyboard;
-    const { storyboard, fixes } = repairStoryboard(raw, p.words, { forceTemplate: p.options.forceTemplate });
+  } else {
+    const { storyboard, fixes } = repairStoryboard(body._parsed, p.words, { forceTemplate: p.options.forceTemplate });
     p.storyboard = storyboard; p.storyboardFixes = fixes;
     p.icons = iconsFor(storyboardNouns(storyboard));
-  } else throw httpError(400, `${stage} cannot be edited (re-run it instead)`);
+  }
   log(p, stage, '✎ edited by user');
   if (st.status === 'idle' || st.status === 'error') st.status = 'done';
   const next = STAGES[STAGES.indexOf(stage) + 1];
@@ -219,10 +234,25 @@ export async function editStage(id, stage, body) {
   save(p);
 }
 
-export function saveUpload(id, buf, filename, mime) {
+function validateEdit(p, stage, body) {
+  if (stage === 'script' && !String(body?.text ?? '').trim()) throw httpError(400, 'script text is empty');
+  if (stage === 'timing' && (!Array.isArray(body?.words) || !p.words || body.words.length !== p.words.length)) throw httpError(400, 'words must be an array with the same length');
+  if (stage === 'storyboard') {
+    if (!p.words?.length) throw httpError(409, 'timing is not done yet');
+    let raw;
+    try { raw = typeof body?.storyboard === 'string' ? extractJson(body.storyboard) : body?.storyboard; }
+    catch (e) { throw httpError(400, `storyboard JSON: ${e.message}`); }
+    if (!raw || typeof raw !== 'object') throw httpError(400, 'storyboard must be a JSON object');
+    body._parsed = raw;
+  }
+}
+
+export async function saveUpload(id, buf, filename, mime) {
   const p = getProject(id);
   if (!p) throw httpError(404, 'project not found');
   if (!buf?.length) throw httpError(400, 'empty upload');
+  if (!looksLikeMedia(buf)) throw httpError(415, 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)');
+  await stopForEdit(p, 'new voice-over uploaded');
   const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
   for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
   fs.writeFileSync(path.join(projectDir(id), `upload.${ext}`), buf);
@@ -233,9 +263,18 @@ export function saveUpload(id, buf, filename, mime) {
   save(p);
 }
 
-export function setVoiceMode(id, mode) {
+/** Magic-byte check: the bytes must be a container ffmpeg can read as audio, whatever the file name says. */
+export function looksLikeMedia(buf) {
+  const a = (i, s) => buf.subarray(i, i + s.length).toString('latin1') === s;
+  return a(0, 'ID3') || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) // mp3 / aac (ADTS)
+    || (a(0, 'RIFF') && a(8, 'WAVE')) || a(4, 'ftyp') || a(0, 'OggS') || a(0, 'fLaC')
+    || (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3); // webm / matroska
+}
+
+export async function setVoiceMode(id, mode) {
   const p = getProject(id);
   if (!p) throw httpError(404, 'project not found');
+  if ((mode === 'upload' ? 'upload' : 'tts') !== p.voiceMode) await stopForEdit(p, 'voice mode changed');
   p.voiceMode = mode === 'upload' ? 'upload' : 'tts';
   if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
   save(p);

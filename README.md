@@ -54,7 +54,8 @@
 ## الاختبارات (من غير إنترنت)
 
 ```bash
-npm test                 # unit tests: <think>، parsing، LCS، إصلاح الستوري بورد، الأيقونات، إخفاء المفاتيح
+npm test                 # unit + robustness (المسارات الفاشلة: ffmpeg بيقع، 401 من يوتيوب، تعديل وقت التشغيل، رفع ملف مش صوت…)
+npm run test:unit        # unit tests بس: <think>، parsing، LCS، إصلاح الستوري بورد، الأيقونات، إخفاء المفاتيح
 npm run e2e              # مشروع 10 ث كامل على الـ mocks + فحص التزامن والصيغة والـ LUFS → output/test-reel-10s.mp4
 npm run templates        # مشروع لكل قالب + contact sheet في output/templates/  (--theme=paper للثيم الكريمي)
 npm run mock             # tools/mock-apis.mjs على :4399 (LLM + ElevenLabs + Deepgram مزيفين)
@@ -68,6 +69,9 @@ LLM_BASE_URL=http://127.0.0.1:4399/v1 ELEVENLABS_BASE_URL=http://127.0.0.1:4399 
 (كل الـ base URLs ممكن تتغيّر من متغيرات البيئة، وبتغلب على الإعدادات.)
 
 ## ملاحظات
+
+- تقرير المراجعة الفنية وخطة التطوير: [`docs/AUDIT.md`](docs/AUDIT.md).
+- `data/settings.json` و `data/youtube-token.json` بيتكتبوا بصلاحية المالك بس (0600 على لينكس/ماك)، وكل ملفات JSON بتتكتب atomically.
 
 - الرندر بيشغّل كذا صفحة Chromium بالتوازي (`RS_RENDER_WORKERS`)؛ 10 ثواني بتاخد حوالي دقيقة على جهاز 4 أنوية.
 - `RS_CAPTURE=screenshot` بيستخدم screenshot من Playwright بدل التقاط الكانفاس (أبطأ، نفس النتيجة).
