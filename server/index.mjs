@@ -170,6 +170,7 @@ async function route(req, res) {
       if (!b && m === 'DELETE') { A.deleteAsset(id); return json(res, 200, { ok: true }); }
       if (b === 'file') return sendFile(req, res, A.assetFile(asset), { cache: 'max-age=86400' });
       if (b === 'thumb' && asset.thumb) return sendFile(req, res, path.join(A.assetDir(id), 'thumb.jpg'), { cache: 'max-age=86400' });
+      if (b === 'scaled') return sendFile(req, res, await A.scaledFile(asset, url.searchParams.get('max')), { cache: 'max-age=86400' });
     }
     if (a === 'providers') {
       if (!id && m === 'GET') return json(res, 200, PV.providerStatus());
@@ -235,6 +236,12 @@ async function route(req, res) {
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p));
+      if (b === 'edit' && m === 'PUT') return json(res, 200, await P.saveEdit(id, await readJson(req)));
+      if (b === 'clips' && stage && action && m === 'GET') {
+        // extracted video-clip frames: /api/projects/<id>/clips/<key>/f_00001.jpg
+        if (!/^[a-f0-9]{12}-[\d.]+-[\d.]+-\d+-\d+x\d+$/.test(stage) || !/^f_\d{5}\.jpg$/.test(action)) return json(res, 404, { error: 'not found' });
+        return sendFile(req, res, path.join(P.projectDir(id), 'clips', stage, action), { cache: 'max-age=3600' });
+      }
       if ((b === 'subtitles.srt' || b === 'subtitles.vtt') && m === 'GET') {
         if (!p.words?.length) throw P.httpError(409, 'timing is not done yet');
         const cues = buildCues(p.words, P.subtitleOptions(p));

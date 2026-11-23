@@ -142,3 +142,21 @@ export function creditsFor(ids) {
   return [...new Set(ids)].map(getAsset).filter(Boolean).filter((a) => a.source?.type !== 'upload' || a.license?.attribution)
     .map((a) => a.license?.attribution || `${a.source.author ? a.source.author + ' — ' : ''}${a.source.provider || a.source.type}${a.source.pageUrl ? ' ' + a.source.pageUrl : ''}`);
 }
+
+/** A downscaled JPEG (longest side ≤ max) cached next to the original — the renderer never decodes a 6000-px photo. */
+export async function scaledFile(a, max) {
+  if (a.kind !== 'image') return assetFile(a);
+  const m = [720, 1080, 1280, 1920].includes(Number(max)) ? Number(max) : 1920;
+  if (Math.max(a.width || 0, a.height || 0) <= m && a.file.endsWith('.jpg')) return assetFile(a);
+  const out = path.join(DIR, a.id, `scaled-${m}.jpg`);
+  if (fs.existsSync(out)) return out;
+  // several render pages ask for the same image at once: one conversion, everyone awaits it
+  if (!scaling.has(out)) {
+    const tmp = `${out}.${crypto.randomBytes(4).toString('hex')}.tmp.jpg`;
+    scaling.set(out, run(FFMPEG, ['-hide_banner', '-y', '-i', assetFile(a), '-frames:v', '1', '-vf', `scale=${m}:${m}:force_original_aspect_ratio=decrease`, '-q:v', '3', tmp])
+      .then(() => fs.renameSync(tmp, out)).finally(() => { fs.rmSync(tmp, { force: true }); scaling.delete(out); }));
+  }
+  await scaling.get(out);
+  return out;
+}
+const scaling = new Map();

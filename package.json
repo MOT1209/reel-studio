@@ -1,10 +1,12 @@
 {
   "name": "reel-studio",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Reel Studio v1 — topic → vertical Arabic (Egyptian) science-explainer reel, rendered locally.",
+  "description": "Reel Studio — AI video studio for Arabic educational reels, shorts and explainers, rendered locally.",
   "type": "module",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "setup": "npm install && node tools/install-browser.mjs",
     "start": "node server/index.mjs",
@@ -16,7 +18,9 @@
     "test:unit": "node tools/unit.mjs",
     "test:robustness": "node tools/robustness.mjs",
     "e2e": "node tools/e2e.mjs",
-    "templates": "node tools/templates-test.mjs"
+    "templates": "node tools/templates-test.mjs",
+    "test:export": "node tools/export-test.mjs",
+    "test:all": "npm test && npm run e2e && npm run test:export && npm run templates"
   },
   "dependencies": {
     "playwright": "^1.49.0"

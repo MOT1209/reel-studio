@@ -6,7 +6,11 @@
     bg: '#0C1014', card: '#161C22', elev: '#202830', text: '#F4F3EE', sec: '#9AA5AE',
     accent: '#27B8C7', blue: '#5978FF', success: '#36C98F', warning: '#F28A30',
   };
-  const DW = 720, DH = 1280, S = 1.5;
+  // layout (set from D.layout at boot): design size, output scale, where the card / title / captions go
+  let DW = 720, DH = 1280, S = 1.5;
+  let PLACE = { x: 36, y: 232, k: 1 }, TITLE = { right: 684, width: 648, y: 150, size: 40 }, CAP = { cx: 360, cy: 1036, maxW: 620, lines: 2, scale: 1 };
+  let TYPO = { captionSize: 52, captionWeight: 700, titleWeight: 700, captionStyle: 'boxed', direction: 'auto', digits: 'latin', captions: true, letterSpacing: 0 };
+  const CAPFONT = 'ReelCaption';
   const CARD = { x: 36, y: 232, w: 648, h: 684, r: 30 };
   const BAR = 56; // card top bar (chip + counter)
   const SW = CARD.w, SH = CARD.h - BAR; // stage size inside the card
@@ -37,12 +41,14 @@
   const frac = (x) => x - Math.floor(x);
   const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; };
   const isArabic = (s) => /[؀-ۿ]/.test(s);
-  const toArDigits = (s) => String(s);
+  const toArDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
+  const dg = (s) => (TYPO.digits === 'arabic' ? toArDigits(s) : String(s));
 
   // ---------- text ----------
-  function font(size, weight = 700) { ctx.font = `${weight} ${size}px ${FONT}`; }
+  function font(size, weight = 700, fam = FONT) { ctx.font = `${weight} ${size}px ${fam}`; }
   function text(str, x, y, { size = 28, weight = 700, color = C.text, align = 'center', alpha = 1, base = 'middle' } = {}) {
     if (!str) return;
+    str = dg(str);
     font(size, weight);
     ctx.globalAlpha *= alpha;
     ctx.fillStyle = color;
@@ -57,7 +63,7 @@
     const key = `${str}|${maxW}|${size}|${weight}`;
     if (wrapCache.has(key)) return wrapCache.get(key);
     font(size, weight);
-    const words = String(str || '').split(/\s+/).filter(Boolean);
+    const words = dg(str || '').split(/\s+/).filter(Boolean);
     const lines = [];
     let cur = '';
     for (const w of words) {
@@ -514,6 +520,149 @@
     void lx;
   };
 
+  // ---------- media (images, video clips) ----------
+  const IMG = new Map(); // asset id → HTMLImageElement (downscaled on the server)
+  const VID = new Map(); // preview only: asset id → HTMLVideoElement
+  const CUR = new Map(); // render only: clip ref → decoded frame image for the current t
+  const FRAME_CACHE = new Map(); // url → Promise<Image>
+  let PREVIEW = false;
+  function loadImage(src) {
+    if (FRAME_CACHE.has(src)) return FRAME_CACHE.get(src);
+    const pr = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image failed: ' + src)); im.src = src; });
+    FRAME_CACHE.set(src, pr);
+    if (FRAME_CACHE.size > 48) FRAME_CACHE.delete(FRAME_CACHE.keys().next().value); // bounded: a long clip never piles up in RAM
+    return pr;
+  }
+  function clipFrameUrl(clip, local) {
+    const idx = (Math.max(0, Math.floor(local * clip.fps + 1e-6)) % clip.count) + 1;
+    return clip.url + 'f_' + String(idx).padStart(5, '0') + '.jpg';
+  }
+  /** Video references visible at t: { ref, asset, clip, local } (local = seconds into the clip). */
+  function videoRefs(t) {
+    const out = [];
+    D.scenes.forEach((sc, k) => { if (sc.image && D.media[sc.image]?.kind === 'video' && t >= sc.start && t <= sc.end + TRANS) out.push({ ref: `scene-${k}`, asset: sc.image, clip: sc.clip, local: t - sc.start, offset: sc.imageOffset || 0 }); });
+    (D.overlays || []).forEach((o) => { if (o.kind === 'video' && t >= o.start && t <= o.end) out.push({ ref: `ov-${o.id}`, asset: o.asset, clip: o.clip, local: t - o.start, offset: o.offset || 0 }); });
+    return out;
+  }
+  /** Render mode: loads the exact frame images frame t needs (awaited by the capture loop before drawFrame). */
+  async function prepareFrame(t) {
+    for (const v of videoRefs(t)) if (v.clip) CUR.set(v.ref, await loadImage(clipFrameUrl(v.clip, v.local)));
+  }
+  function mediaDrawable(ref, asset, t, local, offset) {
+    const m = D.media[asset];
+    if (!m) return null;
+    if (m.kind === 'image') return IMG.get(asset) || null;
+    if (!PREVIEW) return CUR.get(ref) || null;
+    const v = VID.get(asset);
+    if (!v) return null;
+    const want = offset + (m.duration ? local % Math.max(0.1, m.duration - offset) : local);
+    if (Math.abs(v.currentTime - want) > 0.25) { try { v.currentTime = want; } catch {} }
+    if (PLAYING && v.paused) v.play().catch(() => {}); else if (!PLAYING && !v.paused) v.pause();
+    return v.readyState >= 2 ? v : null;
+  }
+  const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
+  /** Draws img covering (x,y,w,h) with a slow Ken Burns push k∈[0,1]. */
+  function drawCover(img, x, y, w, h, k = 0, alpha = 1) {
+    const [iw, ih] = dims(img);
+    if (!iw || !ih) return;
+    const sc = Math.max(w / iw, h / ih) * (1 + 0.08 * k);
+    const dw = iw * sc, dh = ih * sc;
+    ctx.save(); ctx.globalAlpha *= alpha;
+    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.drawImage(img, x + (w - dw) / 2 - 12 * k, y + (h - dh) / 2 - 8 * k, dw, dh);
+    ctx.restore();
+  }
+  function mediaPlaceholder(x, y, w, h, label) {
+    ctx.save(); rrect(x, y, w, h, 18); ctx.fillStyle = C.elev; ctx.fill();
+    ctx.strokeStyle = hexA(C.text, 0.12); ctx.setLineDash([10, 8]); ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+    text(label || 'صورة', x + w / 2, y + h / 2, { size: 24, color: C.sec, weight: 400 });
+  }
+
+  // photo: a real photo or video fills the card (Ken Burns), items appear as caption pills
+  T.photo = (sc, t) => {
+    const k = clamp((t - sc.start) / Math.max(1, sc.end - sc.start));
+    const img = sc.image ? mediaDrawable(`scene-${D.scenes.indexOf(sc)}`, sc.image, t, t - sc.start, sc.imageOffset || 0) : null;
+    if (img) drawCover(img, 0, 0, SW, SH, eInOut(k));
+    else mediaPlaceholder(20, 20, SW - 40, SH - 40, sc.query || 'صورة');
+    // legibility gradient for the title band and the pills
+    const g = ctx.createLinearGradient(0, 0, 0, SH);
+    g.addColorStop(0, hexA('#000000', 0.55)); g.addColorStop(0.22, hexA('#000000', 0)); g.addColorStop(0.7, hexA('#000000', 0)); g.addColorStop(1, hexA('#000000', 0.55));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, SW, SH);
+    const rt = itemTimes(sc);
+    sc.items.forEach((it, i) => {
+      const st = el(t, rt[i]);
+      if (!st.on) return;
+      font(26, 700); const w = ctx.measureText(dg(it.label)).width + 48;
+      const y = SH - 64 - (sc.items.length - 1 - i) * 62;
+      ctx.save(); ctx.globalAlpha *= st.e; ctx.translate(SW - 30 - w / 2, y); ctx.scale(lerp(0.7, 1, st.k), lerp(0.7, 1, st.k));
+      rrect(-w / 2, -24, w, 48, 24); ctx.fillStyle = hexA(C.card, 0.86); ctx.fill(); ctx.strokeStyle = hexA(C.accent, 0.6); ctx.lineWidth = 2; ctx.stroke();
+      text(it.label, 0, 1, { size: 26, color: C.text }); ctx.restore();
+    });
+  };
+  T.photo.drawsTitleOver = true;
+
+  // type: animated typography — up to 3 big phrases pop in on their words (definition, quote, headline)
+  T.type = (sc, t) => {
+    const phrases = sc.items.length ? sc.items.map((it) => it.label) : [sc.title];
+    const rt = sc.items.length ? itemTimes(sc) : [sc.start + 0.2];
+    const n = phrases.length, area = SH - TOP - 40;
+    let size = n === 1 ? 74 : n === 2 ? 60 : 50;
+    const lines = phrases.map((ph) => { let s2 = size, l = wrap(ph, SW - 80, s2, 800); while (l.length > 2 && s2 > 30) { s2 -= 4; l = wrap(ph, SW - 80, s2, 800); } return { l, s: s2 }; });
+    const blockH = lines.reduce((a, x) => a + x.l.length * x.s * 1.2 + 26, 0);
+    let y = TOP + (area - blockH) / 2 + 20;
+    lines.forEach(({ l, s: s2 }, i) => {
+      const st = el(t, rt[i]);
+      const col = i % 2 ? C.accent : C.text;
+      ctx.save(); ctx.globalAlpha *= st.on ? st.e : 0.12;
+      const dy = st.on ? (1 - st.e) * 30 : 0;
+      l.forEach((ln, j) => text(ln, SW / 2, y + dy + j * s2 * 1.2 + s2 / 2, { size: s2, weight: 800, color: col }));
+      if (st.on) { const w = Math.min(SW - 120, 240) * eOut(prog(t, rt[i] + 0.15, 0.4)); ctx.fillStyle = hexA(C.accent, 0.8); rrect(SW / 2 - w / 2, y + l.length * s2 * 1.2 + 4, w, 5, 3); ctx.fill(); }
+      ctx.restore();
+      y += l.length * s2 * 1.2 + 26;
+    });
+  };
+
+  // ---------- overlays (text / image / video clips on their own track) ----------
+  function overlayBox(o, mw, mh) {
+    const W = DW * o.scale;
+    if (o.pos === 'full') return { x: 0, y: 0, w: DW, h: DH };
+    const h = mw && mh ? W * (mh / mw) : W * 0.6;
+    const cy = o.pos === 'top' ? DH * 0.14 + h / 2 : o.pos === 'bottom' ? DH * 0.86 - h / 2 : DH / 2;
+    return { x: (DW - W) / 2, y: cy - h / 2, w: W, h };
+  }
+  function drawOverlays(t) {
+    for (const o of D.overlays || []) {
+      if (t < o.start || t > o.end) continue;
+      const kin = o.anim === 'none' ? 1 : eOut(prog(t, o.start, 0.3)), kout = o.anim === 'none' ? 0 : eInOut(prog(t, o.end - 0.25, 0.25));
+      const a = kin * (1 - kout) * o.opacity;
+      if (a <= 0.001) continue;
+      ctx.save(); ctx.globalAlpha = a;
+      if (o.kind === 'text') {
+        const size = o.size * (CAP.scale || 1);
+        const lines = wrap(o.text, DW * 0.86 * o.scale, size, 800);
+        const lh = size * 1.3, h = lines.length * lh + size * 0.7;
+        font(size, 800); const w = Math.min(DW - 40, Math.max(...lines.map((l) => ctx.measureText(l).width)) + size * 1.2);
+        const cy = o.pos === 'top' ? DH * 0.1 + h / 2 : o.pos === 'bottom' ? DH * 0.9 - h / 2 : DH / 2;
+        ctx.translate(DW / 2, cy);
+        if (o.anim === 'pop') { const k = lerp(0.6, 1, eBack(prog(t, o.start, 0.45))); ctx.scale(k, k); }
+        if (o.anim === 'slide') ctx.translate((1 - kin) * 80 - kout * 80, 0);
+        if (o.box) { rrect(-w / 2, -h / 2, w, h, size * 0.4); ctx.fillStyle = hexA(C.card, 0.88); ctx.fill(); ctx.strokeStyle = hexA(o.color || C.accent, 0.7); ctx.lineWidth = 2.5; ctx.stroke(); }
+        lines.forEach((l, i) => text(l, 0, -((lines.length - 1) * lh) / 2 + i * lh, { size, weight: 800, color: o.color || C.text }));
+      } else {
+        const img = mediaDrawable(`ov-${o.id}`, o.asset, t, t - o.start, o.offset || 0);
+        const m = D.media[o.asset] || {};
+        const b = overlayBox(o, m.width, m.height);
+        if (o.anim === 'pop') { const k = lerp(0.7, 1, eBack(prog(t, o.start, 0.45))); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.translate(-(b.x + b.w / 2), -(b.y + b.h / 2)); }
+        if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);
+        if (o.pos !== 'full') { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24; rrect(b.x, b.y, b.w, b.h, 18); ctx.fillStyle = C.card; ctx.fill(); ctx.restore(); }
+        ctx.save(); if (o.pos !== 'full') { rrect(b.x, b.y, b.w, b.h, 18); ctx.clip(); }
+        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+  }
+
   // ---------- captions ----------
   let CH = null; // caption chunks
   function buildChunks() {
@@ -531,39 +680,41 @@
     function posInLine(i) { return W.slice(0, i + 1).filter((w) => w.line === W[i].line).length; }
     const acc = new Map((D.accents || []).map(([i, tone]) => [i, tone]));
     CH = out.map((idx, k) => ({ idx, start: W[idx[0]].start, layout: null, acc }));
-    CH.forEach((c, k) => { c.end = k + 1 < CH.length ? CH[k + 1].start : D.duration + 1; });
+    CH.forEach((c, k) => { c.end = k + 1 < CH.length ? CH[k + 1].start : (D.full || D.duration) + 1; });
   }
   function layoutChunk(c) {
     if (c.layout) return c.layout;
-    const maxW = 620;
-    let size = 52, lines;
+    const maxW = CAP.maxW;
+    let size = Math.round(TYPO.captionSize * (CAP.scale || 1)), lines;
+    const minSize = Math.max(22, Math.round(size * 0.68));
     for (;;) {
-      font(size, 700);
+      font(size, TYPO.captionWeight, CAPFONT);
       const sp = size * 0.3;
       lines = [[]]; let lw = 0;
       for (const i of c.idx) {
-        const w = ctx.measureText(D.words[i].text).width;
+        const w = ctx.measureText(dg(D.words[i].text)).width;
         if (lw && lw + sp + w > maxW) { lines.push([]); lw = 0; }
         lines[lines.length - 1].push({ i, w });
         lw += (lw ? sp : 0) + w;
       }
-      if (lines.length <= 2 || size <= 36) break;
+      if (lines.length <= CAP.lines || size <= minSize) break;
       size -= 4;
     }
     const sp = size * 0.3, lh = size * 1.42;
     const placed = [];
-    const y0 = 1036 - ((lines.length - 1) * lh) / 2;
+    const y0 = CAP.cy - ((lines.length - 1) * lh) / 2;
     // line breaks are found in logical order; then each line is reordered for display (UAX #9 at word level),
     // so an English term or a number inside an Arabic line keeps its reading order
-    const base = window.ReelBidi.baseDir(c.idx.map((i) => D.words[i].text));
+    const base = TYPO.direction === 'rtl' || TYPO.direction === 'ltr' ? TYPO.direction : window.ReelBidi.baseDir(c.idx.map((i) => D.words[i].text));
     lines.forEach((ln, li) => {
       const total = ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
       const order = window.ReelBidi.visualOrder(ln.map((x) => D.words[x.i].text), base);
+      const left = TYPO.align === 'right' ? CAP.cx + maxW / 2 - total : TYPO.align === 'left' ? CAP.cx - maxW / 2 : CAP.cx - total / 2;
       if (base === 'rtl') {
-        let x = DW / 2 + total / 2; // start at the right edge
+        let x = left + total; // start at the right edge
         for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
       } else {
-        let x = DW / 2 - total / 2;
+        let x = left;
         for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
       }
     });
@@ -575,25 +726,33 @@
     for (let j = 0; j < CH.length; j++) if (t >= CH[j].start - 0.12) k = j;
     return k;
   }
+  // caption styles: boxed (highlight box on the spoken word), karaoke (colour fill), minimal (no dimming), outline (social)
   function drawCaptions(t) {
-    if (!CH.length) return;
+    if (!CH.length || TYPO.captions === false) return;
     const k = chunkAt(t), c = CH[k];
     const { size, placed } = layoutChunk(c);
+    const style = TYPO.captionStyle;
     const appear = k === 0 ? 1 : eOut(prog(t, c.start - 0.12, 0.18));
     ctx.save();
     ctx.globalAlpha = appear;
     ctx.translate(0, (1 - appear) * 14);
-    font(size, 700);
+    font(size, TYPO.captionWeight, CAPFONT);
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     for (const p of placed) {
       const w = D.words[p.i];
+      const str = dg(w.text);
       const lit = t >= w.start; // lights exactly at its spoken onset
       const next = D.words[p.i + 1];
       const active = lit && t < (next ? next.start : w.end + 0.3);
       const tone = c.acc.get(p.i);
-      const col = !lit ? hexA(C.sec, 0.42) : tone && tone !== 'underline' ? TONE[tone] : C.text;
-      const pop = lit ? 1 + 0.1 * (1 - eOut(prog(t, w.start, 0.22))) : 1;
-      if (active) {
+      const toneCol = tone && tone !== 'underline' ? TONE[tone] : null;
+      let col;
+      if (style === 'minimal') col = toneCol || C.text;
+      else if (style === 'karaoke') col = !lit ? hexA(C.sec, 0.42) : active ? C.accent : toneCol || C.text;
+      else if (style === 'outline') col = active ? '#FFD23F' : toneCol || '#FFFFFF';
+      else col = !lit ? hexA(C.sec, 0.42) : toneCol || C.text;
+      const pop = lit && style !== 'minimal' ? 1 + 0.1 * (1 - eOut(prog(t, w.start, 0.22))) : 1;
+      if (active && style === 'boxed') {
         const a = eOut(prog(t, w.start, 0.08));
         ctx.save(); ctx.globalAlpha *= a;
         rrect(p.x - 10, p.y - size * 0.62, p.w + 20, size * 1.24, 14); ctx.fillStyle = hexA(C.elev, 0.95); ctx.fill();
@@ -603,7 +762,9 @@
       ctx.translate(p.x + p.w / 2, p.y); ctx.scale(pop, pop);
       ctx.direction = isArabic(w.text) ? 'rtl' : 'ltr';
       ctx.textAlign = 'center';
-      ctx.fillStyle = col; ctx.fillText(w.text, 0, 0);
+      if (style === 'outline') { ctx.lineJoin = 'round'; ctx.lineWidth = size * 0.16; ctx.strokeStyle = 'rgba(0,0,0,.92)'; ctx.strokeText(str, 0, 0); }
+      if (style === 'minimal') { ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = size * 0.25; ctx.shadowOffsetY = 3; }
+      ctx.fillStyle = col; ctx.fillText(str, 0, 0);
       ctx.restore();
       if (tone && lit) {
         const ku = eOut(prog(t, w.start, 0.3));
@@ -625,8 +786,26 @@
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const g = c.getContext('2d'); draw(g); return c;
   }
+  const placeCard = (g) => { g.translate(PLACE.x, PLACE.y); g.scale(PLACE.k, PLACE.k); g.translate(-CARD.x, -CARD.y); };
+  function drawCardShape(g) {
+    g.save(); placeCard(g);
+    g.save(); g.shadowColor = LIGHT ? 'rgba(60,40,10,0.16)' : 'rgba(0,0,0,0.5)'; g.shadowBlur = 40; g.shadowOffsetY = 16;
+    g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.fillStyle = C.card; g.fill(); g.restore();
+    g.save(); g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.clip();
+    g.strokeStyle = hexA(C.text, LIGHT ? 0.05 : 0.03); g.lineWidth = 1; g.beginPath();
+    for (let x = CARD.x + 24; x < CARD.x + CARD.w; x += 24) { g.moveTo(x, CARD.y + BAR); g.lineTo(x, CARD.y + CARD.h); }
+    for (let y = CARD.y + BAR + 24; y < CARD.y + CARD.h; y += 24) { g.moveTo(CARD.x, y); g.lineTo(CARD.x + CARD.w, y); }
+    if (GRID) g.stroke(); g.restore();
+    g.restore();
+  }
   function buildLayers() {
-    const bg = layer(DW * S, DH * S, (g) => {
+    const W = Math.round(DW * S), H = Math.round(DH * S);
+    const glow = layer(256, 256, (g) => {
+      const r = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+      r.addColorStop(0, hexA(C.accent, 0.09)); r.addColorStop(0.5, hexA(C.accent, 0.035)); r.addColorStop(1, hexA(C.accent, 0));
+      g.fillStyle = r; g.fillRect(0, 0, 256, 256);
+    });
+    const base = layer(W, H, (g) => {
       g.setTransform(S, 0, 0, S, 0, 0);
       g.fillStyle = C.bg; g.fillRect(0, 0, DW, DH);
       g.strokeStyle = hexA(C.text, LIGHT ? 0.06 : 0.035); g.lineWidth = 1;
@@ -636,81 +815,91 @@
       if (GRID) g.stroke();
       g.fillStyle = hexA(C.text, LIGHT ? 0.12 : 0.07);
       if (GRID) for (let x = 0; x <= DW; x += 160) for (let y = 0; y <= DH; y += 160) g.fillRect(x - 1.5, y - 1.5, 3, 3);
-      const v = g.createRadialGradient(DW / 2, DH / 2, DH * 0.3, DW / 2, DH / 2, DH * 0.75);
+      const R = Math.max(DW, DH);
+      const v = g.createRadialGradient(DW / 2, DH / 2, R * 0.3, DW / 2, DH / 2, R * 0.75);
       v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, LIGHT ? 'rgba(60,40,10,0.10)' : 'rgba(0,0,0,0.45)');
       g.fillStyle = v; g.fillRect(0, 0, DW, DH);
+      g.drawImage(glow, DW * 0.36 - 620, DH * 0.3 - 620, 1240, 1240);
+      g.drawImage(glow, DW * 0.78 - 500, DH * 0.86 - 500, 1000, 1000);
     });
-    const glow = layer(256, 256, (g) => {
-      const r = g.createRadialGradient(128, 128, 0, 128, 128, 128);
-      r.addColorStop(0, hexA(C.accent, 0.09)); r.addColorStop(0.5, hexA(C.accent, 0.035)); r.addColorStop(1, hexA(C.accent, 0));
-      g.fillStyle = r; g.fillRect(0, 0, 256, 256);
-    });
-    const card = layer(DW * S, DH * S, (g) => {
-      g.drawImage(bg, 0, 0); // one merged static layer: background + glow + card
-      g.setTransform(S, 0, 0, S, 0, 0);
-      g.drawImage(glow, 260 - 620, 380 - 620, 1240, 1240);
-      g.drawImage(glow, 560 - 500, 1100 - 500, 1000, 1000);
-      g.save(); g.shadowColor = LIGHT ? 'rgba(60,40,10,0.16)' : 'rgba(0,0,0,0.5)'; g.shadowBlur = 40; g.shadowOffsetY = 16;
-      g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.fillStyle = C.card; g.fill(); g.restore();
-      g.save(); g.beginPath(); g.roundRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.r); g.clip();
-      g.strokeStyle = hexA(C.text, LIGHT ? 0.05 : 0.03); g.lineWidth = 1; g.beginPath();
-      for (let x = CARD.x + 24; x < CARD.x + CARD.w; x += 24) { g.moveTo(x, CARD.y + BAR); g.lineTo(x, CARD.y + CARD.h); }
-      for (let y = CARD.y + BAR + 24; y < CARD.y + CARD.h; y += 24) { g.moveTo(CARD.x, y); g.lineTo(CARD.x + CARD.w, y); }
-      if (GRID) g.stroke(); g.restore();
-    });
-    LAYERS = { bg, glow, card };
+    const cardOnly = layer(W, H, (g) => { g.setTransform(S, 0, 0, S, 0, 0); drawCardShape(g); });
+    const card = layer(W, H, (g) => { g.drawImage(base, 0, 0); g.drawImage(cardOnly, 0, 0); }); // one merged static layer
+    LAYERS = { base, cardOnly, card };
   }
   function blit(img) { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(img, 0, 0); ctx.restore(); }
   function drawBackground(t) {
-    blit(LAYERS.card); // background + glow + card (pre-rendered once; per-frame blends are too costly)
+    // scenes with a full-frame background photo/video: base → media (darkened) → card on top
+    const full = D.scenes.map((sc, k) => [sc, k]).filter(([sc]) => sc.bg === 'full' && sc.image && t >= sc.start && t <= sc.end + TRANS);
+    if (!full.length) { blit(LAYERS.card); return; }
+    blit(LAYERS.base);
+    for (const [sc, k] of full) {
+      const a = (k === 0 ? 1 : eOut(prog(t, sc.start, TRANS))) * (t > sc.end ? 1 - eInOut(prog(t, sc.end, TRANS)) : 1);
+      const img = mediaDrawable(`scene-${k}`, sc.image, t, t - sc.start, sc.imageOffset || 0);
+      if (img) { drawCover(img, 0, 0, DW, DH, eInOut(clamp((t - sc.start) / Math.max(1, sc.end - sc.start))), a); ctx.save(); ctx.globalAlpha = 0.5 * a; ctx.fillStyle = C.bg; ctx.fillRect(0, 0, DW, DH); ctx.restore(); }
+    }
+    blit(LAYERS.cardOnly);
   }
   function drawHeader(t) {
-    // progress
+    // progress (of the exported clip)
     ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
-    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(t / D.duration);
+    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp((t - D.start) / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
-    const tag = D.seriesTag || '';
-    const tw = ctx.measureText(tag).width + 56;
-    rrect(DW - 36 - tw, 56, tw, 44, 22); ctx.fillStyle = C.card; ctx.fill(); ctx.strokeStyle = hexA(C.text, 0.08); ctx.lineWidth = 1.5; ctx.stroke();
-    const pa = 0.6 + 0.4 * Math.sin(t * 4);
-    ctx.beginPath(); ctx.arc(DW - 36 - 24, 78, 6, 0, Math.PI * 2); ctx.fillStyle = hexA(C.accent, pa); ctx.fill();
-    text(tag, DW - 36 - 40, 79, { size: 22, align: 'right', color: C.text });
+    const tag = dg(D.seriesTag || '');
+    if (tag) {
+      const tw = ctx.measureText(tag).width + 56;
+      rrect(DW - 36 - tw, 56, tw, 44, 22); ctx.fillStyle = C.card; ctx.fill(); ctx.strokeStyle = hexA(C.text, 0.08); ctx.lineWidth = 1.5; ctx.stroke();
+      const pa = 0.6 + 0.4 * Math.sin(t * 4);
+      ctx.beginPath(); ctx.arc(DW - 36 - 24, 78, 6, 0, Math.PI * 2); ctx.fillStyle = hexA(C.accent, pa); ctx.fill();
+      text(tag, DW - 36 - 40, 79, { size: 22, align: 'right', color: C.text });
+    }
     // title
-    const ta = eOut(prog(t, 0, 0.5));
+    const ta = eOut(prog(t, D.start, 0.5));
     ctx.save(); ctx.globalAlpha = ta; ctx.translate(0, (1 - ta) * 12);
-    let size = 40, lines = wrap(D.title, DW - 72, size);
-    while (lines.length > 2 && size > 26) { size -= 4; lines = wrap(D.title, DW - 72, size); }
-    lines.slice(0, 2).forEach((l, i) => text(l, DW - 36, 150 + i * size * 1.25 - (lines.length > 1 ? size * 0.6 : 0), { size, align: 'right' }));
+    let size = TITLE.size, lines = wrap(D.title, TITLE.width, size, TYPO.titleWeight);
+    while (lines.length > 2 && size > 22) { size -= 4; lines = wrap(D.title, TITLE.width, size, TYPO.titleWeight); }
+    lines.slice(0, 2).forEach((l, i) => text(l, TITLE.right, TITLE.y + i * size * 1.25 - (lines.length > 1 ? size * 0.6 : 0), { size, align: 'right', weight: TYPO.titleWeight }));
     ctx.restore();
   }
   function sceneIndexAt(t) { let k = 0; D.scenes.forEach((s, i) => { if (t >= s.start) k = i; }); return k; }
+  /** Scene enter/exit: returns { alpha, scale, dx } for the chosen transition style. */
+  function transitionState(sc, i, t) {
+    const style = D.transition || 'push';
+    if (style === 'none') return { alpha: t <= sc.end ? 1 : 0, scale: 1, dx: 0 };
+    const kin = i === 0 ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
+    const kout = t > sc.end ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
+    const alpha = kin * (1 - kout);
+    if (style === 'fade') return { alpha, scale: 1, dx: 0 };
+    if (style === 'zoom') return { alpha, scale: lerp(0.82, 1, kin) * lerp(1, 1.18, kout), dx: 0 };
+    if (style === 'slide') return { alpha: Math.min(1, alpha * 1.6), scale: 1, dx: (1 - kin) * SW * 0.9 - kout * SW * 0.9 };
+    const push = 1 + 0.045 * eInOut(prog(t, sc.start, Math.max(1, sc.end - sc.start)));
+    return { alpha, scale: push * lerp(0.94, 1, kin) * lerp(1, 1.08, kout), dx: (1 - kin) * 50 - kout * 50 }; // RTL: enter from the right
+  }
   function drawCard(t) {
+    ctx.save();
+    placeCard(ctx);
     // illustration (card fill, shadow and blueprint grid come from the static layer)
     ctx.save();
     rrect(CARD.x, CARD.y + BAR, CARD.w, CARD.h - BAR, [0, 0, CARD.r, CARD.r]); ctx.clip();
     D.scenes.forEach((sc, i) => {
       if (t < sc.start || t > sc.end + TRANS) return;
-      // staggered cross-fade: the old scene leaves quickly, the new one settles in just after (no double titles)
-      const kin = i === 0 ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
-      const kout = t > sc.end ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
-      const alpha = kin * (1 - kout);
+      const { alpha, scale: scl, dx } = transitionState(sc, i, t);
       if (alpha <= 0.001) return;
-      const push = 1 + 0.045 * eInOut(prog(t, sc.start, Math.max(1, sc.end - sc.start)));
-      const scl = push * lerp(0.94, 1, kin) * lerp(1, 1.08, kout);
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.translate(CARD.x + SW / 2, CARD.y + BAR + SH / 2);
       ctx.scale(scl, scl);
-      ctx.translate(-SW / 2 + (1 - kin) * 50 - kout * 50, -SH / 2); // RTL: enter from the right, exit to the left
-      if (sc.type === 'question') text('؟', SW / 2, SH / 2 + 20, { size: 460, color: hexA(C.accent, 0.06) });
+      ctx.translate(-SW / 2 + dx, -SH / 2);
+      const tpl = T[sc.template] || T.cards;
+      if (tpl.drawsTitleOver) tpl(sc, t);
+      if (sc.type === 'question' && !tpl.drawsTitleOver) text('؟', SW / 2, SH / 2 + 20, { size: 460, color: hexA(C.accent, 0.06) });
       if (sc.title) {
         const ta = eOut(prog(t, sc.start + 0.05, 0.35));
-        text(sc.title, SW / 2, 40 + (1 - ta) * 10, { size: 32, color: C.text, alpha: ta });
+        text(sc.title, SW / 2, 40 + (1 - ta) * 10, { size: 32, color: tpl.drawsTitleOver ? '#FFFFFF' : C.text, alpha: ta, weight: TYPO.titleWeight });
         ctx.save(); ctx.globalAlpha *= ta; ctx.fillStyle = C.accent; rrect(SW / 2 - 24 * ta, 68, 48 * ta, 4, 2); ctx.fill(); ctx.restore();
       }
-      (T[sc.template] || T.cards)(sc, t);
+      if (!tpl.drawsTitleOver) tpl(sc, t);
       ctx.restore();
     });
     ctx.restore();
@@ -740,6 +929,7 @@
       ctx.beginPath(); ctx.moveTo(x, y + sy * L); ctx.lineTo(x, y); ctx.lineTo(x + sx * L, y); ctx.stroke();
     });
     ctx.restore();
+    ctx.restore();
   }
 
   function drawFrame(t) {
@@ -752,43 +942,95 @@
     step('header', drawHeader);
     step('card', drawCard);
     step('captions', drawCaptions);
-    // end fade
-    const fo = prog(t, D.duration - 0.35, 0.35);
+    step('overlays', drawOverlays);
+    // end fade (at the end of the exported clip)
+    const fo = prog(t, D.end - 0.35, 0.35);
     if (fo > 0) { ctx.fillStyle = hexA(C.bg, fo * 0.6); ctx.fillRect(0, 0, DW, DH); }
   }
 
   // ---------- boot ----------
+  function applyLayout() {
+    const L = D.layout || {};
+    if (L.DW) { DW = L.DW; DH = L.DH; S = L.S; PLACE = L.place; TITLE = L.title; CAP = { scale: 1, ...L.caption }; }
+    TYPO = { ...TYPO, ...(D.typography || {}) };
+    canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
+    if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
+  }
+  async function loadFonts() {
+    const faces = [];
+    for (const [fam, f] of [[FONT, D.fonts.main], [CAPFONT, D.fonts.captions]]) for (const face of f.faces) faces.push(new FontFace(fam, `url(${face.url})`, { weight: face.weight }));
+    for (const f of faces) { await f.load(); document.fonts.add(f); }
+    await document.fonts.ready;
+  }
+  async function loadMedia() {
+    const jobs = [];
+    for (const [id, m] of Object.entries(D.media || {})) {
+      if (m.kind === 'image') jobs.push(loadImage(m.src).then((im) => IMG.set(id, im)));
+      else if (m.kind === 'video' && PREVIEW && !VID.has(id)) {
+        const v = document.createElement('video'); v.src = m.src; v.muted = true; v.playsInline = true; v.preload = 'auto'; VID.set(id, v);
+        jobs.push(new Promise((r) => { v.onloadeddata = r; v.onerror = r; setTimeout(r, 4000); }));
+      }
+    }
+    await Promise.all(jobs);
+  }
+  async function fetchData(id) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/render-data`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`render-data ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return res.json();
+  }
+  async function setup(data) {
+    D = data;
+    applyTheme(D.theme);
+    applyLayout();
+    await loadFonts();
+    await loadMedia();
+    wrapCache.clear(); iconCache.clear();
+    buildChunks();
+    buildLayers();
+    window.renderData = D;
+  }
+  let PLAYING = false;
   async function boot() {
     const q = new URLSearchParams(location.search);
     const id = q.get('project');
     if (!id) throw new Error('missing ?project=');
-    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/render-data`);
-    if (!res.ok) throw new Error(`render-data ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    D = await res.json();
-    applyTheme(D.theme);
-    const faces = [new FontFace(FONT, `url(${D.fonts.regular})`, { weight: '400' }), new FontFace(FONT, `url(${D.fonts.bold})`, { weight: '700' })];
-    for (const f of faces) { await f.load(); document.fonts.add(f); }
-    await document.fonts.ready;
-    buildChunks();
-    buildLayers();
+    PREVIEW = q.get('play') === '1';
+    if (PREVIEW) document.body.classList.add('fit');
+    await setup(await fetchData(id));
     window.drawFrame = drawFrame;
-    window.renderData = D;
-    drawFrame(Number(q.get('t')) || 0);
-    if (q.get('play') === '1') setupPlayer(id);
+    window.prepareFrame = prepareFrame;
+    drawFrame(Number(q.get('t')) || D.start);
+    if (PREVIEW) setupPlayer(id, q.get('embed') === '1');
     window.__ready = true;
   }
-  function setupPlayer(id) {
-    document.body.classList.add('fit');
+  function setupPlayer(id, embedded) {
     const audio = new Audio(`/api/projects/${encodeURIComponent(id)}/files/voice.mp3`);
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
-    let playing = false, t = 0;
-    const loop = () => {
-      if (playing) { t = audio.currentTime; if (t >= D.duration - 0.05 || audio.ended) { playing = false; btn.textContent = '▶'; } }
-      drawFrame(t); seek.value = String(Math.round((t / D.duration) * 1000)); tm.textContent = t.toFixed(2);
+    if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
+    let t = D.start;
+    const setPlaying = (on) => {
+      PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
+      if (on) { if (t >= D.end - 0.05) t = D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
+    };
+    const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
+    let lastPost = 0;
+    const loop = (now) => {
+      if (PLAYING) { t = audio.currentTime; if (t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } }
+      drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
+      if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
     };
-    btn.onclick = () => { playing = !playing; btn.textContent = playing ? '❚❚' : '▶'; if (playing) { audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause(); };
-    seek.oninput = () => { t = (Number(seek.value) / 1000) * D.duration; audio.currentTime = t; };
+    btn.onclick = () => setPlaying(!PLAYING);
+    seek.oninput = () => { t = D.start + (Number(seek.value) / 1000) * D.duration; audio.currentTime = t; };
+    // editor ↔ preview: seek / play / pause / reload (after an autosave)
+    window.addEventListener('message', async (e) => {
+      if (e.origin !== location.origin || !e.data?.type) return;
+      const m = e.data;
+      if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
+      if (m.type === 'reel:play') setPlaying(true);
+      if (m.type === 'reel:pause') setPlaying(false);
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); if (was) setPlaying(true); }
+    });
     requestAnimationFrame(loop);
   }
   boot().catch((e) => { window.__error = e.message; console.error(e); });
