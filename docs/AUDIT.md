@@ -126,11 +126,38 @@ Implemented: declarative skills (prompt / MCP), validation (all-or-nothing impor
 - Dialect detection is a marker heuristic (good for clear text, not a classifier); Maghrebi has detection but no generation preset.
 - Playwright's own Chromium could not be downloaded here; tests ran with the system Chrome fallback (the same path Windows users get when the download fails).
 
+## 6c. v3.0 — rendering architecture (Remotion + FFmpeg)
+
+Full design, benchmarks and the HyperFrames evaluation: [`RENDERING.md`](RENDERING.md). Phase reports with evidence:
+
+| Phase | Delivered | Evidence |
+|---|---|---|
+| 0 Analysis | architecture map, licence check (Remotion free for an individual), spike: Remotion + our ffmpeg via `onFrameBuffer`, Arabic shaping | phase-0 report |
+| 1 Engine manager | `engines/{manager,legacy,ffmpeg}.mjs`, `proc.mjs`; `render.mjs` kept as a facade; queue, job log, cancel by id, fallback; `/api/engines`, `/api/render-jobs` | `test:engines` 13/13 (frame order checked by colour, recovery, fallback, cancel, queue, codecs, ffprobe) |
+| 2 Remotion engine | `remotion/` composition over the shared renderer (`ReelRenderer.create`), bundle in a child process served at `/remotion/`, Playwright's headless shell | `test:remotion`: same frame count, SSIM 0.9953 mean / 0.9937 worst vs legacy; e2e 38/38 and export 10/10 run on Remotion |
+| 3 FFmpeg | H.264/H.265, CRF or bitrate, export folder, `validateOutput` on every MP4 | 16:9 1080p H.265 3 Mbps test; ffprobe line in every render log |
+| 4 Scene JSON | `schemas/scene.schema.json` + ajv + timing rules, checked after generation/repair/save and before every render; single-scene regeneration | 3 unit tests; regeneration API test |
+| 5 Animation | per-scene transition (+ wipe, rise) and title animation (rise, fade, pop, words), in the shared renderer | both engines SSIM 0.9954 on a project using every preset |
+| 6 Editor | engine/codec/bitrate in the toolbar, animation + regenerate in the scene inspector, engine settings + status | `test:ui` 18/18 (3 new) |
+| 7 Performance | `tools/engine-bench.mjs`; GL backend comparison | legacy 2.1–2.5× faster, Remotion ~250 MB less RAM; both < 1.8 GB peak with 2 pages |
+| 8 HyperFrames | PoC on Node 22 (Arabic DOM + canvas via timeline): correct, 90/90 frames; not integrated (Node 22, default-on telemetry, 0.x) | `RENDERING.md` |
+| 9 Validation | full suite, docs, release | release checklist below |
+
+Decisions taken on the owner's go-ahead: hybrid migration (shared canvas core inside Remotion first, React layers on
+top later) instead of re-writing 11 templates; `auto` = Remotion with legacy fallback; legacy engine kept (faster, and
+the reference for SSIM); no `@remotion/player` in the editor — the preview already runs the same renderer, so it is
+pixel-identical without a second React runtime in the UI.
+
+Known limits of v3.0: Remotion renders at about half the legacy speed on CPU-only machines (documented, one-click
+switch); React-only scene layers are prepared for (`remotion/Reel.jsx`) but no template uses one yet; HyperFrames is
+evaluated only.
+
 ## 7. Release checklist
-- [x] `npm test` (unit · Arabic · library · skills · vault · voice · robustness), `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
+- [x] `npm test` (unit · Arabic · library · skills · vault · voice · engines · robustness), `npm run e2e`, `npm run test:export`, `npm run test:remotion`, `npm run test:ui`, `npm run templates` green
 - [x] `npm audit --omit=dev` → 0 vulnerabilities
 - [x] Fonts bundled only with their OFL licence files; icon licences in `assets/icons/LICENSES.md`
 - [x] No secret reaches the browser (settings, MCP, providers tested) or the logs (redaction tested)
 - [x] README updated (setup, sections, editor, Arabic, security, tests)
 - [ ] First run with real keys on the owner's machine (LLM, ElevenLabs, one image provider) — watch `data/logs/server.log`
 - [ ] First run on Windows: the dashboard should show «AES-256 + Windows DPAPI»
+- [ ] First Remotion render on the owner's machine: Settings → Render engine shows both engines ✓; `npm run setup` prints «Remotion engine ready»

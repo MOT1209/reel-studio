@@ -88,6 +88,12 @@ function concurrency() {
   return Math.min(4, byCpu, byMem);
 }
 
+/** Chrome options; RS_REMOTION_GL picks Remotion's GL backend (benchmarked in docs/RENDERING.md). */
+function chromiumOptions() {
+  const gl = process.env.RS_REMOTION_GL;
+  return gl ? { gl } : {};
+}
+
 export const remotionEngine = {
   id: 'remotion',
   name: 'Remotion (React composition) + FFmpeg',
@@ -108,7 +114,8 @@ export const remotionEngine = {
     ctx.inputProps = { projectId: ctx.projectId, total: ctx.total, fps: ctx.fps, width: ctx.width, height: ctx.height };
     ctx.browserExecutable = findBrowser();
     ctx.browserErrors = [];
-    ctx.rBrowser = await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, logLevel: 'error' });
+    ctx.chromiumOptions = chromiumOptions();
+    ctx.rBrowser = await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, logLevel: 'error' });
     ctx.composition = await R.selectComposition({
       serveUrl: ctx.serveUrl, id: 'Reel', inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser, browserExecutable: ctx.browserExecutable, logLevel: 'error',
     });
@@ -128,7 +135,7 @@ export const remotionEngine = {
     try {
       await R.renderFrames({
         composition: ctx.composition, serveUrl: ctx.serveUrl, inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser,
-        browserExecutable: ctx.browserExecutable, outputDir: null, imageFormat: 'jpeg', jpegQuality: 92,
+        browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, outputDir: null, imageFormat: 'jpeg', jpegQuality: 92,
         concurrency: ctx.concurrency, frameRange: [i0, i1 - 1], cancelSignal, timeoutInMilliseconds: 60000, logLevel: 'error',
         onStart: () => {}, onFrameUpdate: () => {},
         onBrowserLog: (l) => { if (l.type === 'error' && !/favicon/.test(l.text)) ctx.browserErrors.push(l.text); },

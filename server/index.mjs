@@ -363,6 +363,6 @@ EM.setJobLog(path.join(path.dirname(logFile), 'render-jobs.jsonl'));
 EM.setMaxJobs(getSettings().render.maxJobs);
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
-  console.log(`Reel Studio v2 → http://${HOST}:${PORT}`);
+  console.log(`Reel Studio v3 → http://${HOST}:${PORT}`);
   if (!ff) console.warn('⚠ ffmpeg not found in PATH (set FFMPEG_PATH) — rendering will fail.');
 });
