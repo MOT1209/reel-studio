@@ -17,7 +17,6 @@ async function test(name, fn) { try { await fn(); n++; console.log('✔', name);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { fetchRetry } = await import('../server/net.mjs');
-const { JobQueue, runQueued, parseLimit } = await import('../server/queue.mjs');
 const R = await import('../server/render.mjs');
 
 // ---- fetchRetry ------------------------------------------------------------------------
@@ -53,41 +52,6 @@ await test('fetchRetry: the user cancel stops it immediately', async () => {
 });
 srv.closeAllConnections?.(); srv.close();
 
-// ---- queue -------------------------------------------------------------------------------
-await test('queue: limit 1 → jobs run one at a time, in priority then FIFO order', async () => {
-  const q = new JobQueue({ limit: 1 }); const order = []; let active = 0, maxActive = 0;
-  const job = (name, prio) => runQueued(q, name, async () => { active++; maxActive = Math.max(maxActive, active); order.push(name); await sleep(30); active--; }, { priority: prio });
-  await Promise.all([job('a', 0), job('b', 0), job('c', 5), job('d', 0)]);
-  assert.equal(maxActive, 1); assert.deepEqual(order, ['a', 'c', 'b', 'd']);
-});
-await test('queue: limit 2 allows two at once, never three', async () => {
-  const q = new JobQueue({ limit: 2 }); let active = 0, maxActive = 0;
-  await Promise.all([1, 2, 3, 4, 5].map((i) => runQueued(q, 'j' + i, async () => { active++; maxActive = Math.max(maxActive, active); await sleep(30); active--; })));
-  assert.equal(maxActive, 2);
-});
-await test('queue: cancelling a waiting job removes it without ever taking a slot', async () => {
-  const q = new JobQueue({ limit: 1 }); const c = new AbortController();
-  const first = runQueued(q, 'first', () => sleep(80));
-  await sleep(5);
-  const waiting = runQueued(q, 'second', async () => assert.fail('must not run'), { signal: c.signal });
-  c.abort();
-  await assert.rejects(waiting, /cancelled/); await first;
-  const st = q.snapshot().map((j) => j.status); assert.deepEqual(st.sort(), ['cancelled', 'done']);
-});
-await test('queue: a failed job frees its slot; transient errors are retried once, others are not', async () => {
-  const q = new JobQueue({ limit: 1 }); let tries = 0;
-  const r = await runQueued(q, 'flaky', async () => { if (++tries < 2) throw new Error('Target closed'); return 'ok'; }, { retries: 1, backoffMs: 5, retryable: (e) => /Target closed/.test(e.message) });
-  assert.equal(r, 'ok'); assert.equal(tries, 2);
-  let t2 = 0;
-  await assert.rejects(runQueued(q, 'bad', async () => { t2++; throw new Error('bad input'); }, { retries: 3, backoffMs: 5, retryable: (e) => /Target closed/.test(e.message) }), /bad input/);
-  assert.equal(t2, 1);
-  assert.equal(await runQueued(q, 'after', async () => 'fine'), 'fine');
-});
-await test('queue: RS_MAX_RENDERS must be an integer 1–4', () => {
-  for (const bad of ['0', '-1', '2.5', 'abc', '99', 'Infinity']) { const r = parseLimit(bad); assert.equal(r.n, 1, bad); assert.ok(r.note, bad); }
-  assert.equal(parseLimit('3').n, 3); assert.equal(parseLimit(undefined).n, 1);
-});
-
 // ---- worker count ------------------------------------------------------------------------
 await test('RS_RENDER_WORKERS: invalid values are rejected with a note, valid ones are capped by free RAM', () => {
   const env = { cpus: 8, freeMem: 16 * 1024 ** 3 };
@@ -107,16 +71,16 @@ const mk = (file, { w = 320, h = 240, fps = 30, secs = 2, audio = true, vcodec =
   const r = spawnSync(FFMPEG, a); assert.equal(r.status, 0, String(r.stderr));
 };
 const good = path.join(TMP, 'good.mp4'); mk(good);
-await test('verifyVideo: a correct file passes (codecs, size, fps, frames, durations)', async () => {
-  await R.verifyVideo(good, { width: 320, height: 240, fps: 30, duration: 2, frames: 60 });
+await test('validateOutput (frames + audio checks): a correct file passes (codecs, size, fps, frames, durations)', async () => {
+  await R.validateOutput(good, { width: 320, height: 240, fps: 30, duration: 2, frames: 60 });
   assert.equal(await R.countFrames(good), 60);
 });
-await test('verifyVideo: wrong size / frame count / missing audio / short audio are all reported', async () => {
-  await assert.rejects(R.verifyVideo(good, { width: 640, height: 240, fps: 30, duration: 2, frames: 59 }), /width 320 ≠ 640.*59/);
+await test('validateOutput (frames + audio checks): wrong size / frame count / missing audio / short audio are all reported', async () => {
+  await assert.rejects(R.validateOutput(good, { width: 640, height: 240, fps: 30, duration: 2, frames: 59 }), /width 320 ≠ 640.*60 frames ≠ 59/);
   const silent = path.join(TMP, 'silent.mp4'); mk(silent, { audio: false });
-  await assert.rejects(R.verifyVideo(silent, { duration: 2 }), /no audio stream/);
-  await assert.rejects(R.verifyVideo(good, { duration: 5 }), /≠ 5\.00 s/);
-  await assert.rejects(R.verifyVideo(good, { fps: 25 }), /fps/);
+  await assert.rejects(R.validateOutput(silent, { duration: 2 }), /no audio stream/);
+  await assert.rejects(R.validateOutput(good, { duration: 5 }), /duration .* ≠ 5\.000/);
+  await assert.rejects(R.validateOutput(good, { fps: 25 }), /fps/);
 });
 await test('muxFinal: a failed output check leaves NO file at the final path (and no .part)', async () => {
   const out = path.join(TMP, 'final.mp4');
@@ -134,7 +98,7 @@ await test('muxFinal: cancelling mid-way never leaves a partial file at the fina
 await test('renderFrames: a damaged reused segment is detected by frame count and re-rendered', async () => {
   // a manifest that claims segment 0 is done, with a file that is not a valid 30-frame segment
   const segDir = path.join(TMP, 'seg'); fs.mkdirSync(segDir, { recursive: true });
-  fs.writeFileSync(path.join(segDir, 'manifest.json'), JSON.stringify({ key: 'k', done: [0] }));
+  fs.writeFileSync(path.join(segDir, 'manifest.json'), JSON.stringify({ key: 'k|legacy|h264|', done: [0] }));
   mk(path.join(segDir, 'seg_0000.mp4'), { audio: false, secs: 1, fps: 30, w: 64, h: 64 }); // 30 frames but we ask for 45
   const logs = [];
   await assert.rejects(R.renderFrames({ url: 'http://127.0.0.1:9/none', out: path.join(TMP, 'x.mp4'), duration: 1.5, fps: 30, width: 64, height: 64, segDir, key: 'k', log: (l) => logs.push(l) }));
@@ -162,16 +126,6 @@ await test('shutdown: SIGTERM stops the server, kills its children and exits cle
   assert.notEqual(r, 'TIMEOUT'); assert.equal(r.code, 0);
   await assert.rejects(fetch(`http://127.0.0.1:${PORT}/api/health`));
 });
-await test('queue endpoint: GET /api/queue reports the limit and jobs', async () => {
-  const PORT = 4312;
-  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'sd2'), RS_MAX_RENDERS: '2' }, stdio: 'ignore' });
-  try {
-    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
-    const j = await (await fetch(`http://127.0.0.1:${PORT}/api/queue`)).json();
-    assert.equal(j.limit, 2); assert.deepEqual(j.jobs, []);
-  } finally { child.kill('SIGKILL'); }
-});
-
 await test('upload: streamed to disk, limit enforced (413), bad bytes refused (415), no temp files left behind', async () => {
   const PORT = 4314, data = path.join(TMP, 'sd3'), BASE = `http://127.0.0.1:${PORT}`;
   const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data, RS_MAX_UPLOAD_MB: '1' }, stdio: 'ignore' });

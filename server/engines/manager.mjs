@@ -120,26 +120,36 @@ export async function renderVideo({ project, engine: pref = 'auto', fallback = t
   job.startedAt = new Date().toISOString();
   const codecs = await availableCodecs();
   if (!codecs[codec]) { log(`⚠ codec ${codec} is not in this ffmpeg build — using h264`); codec = job.codec = 'h264'; }
-  const attempt = async (engine) => {
+  const attempt = async (engine, workers = 0) => {
     job.engine = engine.id; job.status = 'running'; job.frames = 0; emitJob();
-    log(`engine: ${engine.name}`);
-    const wrapped = { ...engine, prepare: (ctx) => engine.prepare(Object.assign(ctx, source, { job: publicJob(job) })) };
+    log(`engine: ${engine.name}${workers ? ` (${workers} page)` : ''}`);
+    const wrapped = { ...engine, prepare: (ctx) => engine.prepare(Object.assign(ctx, source, { job: publicJob(job) }, workers ? { workers } : {})) };
     return encodeSegmented({
       engine: wrapped, total, fps, width, height, quality, codec, bitrate, segDir, key, out, signal: controller.signal, log,
       onFrame: (i, n, jpg) => { job.frames = i + 1; onFrame(i, n, jpg); },
     });
   };
+  // a browser crash (usually the kernel killing a page for memory) is retried once on the same engine with ONE page; segments already finished are reused
+  const CRASH = /Target (page, context or browser has been )?(closed|crashed)|Page crashed|browser has been closed|Protocol error/i;
+  const attemptWithRetry = async (engine) => {
+    try { return await attempt(engine); }
+    catch (e) {
+      if (controller.signal.aborted || e.message === 'cancelled' || !CRASH.test(e.message)) throw e;
+      log(`⚠ browser crashed (${e.message.split('\n')[0]}) — retrying once with a single page`);
+      return attempt(engine, 1);
+    }
+  };
   try {
     const { engine, note } = await chooseEngine(pref);
     if (note) log(`⚠ ${note}`);
     try {
-      await attempt(engine);
+      await attemptWithRetry(engine);
     } catch (e) {
       if (controller.signal.aborted || e.message === 'cancelled' || !fallback || engine.id === 'legacy') throw e;
       log(`⚠ ${engine.id} failed: ${e.message.split('\n')[0]} — falling back to the legacy engine`);
       job.fallbackFrom = engine.id; job.fallbackReason = e.message.split('\n')[0].slice(0, 300);
       valCache.delete(engine.id);
-      await attempt(engines.get('legacy'));
+      await attemptWithRetry(engines.get('legacy'));
     }
     job.status = 'done';
   } catch (e) {

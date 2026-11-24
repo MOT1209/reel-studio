@@ -2,14 +2,14 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
+import { ROOT, getSettings, getPublicSettings, updateSettings, deleteSecret, resolveFonts } from './settings.mjs';
 import { listVoices, testLlm, testElevenLabs, testDeepgram, testOpenAITts } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
 import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
 
 const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram, openaiTts: testOpenAITts };
 import { iconLicenses } from './icons.mjs';
-import { checkFfmpeg } from './render.mjs';
+import { checkFfmpeg, killAllChildren } from './render.mjs';
 import * as EM from './engines/manager.mjs';
 import { SCHEMA } from './scene-schema.mjs';
 import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
@@ -25,6 +25,8 @@ import * as MCP from './mcp.mjs';
 import { PLATFORMS } from './platforms.mjs';
 
 const HOST = '127.0.0.1';
+// Upload limit for a voice-over (MB). RS_MAX_UPLOAD_MB must be an integer 1–2000.
+const UPLOAD_LIMIT = (() => { const v = Number(process.env.RS_MAX_UPLOAD_MB); return Number.isInteger(v) && v >= 1 && v <= 2000 ? v * 1024 * 1024 : 200 * 1024 * 1024; })();
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
 P.setServerPort(PORT);
 const PUBLIC = path.join(ROOT, 'public');
@@ -36,7 +38,7 @@ const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'a
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = []; let size = 0;
-    req.on('data', (c) => { size += c.length; if (size > limit) { reject(P.httpError(413, 'body too large')); req.destroy(); } else chunks.push(c); });
+    req.on('data', (c) => { size += c.length; if (size > limit) { if (size - c.length <= limit) { reject(P.httpError(413, 'body too large')); req.pause(); } } else chunks.push(c); });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -106,6 +108,7 @@ async function route(req, res) {
       if (m === 'GET') return json(res, 200, getPublicSettings());
       if (m === 'PUT') { const out = updateSettings(await readJson(req)); EM.setMaxJobs(getSettings().render.maxJobs); return json(res, 200, out); }
     }
+    if (a === 'settings' && id === 'secrets' && b && m === 'DELETE') return json(res, 200, { ...deleteSecret(b), settings: getPublicSettings() });
     // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
     if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
     if (a === 'projects' && id && b === 'scenes' && stage !== undefined && action === 'regenerate' && m === 'POST') {
@@ -265,8 +268,8 @@ async function route(req, res) {
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
       if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
       if (b === 'upload' && m === 'POST') {
-        const buf = await readBody(req, 200 * 1024 * 1024);
-        await P.saveUpload(id, buf, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
+        const tmp = await A.streamToTemp(req, UPLOAD_LIMIT); // streamed to disk, never buffered whole in RAM
+        await P.saveUploadFile(id, tmp, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'publish' && m === 'POST') {
@@ -354,11 +357,27 @@ const server = http.createServer(async (req, res) => {
   if (!ALLOWED_HOSTS.has(String(req.headers.host || ''))) { res.writeHead(421); return res.end('misdirected request'); }
   try { await route(req, res); }
   catch (e) {
-    if (!res.headersSent) json(res, e.status || 500, { error: redact(e.message) });
-    else res.end();
+    if (!res.headersSent) {
+      if (e.status === 413) { res.setHeader('Connection', 'close'); res.on('finish', () => req.destroy()); } // answer first, then drop the oversized upload
+      json(res, e.status || 500, { error: redact(e.message) });
+    } else res.end();
     if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
+let closing = false;
+/** SIGINT/SIGTERM: stop accepting requests, cancel running stages, kill ffmpeg + Chromium, flush projects, exit. */
+async function gracefulShutdown(sig) {
+  if (closing) return; closing = true;
+  slog('info', `${sig} received — shutting down`);
+  const force = setTimeout(() => { killAllChildren().finally(() => process.exit(1)); }, 8000); force.unref();
+  server.close();
+  server.closeAllConnections?.();
+  try { const n = await P.shutdown(); if (n) slog('info', `stopped ${n} running job(s)`); } catch (e) { slog('error', 'shutdown error', { err: e }); }
+  await killAllChildren();
+  process.exit(0);
+}
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => gracefulShutdown(sig));
+
 EM.setJobLog(path.join(path.dirname(logFile), 'render-jobs.jsonl'));
 EM.setMaxJobs(getSettings().render.maxJobs);
 server.listen(PORT, HOST, async () => {

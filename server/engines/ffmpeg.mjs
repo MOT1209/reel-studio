@@ -4,7 +4,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { run, FFMPEG, FFPROBE } from '../proc.mjs';
+import { run, FFMPEG, FFPROBE, trackChild } from '../proc.mjs';
+import { writeFileAtomic } from '../settings.mjs';
 import { isHold, segLen } from '../timeline.mjs';
 
 // ---- SFX synthesis ------------------------------------------------------------
@@ -140,27 +141,36 @@ export async function encodeSegmented({ engine, total, fps, width, height, quali
   if (manifest.key !== fullKey) { for (const f of fs.readdirSync(segDir)) fs.rmSync(path.join(segDir, f), { force: true }); manifest = { key: fullKey, done: [] }; }
   const segFile = (k) => path.join(segDir, `seg_${String(k).padStart(4, '0')}.mp4`);
   const todo = [];
-  for (let k = 0; k < nSeg; k++) if (!(manifest.done.includes(k) && fs.existsSync(segFile(k)))) todo.push(k);
+  const segFrames = (k) => Math.min(total, (k + 1) * SEG_FRAMES) - k * SEG_FRAMES;
+  for (let k = 0; k < nSeg; k++) {
+    let ok = manifest.done.includes(k) && fs.existsSync(segFile(k));
+    // a reused segment must hold exactly the frames it should (a truncated file from a crash would otherwise be trusted)
+    if (ok && (await countFrames(segFile(k)).catch(() => -1)) !== segFrames(k)) { ok = false; log(`recovery: segment ${k} is damaged — rendering it again`); }
+    if (!ok) { todo.push(k); manifest.done = manifest.done.filter((x) => x !== k); }
+  }
   if (todo.length < nSeg) log(`recovery: reusing ${nSeg - todo.length}/${nSeg} segments rendered before`);
   const q = QUALITY[quality] || QUALITY.standard;
   const c = CODECS[codec] || CODECS.h264;
   const t0 = Date.now();
   if (todo.length) {
     const ctx = { width, height, fps, total, signal, log };
-    await engine.prepare(ctx);
+    // a failing prepare (browser launched, page never became ready…) must not leak the browser it already started
+    try { await engine.prepare(ctx); } catch (e) { await Promise.resolve(engine.cleanup(ctx)).catch(() => {}); throw e; }
     try {
       for (const k of todo) {
         if (signal?.aborted) throw new Error('cancelled');
         const i0 = k * SEG_FRAMES, i1 = Math.min(total, i0 + SEG_FRAMES);
         await encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q, c, bitrate, out: segFile(k), signal, onFrame });
+        const got = await countFrames(segFile(k));
+        if (got !== i1 - i0) throw new Error(`segment ${k}: expected ${i1 - i0} frames, encoded ${got}`);
         manifest.done.push(k);
-        fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+        writeFileAtomic(manifestFile, JSON.stringify(manifest));
       }
     } finally { await engine.cleanup(ctx); }
   } else onFrame(total - 1, total, null);
   // concat (stream copy — every segment starts with a keyframe and shares the same encoder settings)
   const list = path.join(segDir, 'list.txt');
-  fs.writeFileSync(list, Array.from({ length: nSeg }, (_, k) => `file '${segFile(k).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
+  writeFileAtomic(list, Array.from({ length: nSeg }, (_, k) => `file '${segFile(k).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
   await run(FFMPEG, ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...(c.tag ? ['-tag:v', c.tag] : []), '-movflags', '+faststart', out], { signal });
   log(`encoded ${total} frames in ${((Date.now() - t0) / 1000).toFixed(1)} s (${nSeg} segment${nSeg > 1 ? 's' : ''}, ${engine.id}, ${c.name})`);
   return total;
@@ -174,6 +184,7 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
     '-vf', `scale=${width}:${height}:in_range=full:out_range=tv,format=yuv420p`,
     '-c:v', c.lib, '-preset', q.preset, ...rate, '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(fps),
     ...(c.lib === 'libx265' ? ['-x265-params', 'log-level=error'] : []), tmp], { windowsHide: true });
+  trackChild(ff);
   let ffErr = '';
   ff.stderr.on('data', (d) => { ffErr = (ffErr + d).slice(-4000); });
   // ffmpeg can die at any moment (bad codec, disk full, killed): `failed` stops the producer and the writer.
@@ -226,8 +237,24 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
   }
 }
 
-export async function muxFinal({ video, audio, out, signal }) {
-  await run(FFMPEG, ['-hide_banner', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-shortest', '-movflags', '+faststart', out], { signal });
+/**
+ * Muxes into <out>.part.mp4, verifies it when `expect` is given (validateOutput options) and only then renames: a cancel,
+ * a crash or a failed check never leaves a bad file at `out`. There is no `-shortest`: it silently cut 1–2 video frames
+ * whenever the audio was a hair shorter (measured: 324 of 326 frames); the caller makes the audio as long as the frames.
+ */
+export async function muxFinal({ video, audio, out, signal, expect = null }) {
+  const tmp = `${out}.part.mp4`;
+  try {
+    await run(FFMPEG, ['-hide_banner', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', tmp], { signal });
+    if (expect) await validateOutput(tmp, expect);
+    fs.renameSync(tmp, out);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
+/** Number of video frames (packets) in a file — proves a segment has exactly the frames it should. */
+export async function countFrames(file) {
+  const { out } = await run(FFPROBE, ['-v', 'error', '-count_packets', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', file]);
+  return parseInt(out, 10);
 }
 
 export async function contactSheet({ video, out, duration, aspect = '9:16' }) {
@@ -243,8 +270,8 @@ export async function contactSheet({ video, out, duration, aspect = '9:16' }) {
  * Checks a finished MP4 with ffprobe — a zero exit code proves nothing: dimensions, frame rate, duration (±0.15 s),
  * video codec and an audio stream must match what was asked for. Returns the probe; throws with the mismatch.
  */
-export async function validateOutput(file, { width, height, fps, duration, codec = 'h264', audio = true } = {}) {
-  const { out } = await run(FFPROBE, ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate:format=duration', '-of', 'json', file]);
+export async function validateOutput(file, { width, height, fps, duration, codec = 'h264', audio = true, frames = 0 } = {}) {
+  const { out } = await run(FFPROBE, ['-v', 'error', ...(frames ? ['-count_packets'] : []), '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,duration,nb_read_packets:format=duration', '-of', 'json', file]);
   const j = JSON.parse(out || '{}');
   const v = (j.streams || []).find((s) => s.codec_type === 'video');
   const a = (j.streams || []).find((s) => s.codec_type === 'audio');
@@ -257,8 +284,10 @@ export async function validateOutput(file, { width, height, fps, duration, codec
     if (height && v.height !== height) problems.push(`height ${v.height} ≠ ${height}`);
     if (fps && v.r_frame_rate !== `${fps}/1`) problems.push(`fps ${v.r_frame_rate} ≠ ${fps}`);
     if (v.codec_name !== want) problems.push(`codec ${v.codec_name} ≠ ${want}`);
+    if (frames && Number(v.nb_read_packets) !== frames) problems.push(`${v.nb_read_packets} frames ≠ ${frames}`);
   }
   if (audio && !a) problems.push('no audio stream');
+  if (audio && a && duration && Number(a.duration) && Math.abs(Number(a.duration) - duration) > 0.2) problems.push(`audio ${Number(a.duration).toFixed(2)} s ≠ ${duration.toFixed(2)} s`);
   if (duration && !(Math.abs(d - duration) <= 0.15)) problems.push(`duration ${d.toFixed(3)} ≠ ${duration.toFixed(3)}`);
   if (problems.length) throw new Error(`output check failed: ${problems.join(', ')}`);
   return { width: v.width, height: v.height, fps: v.r_frame_rate, duration: d, video: v.codec_name, audio: a?.codec_name || null };

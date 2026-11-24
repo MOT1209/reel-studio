@@ -168,6 +168,15 @@ export function runPipeline(id) {
   return true;
 }
 
+/** Stops every running pipeline and publish and waits for them (used by the graceful shutdown). */
+export async function shutdown() {
+  const ids = [...running.keys()];
+  for (const id of ids) cancelPublish(id);
+  await Promise.all(ids.map((id) => stopRun(id)));
+  for (const id of ids) { const p = cache.get(id); if (p) { try { save(p); } catch {} } }
+  return ids.length;
+}
+
 export async function cancel(id) {
   cancelPublish(id);
   return stopRun(id);
@@ -266,19 +275,35 @@ function validateEdit(p, stage, body) {
 }
 
 export async function saveUpload(id, buf, filename, mime) {
-  const p = getProject(id);
-  if (!p) throw httpError(404, 'project not found');
   if (!buf?.length) throw httpError(400, 'empty upload');
-  if (!looksLikeMedia(buf)) throw httpError(415, 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)');
-  await stopForEdit(p, 'new voice-over uploaded');
-  const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
-  for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
-  fs.writeFileSync(path.join(projectDir(id), `upload.${ext}`), buf);
-  p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size: buf.length };
-  p.voiceMode = 'upload';
-  if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
-  log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(buf.length / 1024).toFixed(0)} KB)`);
-  save(p);
+  if (!looksLikeMedia(buf)) throw httpError(415, UPLOAD_BAD);
+  if (!getProject(id)) throw httpError(404, 'project not found');
+  const tmp = path.join(projectDir(id), `.upload-${crypto.randomBytes(6).toString('hex')}`);
+  fs.writeFileSync(tmp, buf);
+  return saveUploadFile(id, tmp, filename, mime);
+}
+const UPLOAD_BAD = 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)';
+
+/** Takes ownership of an already-written temp file (streamed from the request — never held in RAM). Always removes it on failure. */
+export async function saveUploadFile(id, tmp, filename, mime) {
+  try {
+    const p = getProject(id);
+    if (!p) throw httpError(404, 'project not found');
+    const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(64); const got = fs.readSync(fd, head, 0, 64, 0); fs.closeSync(fd);
+    if (!got) throw httpError(400, 'empty upload');
+    if (!looksLikeMedia(head.subarray(0, got))) throw httpError(415, UPLOAD_BAD);
+    await stopForEdit(p, 'new voice-over uploaded');
+    const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
+    for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
+    const dest = path.join(projectDir(id), `upload.${ext}`);
+    try { fs.renameSync(tmp, dest); } catch { fs.copyFileSync(tmp, dest); fs.rmSync(tmp, { force: true }); }
+    const size = fs.statSync(dest).size;
+    p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size };
+    p.voiceMode = 'upload';
+    if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
+    log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(size / 1024).toFixed(0)} KB)`);
+    save(p);
+  } finally { fs.rmSync(tmp, { force: true }); }
 }
 
 /** Magic-byte check: the bytes must be a container ffmpeg can read as audio, whatever the file name says. */
@@ -341,7 +366,9 @@ const STAGE_FN = {
     if (p.voiceMode === 'upload') {
       if (!p.upload) throw new Error('voice mode is "upload" but no file was uploaded');
       log(p, 'voice', `converting ${p.upload.file} → voice.mp3`);
-      await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
+      const part = path.join(dir, 'voice.part.mp3'); // converted aside, then renamed: a crash never leaves a truncated voice.mp3
+      try { await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', part], { signal }); fs.renameSync(part, out); }
+      finally { fs.rmSync(part, { force: true }); }
       p.voice = { file: 'voice.mp3', source: 'upload', duration: await probeDuration(out) };
       log(p, 'voice', `voice-over ${p.voice.duration.toFixed(2)} s`);
       return;
@@ -350,16 +377,16 @@ const STAGE_FN = {
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
     if (s.tts?.provider === 'openai') {
       log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
-      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
+      writeFileAtomic(out, await ttsOpenAI(s, spoken.text, { signal }));
       p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
       log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
       return;
     }
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
-    fs.writeFileSync(out, audio);
+    writeFileAtomic(out, audio);
     const timed = charsToWords(chars);
-    fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
+    writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
     p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length };
     log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s · ${chars.length} timed characters → ${timed.length} words`);
   },
@@ -372,7 +399,7 @@ const STAGE_FN = {
       // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
       log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
       const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
-      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
+      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
       timed = wordsWithChars(dw);
       estimated = true;
     } else if (['upload', 'openai'].includes(p.voice?.source)) {
@@ -381,7 +408,7 @@ const STAGE_FN = {
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
-      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
+      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
       timed = wordsWithChars(dw);
       log(p, 'timing', `Deepgram heard ${dw.length} words`);
     } else {
@@ -481,16 +508,19 @@ const STAGE_FN = {
     const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
-    writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
+    // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
+    const vdur = total / FPS;
+    writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, segments, voiceVolume: E.audio.voiceVolume,
+      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
       clips: await clipSounds(E.overlays),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
-    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
-    // a zero exit code proves nothing: size, fps, codec, audio and duration are checked on the file itself
+    // a zero exit code proves nothing: size, fps, codec, audio, frame count and durations are checked on the file BEFORE it reaches its final path
+    const expect = { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec, frames: total };
+    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal, expect });
     const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
     log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
