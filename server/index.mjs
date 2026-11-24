@@ -9,7 +9,7 @@ import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.m
 
 const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram, openaiTts: testOpenAITts };
 import { iconLicenses } from './icons.mjs';
-import { checkFfmpeg } from './render.mjs';
+import { checkFfmpeg, killAllChildren } from './render.mjs';
 import * as EM from './engines/manager.mjs';
 import { SCHEMA } from './scene-schema.mjs';
 import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
@@ -25,6 +25,8 @@ import * as MCP from './mcp.mjs';
 import { PLATFORMS } from './platforms.mjs';
 
 const HOST = '127.0.0.1';
+// Upload limit for a voice-over (MB). RS_MAX_UPLOAD_MB must be an integer 1–2000.
+const UPLOAD_LIMIT = (() => { const v = Number(process.env.RS_MAX_UPLOAD_MB); return Number.isInteger(v) && v >= 1 && v <= 2000 ? v * 1024 * 1024 : 200 * 1024 * 1024; })();
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
 P.setServerPort(PORT);
 const PUBLIC = path.join(ROOT, 'public');
@@ -36,7 +38,7 @@ const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'a
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = []; let size = 0;
-    req.on('data', (c) => { size += c.length; if (size > limit) { reject(P.httpError(413, 'body too large')); req.destroy(); } else chunks.push(c); });
+    req.on('data', (c) => { size += c.length; if (size > limit) { if (size - c.length <= limit) { reject(P.httpError(413, 'body too large')); req.pause(); } } else chunks.push(c); });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -104,7 +106,7 @@ async function route(req, res) {
     }
     if (a === 'settings') {
       if (m === 'GET') return json(res, 200, getPublicSettings());
-      if (m === 'PUT') { const out = updateSettings(await readJson(req)); EM.setMaxJobs(getSettings().render.maxJobs); return json(res, 200, out); }
+      if (m === 'PUT') { const out = updateSettings(await readJson(req)); applyMaxJobs(); return json(res, 200, out); }
     }
     // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
     if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
@@ -121,6 +123,7 @@ async function route(req, res) {
       if (id && !b && m === 'GET') { const j = EM.getJob(id); return j ? json(res, 200, j) : json(res, 404, { error: 'no such job' }); }
       if (id && b === 'cancel' && m === 'POST') return json(res, 200, { ok: EM.cancelJob(id) });
     }
+    if (a === 'queue' && m === 'GET') return json(res, 200, EM.queueSnapshot());
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
     if (a === 'test' && m === 'POST' && TESTS[id]) {
       // optional unsaved values from the Settings form (masked keys are ignored → saved key is used)
@@ -265,8 +268,9 @@ async function route(req, res) {
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
       if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
       if (b === 'upload' && m === 'POST') {
-        const buf = await readBody(req, 200 * 1024 * 1024);
-        await P.saveUpload(id, buf, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
+        const name = safeDecode(String(req.headers['x-filename'] || '')); // before anything reaches disk: a bad name leaves no temp file
+        const tmp = await A.streamToTemp(req, UPLOAD_LIMIT); // streamed to disk, never buffered whole in RAM
+        await P.saveUploadFile(id, tmp, name, req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'publish' && m === 'POST') {
@@ -354,13 +358,33 @@ const server = http.createServer(async (req, res) => {
   if (!ALLOWED_HOSTS.has(String(req.headers.host || ''))) { res.writeHead(421); return res.end('misdirected request'); }
   try { await route(req, res); }
   catch (e) {
-    if (!res.headersSent) json(res, e.status || 500, { error: redact(e.message) });
+    if (!res.headersSent) {
+      if (e.status === 413) { res.setHeader('Connection', 'close'); res.on('finish', () => req.destroy()); } // answer first, then drop the oversized upload
+      json(res, e.status || 500, { error: redact(e.message) });
+    }
     else res.end();
     if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
+let closing = false;
+/** SIGINT/SIGTERM: stop accepting requests, cancel running stages, kill ffmpeg + Chromium, flush projects, exit. */
+async function gracefulShutdown(sig) {
+  if (closing) return; closing = true;
+  slog('info', `${sig} received — shutting down`);
+  const force = setTimeout(() => { killAllChildren().finally(() => process.exit(1)); }, 8000); force.unref();
+  server.close();
+  server.closeAllConnections?.();
+  try { const n = await P.shutdown(); if (n) slog('info', `stopped ${n} running job(s)`); } catch (e) { slog('error', 'shutdown error', { err: e }); }
+  await killAllChildren();
+  process.exit(0);
+}
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => gracefulShutdown(sig));
+
 EM.setJobLog(path.join(path.dirname(logFile), 'render-jobs.jsonl'));
-EM.setMaxJobs(getSettings().render.maxJobs);
+const MAX_ENV = EM.parseLimit(process.env.RS_MAX_RENDERS);
+if (MAX_ENV.note) slog('warn', MAX_ENV.note);
+function applyMaxJobs() { EM.setMaxJobs(MAX_ENV.n ?? getSettings().render.maxJobs); }
+applyMaxJobs();
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
   console.log(`Reel Studio v3 → http://${HOST}:${PORT}`);

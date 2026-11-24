@@ -101,8 +101,8 @@ export function streamToTemp(req, limit) {
   return new Promise((resolve, reject) => {
     const out = fs.createWriteStream(tmp, { mode: 0o600 });
     let size = 0, failed = false;
-    const fail = (e) => { if (failed) return; failed = true; out.destroy(); fs.rmSync(tmp, { force: true }); reject(e); };
-    req.on('data', (c) => { size += c.length; if (size > limit) { fail(err(413, `الملف أكبر من ${Math.round(limit / 1048576)}MB`)); req.destroy(); } });
+    const fail = (e) => { if (failed) return; failed = true; req.unpipe(out); req.pause(); out.destroy(); fs.rmSync(tmp, { force: true }); reject(e); }; // pause (not destroy): the caller still has to send its 413
+    req.on('data', (c) => { size += c.length; if (size > limit) fail(err(413, `الملف أكبر من ${Math.round(limit / 1048576)}MB`)); });
     req.on('error', fail);
     out.on('error', fail);
     out.on('finish', () => { if (!failed) (size ? resolve(tmp) : fail(err(400, 'ملف فاضي'))); });

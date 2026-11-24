@@ -247,6 +247,38 @@ try {
     await until('both removed', async () => (await saved()).edit.overlays.length === n0);
   });
 
+  await test('editor: layer order buttons, keyframe at the playhead, magnet snapping vs none, audio-track button', async () => {
+    const before = (await saved()).edit.overlays.length;
+    await page.click('#addText'); await until('1st text', async () => (await saved()).edit.overlays.length === before + 1);
+    await page.click('#addText'); await until('2nd text', async () => (await saved()).edit.overlays.length === before + 2);
+    let ov = (await saved()).edit.overlays; const lastId = ov.at(-1).id;
+    await page.click('#lyBack');
+    await until('sent to back', async () => (await saved()).edit.overlays[0].id === lastId);
+    await page.click('#lyFront');
+    await until('brought to front', async () => (await saved()).edit.overlays.at(-1).id === lastId);
+    await page.click('#kfAdd');
+    await until('keyframe saved', async () => { const o = (await saved()).edit.overlays.find((x) => x.id === lastId); return o.keyframes?.length === 1 && o.keyframes[0].ease === 'inOut'; });
+    // magnet: drag the selected text so its start lands 0.05 s before a word start; with the magnet on it snaps to the word
+    const P = await saved(); const o = P.edit.overlays.find((x) => x.id === lastId);
+    const word = P.words.find((w) => w.start > o.start + 1.0 && w.start < o.start + 3);
+    const drag = async (target) => {
+      const blk = await page.$(`#tlInner .blk.ov[data-ov="${lastId}"]`); await blk.scrollIntoViewIfNeeded(); const b = await blk.boundingBox();
+      const cur = (await saved()).edit.overlays.find((x) => x.id === lastId).start;
+      await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down();
+      await page.mouse.move(b.x + b.width / 2 + (target - cur) * 70, b.y + b.height / 2, { steps: 6 }); await page.mouse.up();
+    };
+    await drag(word.start - 0.05);
+    await until('snapped to the word', async () => Math.abs((await saved()).edit.overlays.find((x) => x.id === lastId).start - word.start) < 0.011);
+    await page.uncheck('#snapOn');
+    const word2 = P.words.find((w) => w.start > word.start + 1.2);
+    const startBefore = (await saved()).edit.overlays.find((x) => x.id === lastId).start;
+    await drag(word2.start - 0.05);
+    await until('moved without snapping', async () => { const st = (await saved()).edit.overlays.find((x) => x.id === lastId).start; return st !== startBefore && Math.abs(st - word2.start) > 0.02; });
+    await page.check('#snapOn');
+    assert.ok(await page.isVisible('#addTrack'), 'audio-track button');
+    assert.ok(await page.isVisible('#lyFront'));
+  });
+
   await test('skills page: run a built-in skill from its dialog', async () => {
     await page.goto(`${BASE}/#/skills`);
     await page.waitForSelector('tr[data-sk="titles"] [data-run]');

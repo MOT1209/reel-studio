@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { DATA_DIR, ROOT } from '../settings.mjs';
+import { trackBrowser, untrackBrowser, trackChild } from '../proc.mjs';
 
 const require = createRequire(import.meta.url);
 const SRC_DIR = path.join(ROOT, 'remotion');
@@ -39,7 +40,7 @@ export async function ensureBundle(log = () => {}) {
     const t0 = Date.now();
     log('remotion: building the composition bundle (first time after an update, ~15 s)');
     await new Promise((res, rej) => {
-      const child = spawn(process.execPath, [path.join(ROOT, 'server', 'engines', 'remotion-bundle.mjs'), ENTRY, tmp, PUBLIC_PATH], { cwd: ROOT, windowsHide: true });
+      const child = trackChild(spawn(process.execPath, [path.join(ROOT, 'server', 'engines', 'remotion-bundle.mjs'), ENTRY, tmp, PUBLIC_PATH], { cwd: ROOT, windowsHide: true }));
       let err = '';
       child.stdout.on('data', (d) => { for (const l of String(d).split('\n')) { const m = /^progress (\d+)/.exec(l); if (m) log(`remotion: bundling ${m[1]}%`); } });
       child.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
@@ -115,7 +116,7 @@ export const remotionEngine = {
     ctx.browserExecutable = findBrowser();
     ctx.browserErrors = [];
     ctx.chromiumOptions = chromiumOptions();
-    ctx.rBrowser = await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, logLevel: 'error' });
+    ctx.rBrowser = trackBrowser(await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, logLevel: 'error' })); // closed on shutdown
     ctx.composition = await R.selectComposition({
       serveUrl: ctx.serveUrl, id: 'Reel', inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser, browserExecutable: ctx.browserExecutable, logLevel: 'error',
     });
@@ -132,6 +133,7 @@ export const remotionEngine = {
     const onAbort = () => cancel();
     ctx.signal?.addEventListener('abort', onAbort, { once: true });
     let emitErr = null;
+    const pending = [];
     try {
       await R.renderFrames({
         composition: ctx.composition, serveUrl: ctx.serveUrl, inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser,
@@ -140,9 +142,12 @@ export const remotionEngine = {
         onStart: () => {}, onFrameUpdate: () => {},
         onBrowserLog: (l) => { if (l.type === 'error' && !/favicon/.test(l.text)) ctx.browserErrors.push(l.text); },
         // the frame index is absolute (frameRange keeps composition numbering)
-        onFrameBuffer: async (buf, frame) => {
+        // never block Remotion on our encoder: if Remotion waits for this callback while the encoder waits for an
+        // earlier frame still inside Remotion, both would wait forever. The encoder re-orders; the segment (≤ 300
+        // frames) bounds the memory; all hand-offs are awaited after renderFrames.
+        onFrameBuffer: (buf, frame) => {
           if (emitErr) return;
-          try { await emit(frame, buf); } catch (e) { emitErr = e; cancel(); }
+          pending.push(emit(frame, buf).catch((e) => { emitErr = emitErr || e; cancel(); }));
         },
       });
     } catch (e) {
@@ -153,10 +158,16 @@ export const remotionEngine = {
     } finally {
       ctx.signal?.removeEventListener('abort', onAbort);
     }
+    await Promise.all(pending);
     if (emitErr) throw emitErr;
   },
   async cleanup(ctx) {
-    if (ctx.rBrowser) await Promise.race([ctx.rBrowser.close({ silent: true }).catch(() => {}), new Promise((r) => setTimeout(r, 5000))]);
+    if (ctx.rBrowser) {
+      // untracked only once close() has settled: a close that hangs leaves it tracked, so the shutdown closes it again
+      const b = ctx.rBrowser;
+      const closed = await Promise.race([b.close({ silent: true }).then(() => true, () => true), new Promise((r) => setTimeout(() => r(false), 5000))]);
+      if (closed) untrackBrowser(b);
+    }
     ctx.rBrowser = null;
   },
 };

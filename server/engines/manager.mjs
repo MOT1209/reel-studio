@@ -76,6 +76,20 @@ export function listJobs() { return [...jobs.values()].map(publicJob).slice(-50)
 let maxJobs = 1, running = 0;
 const waiting = [];
 export function setMaxJobs(n) { maxJobs = Math.max(1, Math.min(4, Number(n) || 1)); pump(); }
+export const getMaxJobs = () => maxJobs;
+/** RS_MAX_RENDERS: an integer 1–4 overrides the setting; anything else is ignored with a note. */
+export function parseLimit(raw, { max = 4 } = {}) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { n: null, note: null };
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < 1 || v > max) return { n: null, note: `RS_MAX_RENDERS="${raw}" is invalid (use an integer 1–${max}) — using the setting` };
+  return { n: v, note: null };
+}
+/** Queue view for GET /api/queue: waiting jobs get their position. */
+export function queueSnapshot() {
+  let pos = 0;
+  const all = [...jobs.values()].map((j) => ({ ...publicJob(j), position: j.status === 'queued' ? ++pos : 0 })); // positions over the whole queue
+  return { limit: maxJobs, running, waiting: waiting.length, jobs: all.slice(-50) };
+}
 function pump() { while (running < maxJobs && waiting.length) { running++; waiting.shift()(); } }
 async function slot(signal) {
   if (running < maxJobs) { running++; return; }

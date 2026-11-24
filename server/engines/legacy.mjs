@@ -1,6 +1,7 @@
 // Legacy engine: Playwright pages run public/render.html and draw each frame on a canvas (window.drawFrame).
 // Kept as the reference and the fallback while the Remotion engine is introduced.
 import os from 'node:os';
+import { trackBrowser } from '../proc.mjs';
 
 export async function launchBrowser(log = () => {}) {
   const { chromium } = await import('playwright');
@@ -10,7 +11,7 @@ export async function launchBrowser(log = () => {}) {
     try {
       const b = await chromium.launch({ ...opt, args: ['--font-render-hinting=none', '--disable-gpu'] /* software raster parallelises across pages */ });
       if (opt.channel) log(`using system browser channel "${opt.channel}"`);
-      return b;
+      return trackBrowser(b, (gone) => b.on('disconnected', gone)); // closed on shutdown
     } catch (e) { lastErr = e; }
   }
   throw new Error(`No Chromium available (run "npm run setup"): ${lastErr?.message?.split('\n')[0]}`);
@@ -26,11 +27,27 @@ export async function launchBrowser(log = () => {}) {
 const CAPTURE = process.env.RS_CAPTURE === 'screenshot' ? 'screenshot' : 'canvas';
 // Parallel pages: by CPU cores, but each headless page needs ~400 MB — on a memory-starved machine
 // extra pages only cause swapping (everything, the server included, slows to a crawl).
-function workerCount() {
-  if (Number(process.env.RS_RENDER_WORKERS)) return Math.max(1, Math.min(4, Number(process.env.RS_RENDER_WORKERS)));
-  const byCpu = Math.max(1, os.cpus().length - 1);
-  const byMem = Math.max(1, Math.floor((os.freemem() / 1024 ** 2 - 300) / 400));
-  return Math.max(1, Math.min(4, byCpu, byMem));
+export const MAX_WORKERS = 4;
+/**
+ * Parallel pages for one render. RS_RENDER_WORKERS must be an integer 1–MAX_WORKERS; anything else (text, 0, negative,
+ * fractions, Infinity, out of range) is rejected with a note and the memory-aware automatic value is used instead.
+ * An explicit valid value is still capped by free RAM (≈400 MB per page) unless RS_RENDER_WORKERS_FORCE=1.
+ */
+export function parseWorkers(raw, { cpus = os.cpus().length, freeMem = os.freemem(), force = false, perPageMB = 400 } = {}) {
+  const byCpu = Math.max(1, cpus - 1);
+  const byMem = Math.max(1, Math.floor((freeMem / 1024 ** 2 - 300) / perPageMB));
+  const auto = Math.max(1, Math.min(MAX_WORKERS, byCpu, byMem));
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { n: auto, note: null };
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < 1 || v > MAX_WORKERS) return { n: auto, note: `RS_RENDER_WORKERS="${raw}" is invalid (use an integer 1–${MAX_WORKERS}) — using ${auto}` };
+  if (force) return { n: v, note: null };
+  const n = Math.min(v, byMem);
+  return { n, note: n < v ? `RS_RENDER_WORKERS=${v} reduced to ${n}: only ${(freeMem / 1024 ** 3).toFixed(1)} GB RAM is free` : null };
+}
+function workerCount(log = () => {}) {
+  const w = parseWorkers(process.env.RS_RENDER_WORKERS, { force: process.env.RS_RENDER_WORKERS_FORCE === '1' });
+  if (w.note) log(`⚠ ${w.note}`);
+  return w.n;
 }
 
 async function openWorker(browser, url, errors, width, height) {
@@ -75,7 +92,7 @@ export const legacyEngine = {
   async prepare(ctx) {
     ctx.errors = [];
     ctx.browser = await launchBrowser(ctx.log);
-    const n = Math.min(ctx.workers || workerCount(), Math.max(1, Math.floor(ctx.total / 30)));
+    const n = Math.min(ctx.workers || workerCount(ctx.log), Math.max(1, Math.floor(ctx.total / 30)));
     ctx.pages = await Promise.all(Array.from({ length: n }, () => openWorker(ctx.browser, ctx.url, ctx.errors, ctx.width, ctx.height)));
     ctx.log(`capture: ${CAPTURE} · ${n} parallel page${n > 1 ? 's' : ''} · ${ctx.width}×${ctx.height} · free RAM ${(os.freemem() / 1024 ** 3).toFixed(1)} GB`);
     if (os.freemem() < 1024 ** 3) ctx.log('⚠ الذاكرة الفاضية أقل من 1 GB — الرندر هيبقى بطيء؛ اقفل برامج تانية لو تقدر');

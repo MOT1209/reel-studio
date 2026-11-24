@@ -1,6 +1,7 @@
 // Stock media providers behind one adapter interface: search(q, {kind, page, per, orientation}) → normalized results,
 // and importResult() which downloads into the asset library with the provider's licence terms attached.
 // Keys stay on the server; downloads are allowed only from each provider's own media hosts (no SSRF).
+import { fetchRetry } from './net.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -75,7 +76,7 @@ function bestVideo(files) {
 
 async function getJson(url, headers, name) {
   let res;
-  try { res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) }); } catch (e) { throw err(502, `${name} مش بيرد (${e.message})`); }
+  try { res = await fetchRetry(url, { headers }, { timeout: 15000, retries: 1, label: name, retryStatus: new Set([500, 502, 503, 504]) }); } catch (e) { throw err(502, `${name} مش بيرد (${e.message})`); } // one retry on network errors / 5xx; 429 is reported to the user, not hammered
   if (res.status === 429) {
     const wait = Number(res.headers.get('retry-after')) || Number(res.headers.get('x-ratelimit-reset')) || 60;
     throw err(429, `${name}: الحد المسموح من الطلبات خلص — جرّب بعد ${Math.min(3600, wait)} ثانية`);
