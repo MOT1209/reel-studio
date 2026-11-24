@@ -11,12 +11,13 @@ import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, stor
 import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
-import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
+import { run, probeDuration, writeSfx, mixAudio, muxFinal, contactSheet, validateOutput } from './render.mjs';
+import { renderVideo } from './engines/manager.mjs';
 import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
-import { keptSegments, outDuration, srcToOut, sequenceToSegments, isHold } from './timeline.mjs';
+import { keptSegments, outDuration, srcToOut, outToSrc, sequenceToSegments, isHold } from './timeline.mjs';
 import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
@@ -452,10 +453,16 @@ const STAGE_FN = {
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
-    await renderFrames({
-      url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-      out: tmpVideo, duration, start, segments, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
+    const total = Math.ceil(duration * FPS - 1e-9);
+    const job = await renderVideo({
+      project: p.id, engine: E.export.engine, fallback: getSettings().render.fallback !== false,
+      source: {
+        projectId: p.id, port: serverPort, data, url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
+        timeOf: (i) => outToSrc(i / FPS, segments),
+      },
+      total, out: tmpVideo, fps: FPS, width: L.width, height: L.height, quality: E.export.quality, codec: E.export.codec, bitrate: E.export.bitrate,
       segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
+      onJob: (j) => bus(p.id).emit('event', { type: 'job', data: j }),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
@@ -477,6 +484,9 @@ const STAGE_FN = {
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
     await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
+    // a zero exit code proves nothing: size, fps, codec, audio and duration are checked on the file itself
+    const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
+    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
@@ -485,7 +495,18 @@ const STAGE_FN = {
     p.render = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
+      engine: job.engine, fallbackFrom: job.fallbackFrom, codec: job.codec, bitrate: E.export.bitrate, renderSeconds: job.seconds, job: job.id,
     };
+    const outDir = getSettings().render.outputDir;
+    if (outDir) {
+      try {
+        fs.mkdirSync(outDir, { recursive: true });
+        const name = `${(p.topic || p.id).replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').trim().slice(0, 60) || p.id} - ${p.id}.mp4`;
+        fs.copyFileSync(path.join(dir, 'video.mp4'), path.join(outDir, name));
+        p.render.exported = path.join(outDir, name);
+        log(p, 'render', `copied to ${p.render.exported}`);
+      } catch (e) { log(p, 'render', `⚠ output folder: ${e.message}`); }
+    }
     log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved${p.render.credits.length ? ` · ${p.render.credits.length} credits` : ''}`);
   },
 };

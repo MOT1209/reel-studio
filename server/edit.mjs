@@ -17,6 +17,11 @@ export const POSITIONS = ['top', 'center', 'bottom', 'full'];
 export const ANIMS = ['fade', 'pop', 'slide', 'none'];
 
 /** Edit with every default filled in (Settings supply the project-independent defaults). */
+export const ENGINES = ['auto', 'legacy', 'remotion'];
+export const CODEC_IDS = ['h264', 'h265'];
+/** Video bitrate in kbit/s (500–50000) or null = constant quality (CRF). */
+export function bitrateOf(x) { const n = Math.round(Number(x)); return x != null && x !== '' && Number.isFinite(n) && n >= 500 && n <= 50000 ? n : null; }
+
 export function effectiveEdit(e = {}) {
   const s = getSettings();
   return {
@@ -26,6 +31,9 @@ export function effectiveEdit(e = {}) {
       fps: [24, 25, 30, 60].includes(e.export?.fps) ? e.export.fps : s.render.fps || 30,
       quality: QUALITIES.includes(e.export?.quality) ? e.export.quality : s.render.quality || 'standard',
       platform: PLATFORMS[e.export?.platform] ? e.export.platform : null,
+      engine: ENGINES.includes(e.export?.engine) ? e.export.engine : ENGINES.includes(s.render.engine) ? s.render.engine : 'auto',
+      codec: CODEC_IDS.includes(e.export?.codec) ? e.export.codec : CODEC_IDS.includes(s.render.codec) ? s.render.codec : 'h264',
+      bitrate: bitrateOf(e.export?.bitrate) ?? bitrateOf(s.render.bitrate),
     },
     trim: { start: Math.max(0, Number(e.trim?.start) || 0), end: Number(e.trim?.end) > 0 ? Number(e.trim.end) : null },
     cuts: Array.isArray(e.cuts) ? e.cuts : [],
@@ -55,6 +63,9 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
     if ([720, 1080].includes(Number(e.export.resolution))) out.export.resolution = Number(e.export.resolution);
     if ([24, 25, 30, 60].includes(Number(e.export.fps))) out.export.fps = Number(e.export.fps);
     if (QUALITIES.includes(e.export.quality)) out.export.quality = e.export.quality;
+    if (ENGINES.includes(e.export.engine)) out.export.engine = e.export.engine;
+    if (CODEC_IDS.includes(e.export.codec)) out.export.codec = e.export.codec;
+    if (e.export.bitrate === null || bitrateOf(e.export.bitrate) !== null) out.export.bitrate = bitrateOf(e.export.bitrate);
     if (e.export.platform === null) out.export.platform = null;
     else if (PLATFORMS[e.export.platform]) {
       // choosing a platform applies its format unless the same edit sets one explicitly

@@ -35,7 +35,7 @@ export const DEFAULTS = {
   seriesTag: 'علوم في دقيقة',
   look: { theme: 'dark', colors: {}, grid: true, typography: {} },
   audio: { sfxVolume: 0.6, whoosh: true, tick: true, voiceVolume: 1, musicVolume: 0.25, duck: true },
-  render: { fps: 30, aspect: '9:16', resolution: 1080, quality: 'standard' },
+  render: { fps: 30, aspect: '9:16', resolution: 1080, quality: 'standard', engine: 'auto', fallback: true, codec: 'h264', bitrate: null, maxJobs: 1, outputDir: '' },
   approvals: { script: 'wait', voice: 'auto', timing: 'auto', storyboard: 'auto', render: 'auto' },
 };
 
@@ -206,6 +206,12 @@ export function updateSettings(patch) {
     if (ASPECTS.includes(patch.render.aspect)) R.aspect = patch.render.aspect;
     if ([720, 1080].includes(Number(patch.render.resolution))) R.resolution = Number(patch.render.resolution);
     if (QUALITIES.includes(patch.render.quality)) R.quality = patch.render.quality;
+    if (['auto', 'legacy', 'remotion'].includes(patch.render.engine)) R.engine = patch.render.engine;
+    if (typeof patch.render.fallback === 'boolean') R.fallback = patch.render.fallback;
+    if (['h264', 'h265'].includes(patch.render.codec)) R.codec = patch.render.codec;
+    if ('bitrate' in patch.render) { const n = Math.round(Number(patch.render.bitrate)); R.bitrate = patch.render.bitrate && n >= 500 && n <= 50000 ? n : null; }
+    if ([1, 2, 3, 4].includes(Number(patch.render.maxJobs))) R.maxJobs = Number(patch.render.maxJobs);
+    if (typeof patch.render.outputDir === 'string') R.outputDir = patch.render.outputDir.trim().slice(0, 500);
   }
   if (patch?.approvals && typeof patch.approvals === 'object') {
     next.approvals = { ...DEFAULTS.approvals, ...(next.approvals || {}) };
