@@ -314,6 +314,16 @@ const server = http.createServer(async (req, res) => {
         reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
+      else if (sys.includes('[[TASK:SCENE]]')) {
+        // a different template than the current one; the hint "chart" asks for numbers (a bad chart without them, to exercise repair)
+        const cur = JSON.parse((user.match(/CURRENT SCENE: (.*)/) || [])[1] || '{}');
+        const idx = [...user.matchAll(/(\d+):\S+@/g)].map((m) => +m[1]);
+        const hint = (user.match(/HINT FROM THE EDITOR: (.*)/) || [])[1] || '';
+        const sc = /chart/.test(hint)
+          ? { type: 'stat', template: 'chart', title: 'بالأرقام', items: [{ label: 'أزرق', icon: 'sun', value: 70, at: idx[1] ?? null }, { label: 'أحمر', icon: 'fire', value: 30, at: null }], unit: '%' }
+          : { type: 'concept', template: cur.template === 'type' ? 'cards' : 'type', title: 'مشهد جديد', items: [{ label: 'فكرة جديدة', icon: 'light', value: null, at: idx[1] ?? null }], transition: 'wipe', titleAnim: 'words' };
+        reply = '```json\n' + JSON.stringify(sc) + '\n```';
+      }
       else if (sys.includes('[[TASK:RESEARCH]]')) reply = JSON.stringify({ angle: 'الضوء الأزرق بيتشتت أكتر', facts: [
         { claim: 'Sunlight contains all visible colours', confidence: 'high', source: 'NASA Space Place — Why is the sky blue?' },
         { claim: 'Shorter (blue) wavelengths scatter more off air molecules (Rayleigh scattering)', confidence: 'high', source: 'Encyclopaedia Britannica — Rayleigh scattering' },

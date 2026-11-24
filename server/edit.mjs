@@ -11,7 +11,7 @@ import { cleanCuts, cleanSequence } from './timeline.mjs';
 import { PLATFORMS } from './platforms.mjs';
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
-export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'none'];
+export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'wipe', 'rise', 'none'];
 export const OVERLAY_KINDS = ['text', 'image', 'video'];
 export const POSITIONS = ['top', 'center', 'bottom', 'full'];
 export const ANIMS = ['fade', 'pop', 'slide', 'none'];

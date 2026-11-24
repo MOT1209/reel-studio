@@ -7,8 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { DATA_DIR, ROOT } from '../settings.mjs';
 
+const require = createRequire(import.meta.url);
 const SRC_DIR = path.join(ROOT, 'remotion');
 const ENTRY = path.join(SRC_DIR, 'index.jsx');
 export const BUNDLE_DIR = path.join(DATA_DIR, 'remotion-bundle');
@@ -90,7 +92,8 @@ export const remotionEngine = {
   id: 'remotion',
   name: 'Remotion (React composition) + FFmpeg',
   async validate() {
-    try { await import('@remotion/renderer'); await import('@remotion/bundler'); }
+    // resolve only (no import): loading webpack into the server process just to check it exists would stall requests
+    try { require.resolve('@remotion/renderer'); require.resolve('@remotion/bundler'); }
     catch (e) { return { ok: false, reason: `Remotion packages not installed (npm install): ${e.message.split('\n')[0]}` }; }
     if (!fs.existsSync(ENTRY)) return { ok: false, reason: 'remotion/index.jsx is missing' };
     const browser = findBrowser();

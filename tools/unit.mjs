@@ -230,5 +230,40 @@ test('review: OpenAI TTS never sends a key over plain HTTP to a remote host; res
   assert.equal(isAudio(Buffer.from('ID3\x04\x00\x00', 'latin1')), true);
 });
 
+// ---- scene JSON schema ----------------------------------------------------------------------------
+const W20 = Array.from({ length: 20 }, (_, i) => ({ i, text: `w${i}`, line: 0, start: i * 0.4, end: i * 0.4 + 0.35 }));
+test('scene schema: every repaired storyboard (including a messy LLM reply) is valid scene JSON', async () => {
+  const { validateStoryboard } = await import('../server/scene-schema.mjs');
+  const messy = { scenes: [{ type: 'concept', template: 'gauge', at: 3, items: [] }, { type: 'weird', template: 'cards', at: 99, title: 'x'.repeat(80), items: [{ label: 'a', icon: 'Sun!!' }] }, { template: 'flow', at: 9, items: [{ label: 'a' }] }], accents: [[2, 'accent'], [500, 'blue'], ['x']] };
+  const { storyboard } = repairStoryboard(messy, W20);
+  const r = validateStoryboard(storyboard, { words: W20 });
+  assert.ok(r.ok, r.errors.join('\n'));
+});
+test('scene schema: structural and timing problems are reported with their path', async () => {
+  const { validateStoryboard, assertStoryboard } = await import('../server/scene-schema.mjs');
+  const { storyboard } = repairStoryboard({ scenes: [{ type: 'intro', template: 'cards', at: 0, items: [{ label: 'a', icon: 'sun' }] }, { type: 'concept', template: 'flow', at: 8, items: [{ label: 'a', icon: 'sun' }, { label: 'b', icon: 'moon' }] }], accents: [] }, W20);
+  const bad = structuredClone(storyboard);
+  bad.scenes[1].template = 'spiral';
+  bad.scenes[0].extra = 1;
+  let r = validateStoryboard(bad, { words: W20 });
+  assert.ok(!r.ok);
+  assert.ok(r.errors.some((e) => /^scenes\/1\/template: must be equal to one of the allowed values/.test(e)), r.errors.join('\n'));
+  assert.ok(r.errors.some((e) => /^scenes\/0: must NOT have additional properties/.test(e)), r.errors.join('\n'));
+  const order = structuredClone(storyboard); order.scenes[1].at = 0;
+  r = validateStoryboard(order, { words: W20 });
+  assert.ok(r.errors.some((e) => /scenes\/1\/at: must be after the previous scene/.test(e)));
+  const count = structuredClone(storyboard); count.scenes[1].items = [count.scenes[1].items[0]];
+  assert.match(validateStoryboard(count, { words: W20 }).errors.join(), /flow needs 2–4 items, has 1/);
+  const late = structuredClone(storyboard); late.scenes[0].items[0].at = 12;
+  assert.match(validateStoryboard(late, { words: W20 }).errors.join(), /scenes\/0\/items\/0\/at: word 12 is outside its scene \(0–7\)/);
+  const gone = structuredClone(storyboard); gone.scenes[1].at = 30;
+  assert.match(validateStoryboard(gone, { words: W20 }).errors.join(), /word 30 does not exist/);
+  assert.throws(() => assertStoryboard(bad, { words: W20 }), (e) => e.status === 422 && /scene JSON is invalid/.test(e.message));
+});
+test('scene animation presets survive repair; unknown values fall back to the project default (null)', () => {
+  const { storyboard } = repairStoryboard({ scenes: [{ type: 'intro', template: 'cards', at: 0, items: [{ label: 'a', icon: 'sun' }], transition: 'wipe', titleAnim: 'words' }, { type: 'concept', template: 'type', at: 8, items: [], transition: 'explode', titleAnim: 'spin' }], accents: [] }, W20);
+  assert.deepEqual(storyboard.scenes.map((s) => [s.transition, s.titleAnim]), [['wipe', 'words'], [null, null]]);
+});
+
 for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }
 console.log(`\n${n} unit tests passed`);

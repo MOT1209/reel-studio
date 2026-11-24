@@ -11,6 +11,7 @@ const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as EM from './engines/manager.mjs';
+import { SCHEMA } from './scene-schema.mjs';
 import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
 import * as P from './pipeline.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
@@ -106,6 +107,11 @@ async function route(req, res) {
       if (m === 'PUT') { const out = updateSettings(await readJson(req)); EM.setMaxJobs(getSettings().render.maxJobs); return json(res, 200, out); }
     }
     // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
+    if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
+    if (a === 'projects' && id && b === 'scenes' && stage !== undefined && action === 'regenerate' && m === 'POST') {
+      const body = await readJson(req);
+      return json(res, 200, await P.regenerateScene(id, stage, { hint: body?.hint }));
+    }
     if (a === 'engines' && !id && m === 'GET') {
       const fresh = new URL(req.url, 'http://x').searchParams.get('fresh') === '1';
       return json(res, 200, { ...(await EM.engineStatus({ fresh })), selected: getSettings().render.engine || 'auto', jobs: EM.listJobs() });

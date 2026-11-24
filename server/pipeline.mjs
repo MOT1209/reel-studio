@@ -7,7 +7,8 @@ import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } 
 import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
 import { estimateWords } from './estimate.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
-import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { storyboardMessages, reviewMessages, sceneMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { assertStoryboard } from './scene-schema.mjs';
 import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
@@ -240,6 +241,7 @@ export async function editStage(id, stage, body) {
     });
   } else {
     const { storyboard, fixes } = repairStoryboard(body._parsed, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(storyboard, { words: p.words });
     p.storyboard = storyboard; p.storyboardFixes = fixes;
     p.icons = iconsFor(storyboardNouns(storyboard));
   }
@@ -420,6 +422,8 @@ const STAGE_FN = {
       if (signal.aborted) throw e;
       log(p, 'storyboard', `⚠ self-review failed (${e.message}) — keeping the draft`);
     }
+    assertStoryboard(final.storyboard, { words: p.words });
+    log(p, 'storyboard', `scene JSON valid (schema ${final.storyboard.scenes.length} scenes)`);
     p.storyboard = final.storyboard;
     p.storyboardFixes = final.fixes;
     await autoVisuals(p, signal);
@@ -430,6 +434,8 @@ const STAGE_FN = {
 
   async render(p, signal) {
     const dir = projectDir(p.id);
+    // every engine receives validated scene JSON — an invalid storyboard stops here with the exact problems
+    assertStoryboard(p.storyboard, { words: p.words });
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
     const FPS = E.export.fps;
@@ -564,6 +570,7 @@ export async function saveEdit(id, body) {
     if (typeof body.storyboard !== 'object') throw httpError(400, 'storyboard must be an object');
     const r = repairStoryboard(body.storyboard, words || p.words, { forceTemplate: p.options.forceTemplate });
     for (const sc of r.storyboard.scenes) if (sc.image && !getAsset(sc.image)) throw httpError(400, `scene image ${sc.image} is not in the library`);
+    assertStoryboard(r.storyboard, { words: words || p.words });
     sb = r.storyboard; fixes = r.fixes;
   }
   const edit = body?.edit ? cleanEdit(body.edit, { duration }) : null;
@@ -576,6 +583,45 @@ export async function saveEdit(id, body) {
   log(p, 'render', `✎ editor: ${[words && 'timing', sb && 'scenes', edit && Object.keys(edit).join('/')].filter(Boolean).join(' + ')} changed${fixes.length ? ` (${fixes.length} auto-fixes)` : ''}`);
   save(p);
   return { project: publicProject(p), fixes };
+}
+
+/**
+ * Regenerates one scene with the LLM (optionally steered by a hint), keeps its start word and media, repairs and
+ * validates the whole storyboard, and resets the render. The other scenes are untouched.
+ */
+const regenerating = new Set();
+export async function regenerateScene(id, k, { hint = '' } = {}) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  if (!p.words || !p.storyboard) throw httpError(409, 'storyboard is not ready');
+  const scenes = p.storyboard.scenes;
+  k = Number(k);
+  if (!Number.isInteger(k) || k < 0 || k >= scenes.length) throw httpError(400, `scene ${k} does not exist`);
+  if (regenerating.has(id)) throw httpError(409, 'a scene is already being regenerated');
+  regenerating.add(id);
+  try {
+    const sc = scenes[k];
+    const to = k + 1 < scenes.length ? scenes[k + 1].at : p.words.length;
+    const msgs = sceneMessages({ title: p.script?.title || p.topic, words: p.words.slice(sc.at, to), scene: sc, prev: scenes[k - 1], next: scenes[k + 1], hint: String(hint || '').slice(0, 300) });
+    const r = await chatStream(getSettings(), msgs, { temperature: 0.8, maxTokens: 900 });
+    let raw = extractJson(r.text);
+    if (Array.isArray(raw?.scenes)) raw = raw.scenes[0];
+    if (!raw || typeof raw !== 'object') throw httpError(502, 'the model did not return a scene');
+    // the scene keeps its place in time and the media the user picked for it
+    const next = { ...raw, at: sc.at, image: raw.template === 'photo' || sc.bg === 'full' ? sc.image : null, bg: sc.bg, imageOffset: sc.imageOffset };
+    if (k === 0) next.type = 'intro';
+    const rep = repairStoryboard({ ...p.storyboard, scenes: scenes.map((s, i) => (i === k ? next : s)) }, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(rep.storyboard, { words: p.words });
+    if (rep.storyboard.scenes.length !== scenes.length) throw httpError(422, 'the new scene would merge with a neighbour — try again');
+    await stopForEdit(p, 'scene regeneration');
+    p.storyboard = rep.storyboard;
+    p.icons = iconsFor(storyboardNouns(rep.storyboard));
+    resetFrom(p, 'render');
+    const ns = rep.storyboard.scenes[k];
+    log(p, 'storyboard', `↻ scene ${k + 1} regenerated: ${sc.template} → ${ns.template}${hint ? ` (hint: ${String(hint).slice(0, 60)})` : ''}${rep.fixes.length ? ` · ${rep.fixes.length} auto-fixes` : ''}`);
+    save(p);
+    return { project: publicProject(p), scene: ns, fixes: rep.fixes };
+  } finally { regenerating.delete(id); }
 }
 
 // ---- publish (YouTube) ------------------------------------------------------------

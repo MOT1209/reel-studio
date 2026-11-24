@@ -118,6 +118,48 @@ await test('remotion output matches the legacy engine frame by frame (SSIM ≥ 0
   }
 });
 
+await test('scene JSON schema is served; regenerating one scene keeps the others, its start and passes validation', async () => {
+  const schema = await api('/api/scene-schema');
+  assert.equal(schema.title, 'Reel Studio storyboard');
+  const before = (await api(`/api/projects/${id}`)).storyboard;
+  const r = await api(`/api/projects/${id}/scenes/1/regenerate`, { method: 'POST', body: JSON.stringify({}) });
+  const after = r.project.storyboard;
+  assert.equal(after.scenes.length, before.scenes.length);
+  assert.equal(after.scenes[1].at, before.scenes[1].at, 'the scene keeps its start word');
+  assert.notEqual(after.scenes[1].template, before.scenes[1].template, 'a different template');
+  assert.deepEqual([after.scenes[1].transition, after.scenes[1].titleAnim], ['wipe', 'words'], 'animation presets from the model');
+  for (const k of [0, 2]) if (before.scenes[k]) assert.deepEqual(after.scenes[k], before.scenes[k], `scene ${k} untouched`);
+  assert.equal(r.project.stages.render.status, 'idle', 'render reset');
+  const chart = await api(`/api/projects/${id}/scenes/1/regenerate`, { method: 'POST', body: JSON.stringify({ hint: 'chart please' }) });
+  assert.equal(chart.scene.template, 'chart');
+  assert.ok(chart.scene.items.filter((it) => it.value !== null).length >= 2);
+  await assert.rejects(api(`/api/projects/${id}/scenes/99/regenerate`, { method: 'POST', body: '{}' }), /400/);
+});
+
+await test('animation presets (wipe, rise, cut; words, pop titles) render the same in both engines', async () => {
+  const sb2 = (await api(`/api/projects/${id}`)).storyboard;
+  const tr = ['push', 'wipe', 'rise', 'none'], ta = ['words', 'pop', 'fade', 'words'];
+  sb2.scenes.forEach((sc, k) => { sc.transition = tr[k % 4]; sc.titleAnim = ta[k % 4]; });
+  const outs = {};
+  for (const engine of ['legacy', 'remotion']) {
+    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ storyboard: sb2, edit: { ...baseEdit, trim: { start: 0, end: null }, export: { ...baseEdit.export, engine } } }) });
+    await api(`/api/projects/${id}/run`, { method: 'POST' });
+    P = await waitStage(id, 'render', 'done', 600000);
+    assert.equal(P.render.engine, engine);
+    outs[engine] = path.join(OUT, `anim-${engine}.mp4`);
+    fs.copyFileSync(video, outs[engine]);
+  }
+  const s = ssim(outs.legacy, outs.remotion);
+  console.log(`   animation presets: SSIM mean ${s.all.toFixed(4)} · worst ${s.min.toFixed(4)} · ${s.frames} frames`);
+  assert.ok(s.all >= 0.97 && s.min >= 0.93, `SSIM ${s.all} / ${s.min}`);
+  // a frame in the middle of the wipe into scene 2 and of the rise into scene 3
+  const d = await api(`/api/projects/${id}/render-data`);
+  d.scenes.slice(1, 3).forEach((sc, k) => {
+    const t = Math.max(0, sc.start - d.start + 0.2);
+    execFileSync(FFMPEG, ['-v', 'error', '-y', '-ss', String(t), '-i', outs.legacy, '-ss', String(t), '-i', outs.remotion, '-filter_complex', '[0:v][1:v]hstack', '-frames:v', '1', path.join(OUT, `anim-${sc.transition}-${t.toFixed(2)}s.jpg`)]);
+  });
+});
+
 await test('remotion: 16:9 1080p, H.265 at a fixed bitrate', async () => {
   await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...baseEdit, trim: { start: 0, end: 3 }, export: { aspect: '16:9', resolution: 1080, quality: 'draft', fps: 30, engine: 'remotion', codec: 'h265', bitrate: 3000 } } }) });
   await api(`/api/projects/${id}/run`, { method: 'POST' });

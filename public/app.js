@@ -286,7 +286,7 @@ function renderStagePanel() {
     } else if (p.render) {
       html += `<div class="preview"><video controls src="${file('video.mp4')}"></video></div>
         <div class="tools"><a href="${file('video.mp4')}" download="${esc(p.id)}.mp4"><button>⬇ تحميل MP4</button></a></div>
-        <p class="hint">${fmt(p.render.duration)} ث · ${p.render.frames} فريم · ${p.render.width || 1080}×${p.render.height || 1920} (${esc(p.render.aspect || '9:16')}) · ${p.render.fps} fps · H.264 · −14 LUFS</p>
+        <p class="hint">${fmt(p.render.duration)} ث · ${p.render.frames} فريم · ${p.render.width || 1080}×${p.render.height || 1920} (${esc(p.render.aspect || '9:16')}) · ${p.render.fps} fps · ${p.render.codec === 'h265' ? 'H.265' : 'H.264'}${p.render.bitrate ? ` ${p.render.bitrate / 1000} Mbps` : ''} · −14 LUFS${p.render.engine ? ` · محرك ${p.render.engine === 'remotion' ? 'Remotion' : 'كلاسيكي'}${p.render.fallbackFrom ? ` (بديل عن ${esc(p.render.fallbackFrom)})` : ''}${p.render.renderSeconds ? ` · ${p.render.renderSeconds} ث رندر` : ''}` : ''}${p.render.exported ? `<br>اتنسخ في: <span dir="ltr">${esc(p.render.exported)}</span>` : ''}</p>
         <div class="tools"><button data-goto="editor">✎ عدّل في المحرر</button><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.srt" download>SRT</a><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.vtt" download>VTT</a></div>
         ${p.render.credits?.length ? `<div class="sources"><h4>حقوق الصور والموسيقى (أضفها للوصف)</h4>${p.render.credits.map((c) => `<div dir="auto">${esc(c)}</div>`).join('')}</div>` : ''}
         <h4>Contact sheet</h4><div class="preview"><img src="${file('contact.jpg')}" alt="contact sheet"></div>`;
@@ -411,6 +411,11 @@ async function openSettings(tab = 'keys') {
   setField('audio.sfxVolume', S.audio.sfxVolume); setField('audio.whoosh', S.audio.whoosh); setField('audio.tick', S.audio.tick);
   $('#sfxVal').textContent = Math.round(S.audio.sfxVolume * 100) + '%';
   setField('render.fps', S.render.fps); setField('render.aspect', S.render.aspect); setField('render.resolution', S.render.resolution); setField('render.quality', S.render.quality);
+  setField('render.engine', S.render.engine || 'auto'); setField('render.maxJobs', String(S.render.maxJobs || 1)); setField('render.fallback', S.render.fallback !== false);
+  setField('render.codec', S.render.codec || 'h264'); setField('render.bitrate', S.render.bitrate ? String(S.render.bitrate) : ''); setField('render.outputDir', S.render.outputDir || '');
+  api('/api/engines?fresh=1').then((r) => {
+    $('#engineStatus').textContent = r.engines.map((e) => `${e.available ? '✓' : '✖'} ${e.name}${e.available ? '' : ` — ${e.reason}`}`).join(' · ') + ` · H.265: ${r.codecs.h265 ? 'متاح' : 'مش في ffmpeg ده'}`;
+  }).catch((e) => { $('#engineStatus').textContent = e.message; });
   setField('audio.musicVolume', S.audio.musicVolume ?? 0.25); setField('audio.duck', S.audio.duck !== false);
   renderDefApprovals(S.approvals);
   styleLoaded = false;
