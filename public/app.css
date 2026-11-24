@@ -281,3 +281,11 @@ button.ai { border-color: rgba(89,120,255,.45); }
 .cutshade { position: absolute; top: 28px; bottom: 0; background: repeating-linear-gradient(45deg, rgba(242,80,60,.16) 0 6px, transparent 6px 12px); pointer-events: none; z-index: 3; }
 .markh { position: absolute; top: 0; height: 28px; width: 3px; background: #FFD23F; z-index: 3; pointer-events: none; }
 .markrange { position: absolute; top: 18px; height: 10px; background: rgba(255,210,63,.35); pointer-events: none; }
+.tl-row.seqrow { background: rgba(255,210,63,.04); }
+.tl-row.seqrow.custom { background: rgba(255,210,63,.09); }
+.blk.seg { background: rgba(255,210,63,.18); border-color: rgba(255,210,63,.5); justify-content: center; cursor: grab; }
+.blk.seg.hold { background: repeating-linear-gradient(45deg, rgba(154,165,174,.25) 0 6px, rgba(154,165,174,.1) 6px 12px); border-style: dashed; }
+.outhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #FFD23F; pointer-events: none; z-index: 3; }
+.tl-lab span { display: inline-flex; gap: 2px; }
+#edDur .ok { color: var(--success); } #edDur .bad { color: #FF6B5A; font-weight: 700; } #edDur .warnc { color: var(--warning); }
+label.inl.small { font-size: 12px; color: var(--sec); }

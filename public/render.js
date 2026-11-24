@@ -44,16 +44,31 @@
   const toArDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
   const dg = (s) => (TYPO.digits === 'arabic' ? toArDigits(s) : String(s));
   // source time (narration) → output time (after trim + cuts); inside a cut → the output time where the cut sits
+  // segments: [a,b] source ranges or [t,t,d] pauses, in output order (see server/timeline.mjs)
+  const segsOf = () => D.segments || [[D.start, D.end]];
+  const isHold = (sg) => sg.length === 3;
+  const segLen = (sg) => (isHold(sg) ? sg[2] : sg[1] - sg[0]);
+  /** Source → output time; an instant that was cut maps to where the cut sits (nearest following part). */
   function outT(t) {
-    const segs = D.segments || [[D.start, D.end]];
-    let acc = 0;
-    for (const [a, b] of segs) { if (t < a) return acc; if (t <= b) return acc + (t - a); acc += b - a; }
-    return acc;
+    let acc = 0, best = null;
+    for (const sg of segsOf()) {
+      if (!isHold(sg) && t >= sg[0] && t <= sg[1]) return acc + (t - sg[0]);
+      if (!isHold(sg) && t < sg[0] && (best === null || sg[0] < best[0])) best = [sg[0], acc];
+      acc += segLen(sg);
+    }
+    return best ? best[1] : acc;
   }
-  /** Next kept instant at/after t (skips cut ranges); null after the end. */
-  function keptFrom(t) {
-    for (const [a, b] of D.segments || [[D.start, D.end]]) { if (t < a) return a; if (t <= b) return t; }
-    return null;
+  /** Output → source time (+ the segment index and whether it is a pause). */
+  function srcAt(tau) {
+    const segs = segsOf();
+    let acc = 0;
+    for (let k = 0; k < segs.length; k++) {
+      const sg = segs[k], len = segLen(sg);
+      if (tau < acc + len) return { t: isHold(sg) ? sg[0] : sg[0] + (tau - acc), k, hold: isHold(sg), acc };
+      acc += len;
+    }
+    const last = segs[segs.length - 1];
+    return { t: isHold(last) ? last[0] : last[1], k: segs.length - 1, hold: false, acc, end: true };
   }
 
   // ---------- text ----------
@@ -538,6 +553,7 @@
   const CUR = new Map(); // render only: clip ref → decoded frame image for the current t
   const FRAME_CACHE = new Map(); // url → Promise<Image>
   let PREVIEW = false;
+  let HOLD = false; // preview: the output is inside a pause
   function loadImage(src) {
     if (FRAME_CACHE.has(src)) return FRAME_CACHE.get(src);
     const pr = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image failed: ' + src)); im.src = src; });
@@ -569,7 +585,9 @@
     if (!v) return null;
     const want = offset + (m.duration ? local % Math.max(0.1, m.duration - offset) : local);
     if (Math.abs(v.currentTime - want) > 0.25) { try { v.currentTime = want; } catch {} }
-    if (PLAYING && v.paused) v.play().catch(() => {}); else if (!PLAYING && !v.paused) v.pause();
+    // during a pause in the order the frame is held: clips stand still (the output clock and music keep going)
+    const run = PLAYING && !HOLD;
+    if (run && v.paused) v.play().catch(() => {}); else if (!run && !v.paused) v.pause();
     return v.readyState >= 2 ? v : null;
   }
   const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
@@ -866,7 +884,7 @@
   function drawHeader(t) {
     // progress (of the exported clip)
     ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
-    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(outT(t) / D.duration);
+    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp((TAU ?? outT(t)) / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
@@ -956,8 +974,21 @@
     ctx.restore();
   }
 
-  function drawFrame(t) {
+  let GUIDES = false; // preview only: show the platform's unsafe zones (never in a render)
+  function drawGuides() {
+    const z = D.platform.safe;
+    ctx.save(); ctx.fillStyle = 'rgba(242,80,60,0.22)'; ctx.strokeStyle = 'rgba(242,80,60,0.8)'; ctx.setLineDash([8, 6]); ctx.lineWidth = 2;
+    const rect = (x, y, w, h) => { if (w > 0 && h > 0) { ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); } };
+    rect(0, 0, DW, DH * z.top); rect(0, DH * (1 - z.bottom), DW, DH * z.bottom);
+    rect(DW * (1 - z.right), DH * z.top, DW * z.right, DH * (1 - z.top - z.bottom)); rect(0, DH * z.top, DW * z.left, DH * (1 - z.top - z.bottom));
+    ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = `700 ${Math.round(DW / 30)}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.direction = 'rtl';
+    if (z.bottom) ctx.fillText(`منطقة أزرار ${D.platform.name}`, DW / 2, DH * (1 - z.bottom / 2));
+    ctx.restore();
+  }
+  let TAU = null; // output time of the frame being drawn (progress bar, end fade); null → derived from t
+  function drawFrame(t, tau) {
     t = Math.max(0, Number(t) || 0);
+    TAU = Number.isFinite(Number(tau)) && tau !== null ? Number(tau) : outT(t);
     ctx.setTransform(S, 0, 0, S, 0, 0);
     ctx.globalAlpha = 1;
     const prof = window.__prof ? (window.__profData = window.__profData || {}) : null;
@@ -967,8 +998,9 @@
     step('card', drawCard);
     step('captions', drawCaptions);
     step('overlays', drawOverlays);
+    if (GUIDES && D.platform?.safe) drawGuides();
     // end fade (at the end of the exported clip)
-    const fo = prog(t, D.end - 0.35, 0.35);
+    const fo = prog(TAU, D.duration - 0.35, 0.35);
     if (fo > 0) { ctx.fillStyle = hexA(C.bg, fo * 0.6); ctx.fillRect(0, 0, DW, DH); }
   }
 
@@ -977,6 +1009,28 @@
     const L = D.layout || {};
     if (L.DW) { DW = L.DW; DH = L.DH; S = L.S; PLACE = L.place; TITLE = L.title; CAP = { scale: 1, ...L.caption }; }
     TYPO = { ...TYPO, ...(D.typography || {}) };
+    // platform safe zone: captions stay above the app's bottom UI and clear of its side buttons
+    const sz = D.platform?.safe;
+    if (sz && L.DW) {
+      const centered = Math.abs(CAP.cx - DW / 2) < 1;
+      const lh = (TYPO.captionSize || 52) * (CAP.scale || 1) * 1.42;
+      const maxCy = DH * (1 - sz.bottom) - (lh * CAP.lines) / 2 - 8;
+      if (CAP.cy > maxCy) {
+        CAP.cy = maxCy;
+        // the card makes room: shrink it (kept centred) so it ends above the captions
+        const capTop = CAP.cy - (lh * CAP.lines) / 2 - 14;
+        const centeredCard = Math.abs(PLACE.x + (CARD.w * PLACE.k) / 2 - DW / 2) < 2;
+        if (centeredCard && PLACE.y + CARD.h * PLACE.k > capTop) {
+          const k = Math.max(0.5, (capTop - PLACE.y) / CARD.h);
+          PLACE = { x: (DW - CARD.w * k) / 2, y: PLACE.y, k };
+        }
+      }
+      if (centered && (sz.left || sz.right)) {
+        const l = DW * sz.left, r = DW * (1 - sz.right);
+        CAP.maxW = Math.min(CAP.maxW, r - l - 24);
+        CAP.cx = (l + r) / 2;
+      }
+    }
     canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
     if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
   }
@@ -1014,6 +1068,7 @@
     buildChunks();
     buildLayers();
     window.renderData = D;
+    window.__layout = () => ({ cap: { ...CAP }, DW, DH }); // for tests: where the captions ended up
   }
   let PLAYING = false;
   async function boot() {
@@ -1029,12 +1084,16 @@
     if (PREVIEW) setupPlayer(id, q.get('embed') === '1');
     window.__ready = true;
   }
+  /**
+   * Preview player, driven by OUTPUT time (tau) so it plays exactly what the export will contain: cuts are skipped,
+   * reordered parts play in their new order, pauses hold the frame in silence. The voice <audio> is re-positioned at
+   * every part boundary; within a part its clock drives the picture.
+   */
   function setupPlayer(id, embedded) {
     const audio = new Audio(`/api/projects/${encodeURIComponent(id)}/files/voice.mp3`);
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
     if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
-    let t = D.start;
-    let music = null;
+    let tau = 0, cur = srcAt(0), lastNow = performance.now(), music = null;
     const setMusic = () => {
       if (music) { music.pause(); music = null; }
       if (D.music) { music = new Audio(D.music.src); music.loop = true; }
@@ -1043,39 +1102,59 @@
     const syncMusic = () => {
       if (!music) return;
       // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
-      const speaking = D.words.some((w) => t >= w.start - 0.05 && t <= w.end + 0.2);
+      const speaking = !cur.hold && D.words.some((w) => cur.t >= w.start - 0.05 && cur.t <= w.end + 0.2);
       music.volume = Math.min(1, D.music.volume * (speaking ? 0.35 : 1));
-      if (PLAYING && music.paused) { music.currentTime = outT(t) % (music.duration || 1e9); music.play().catch(() => {}); }
+      if (PLAYING && music.paused) { music.currentTime = tau % (music.duration || 1e9); music.play().catch(() => {}); }
       if (!PLAYING && !music.paused) music.pause();
     };
+    let placedK = -1;
+    const placeAudio = (exact = false) => {
+      HOLD = !!cur.hold;
+      if (!PLAYING || cur.hold || cur.end) { audio.pause(); return; }
+      // entering another part (or an explicit seek) positions the voice exactly; within a part only drift is corrected
+      if (exact || cur.k !== placedK || Math.abs(audio.currentTime - cur.t) > 0.12) audio.currentTime = cur.t;
+      placedK = cur.k;
+      if (audio.paused) audio.play().catch(() => {});
+    };
+    const goTo = (x, exact = false) => { tau = Math.max(0, Math.min(D.duration, x)); cur = srcAt(tau); if (music) music.currentTime = tau % (music.duration || 1e9); placeAudio(exact); };
     const setPlaying = (on) => {
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
-      if (on) { if (t >= D.end - 0.05) t = D.start; t = keptFrom(t) ?? D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
-      if (music) { music.pause(); }
+      if (on && tau >= D.duration - 0.05) goTo(0);
+      lastNow = performance.now();
+      placeAudio();
+      if (music) music.pause();
     };
-    const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
+    const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t: cur.t, tau, playing: PLAYING }, location.origin); };
     let lastPost = 0;
     const loop = (now) => {
+      const dt = Math.min(0.25, (now - lastNow) / 1000); lastNow = now;
       if (PLAYING) {
-        t = audio.currentTime;
-        const k = keptFrom(t); // jump over cut ranges, like the export does
-        if (k === null || t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } else if (k > t + 0.01) { t = k; audio.currentTime = k; if (music) music.currentTime = outT(t) % (music.duration || 1e9); }
+        if (!cur.hold && !audio.paused) {
+          // inside a part the voice clock leads; at the part's end move to the next part (maybe a jump or a pause)
+          const sg = segsOf()[cur.k];
+          const t = audio.currentTime;
+          if (t >= sg[1] - 0.01 || audio.ended) goTo(cur.acc + segLen(sg));
+          else { tau = cur.acc + (t - sg[0]); cur = { ...cur, t }; }
+        } else goTo(tau + dt);
+        if (tau >= D.duration - 0.02) { setPlaying(false); tau = D.duration; cur = srcAt(tau); }
       }
       syncMusic();
-      drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
+      drawFrame(cur.t, tau); seek.value = String(Math.round((tau / D.duration) * 1000)); tm.textContent = tau.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
     };
     btn.onclick = () => setPlaying(!PLAYING);
-    seek.oninput = () => { t = D.start + (Number(seek.value) / 1000) * D.duration; audio.currentTime = t; };
-    // editor ↔ preview: seek / play / pause / reload (after an autosave)
+    seek.oninput = () => goTo((Number(seek.value) / 1000) * D.duration, true);
+    // editor ↔ preview: seek (source time, or output time) / play / pause / reload (after an autosave)
     window.addEventListener('message', async (e) => {
       if (e.origin !== location.origin || !e.data?.type) return;
       const m = e.data;
-      if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
+      if (m.type === 'reel:seek') goTo(outT(Math.max(0, Number(m.t) || 0)), true);
+      if (m.type === 'reel:seekOut') goTo(Number(m.tau) || 0, true);
+      if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }

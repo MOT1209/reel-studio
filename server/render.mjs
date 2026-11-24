@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
-import { outToSrc } from './timeline.mjs';
+import { outToSrc, isHold, segLen } from './timeline.mjs';
 
 export const FPS = 30;
 export const W = 1080, H = 1920;
@@ -109,11 +109,14 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
   });
   if (clips.length) g += `${srcLabels.join('')}amix=inputs=${srcLabels.length}:normalize=0:duration=first[src];`;
   else g += '[v0]anull[src];';
-  // keep only the segments that survive trim + cuts
-  g += `[src]asplit=${segs.length}${segs.map((_, k) => `[s${k}]`).join('')};`;
-  segs.forEach(([x, y], k) => {
-    const len = y - x, fd = Math.min(0.015, len / 4).toFixed(3);
-    g += `[s${k}]atrim=start=${f3(x)}:end=${f3(y)},asetpts=PTS-STARTPTS,afade=t=in:d=${fd},afade=t=out:st=${f3(len - fd)}:d=${fd}[k${k}];`;
+  // keep only the segments that survive (trim + cuts, or the custom order); pauses are generated silence
+  const ranges = segs.filter((sg) => !isHold(sg));
+  g += `[src]asplit=${ranges.length}${ranges.map((_, k) => `[s${k}]`).join('')};`;
+  let r = 0;
+  segs.forEach((sg, k) => {
+    if (isHold(sg)) { g += `anullsrc=r=48000:cl=stereo,atrim=0:${f3(sg[2])}[k${k}];`; return; }
+    const [x, y] = sg, len = y - x, fd = Math.min(0.015, len / 4).toFixed(3);
+    g += `[s${r++}]atrim=start=${f3(x)}:end=${f3(y)},asetpts=PTS-STARTPTS,afade=t=in:d=${fd},afade=t=out:st=${f3(len - fd)}:d=${fd}[k${k}];`;
   });
   g += `${segs.map((_, k) => `[k${k}]`).join('')}concat=n=${segs.length}:v=0:a=1,apad[vp];`;
   g += `[1:a]aresample=48000,aformat=channel_layouts=stereo[s];`;
@@ -132,7 +135,7 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
   const m = pass1.err.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/);
   if (!m) throw new Error('loudnorm pass 1 produced no measurement');
   const j = JSON.parse(m[0]);
-  log(`loudness measured: ${j.input_i} LUFS, TP ${j.input_tp} dB → target −14 LUFS${segs.length > 1 ? ` · ${segs.length - 1} cut${segs.length > 2 ? 's' : ''}` : ''}${clips.length ? ` · ${clips.length} clip sound${clips.length > 1 ? 's' : ''}` : ''}${music ? ` · music ${Math.round(music.volume * 100)}%${music.duck ? ' (ducked under voice)' : ''}` : ''}`);
+  log(`loudness measured: ${j.input_i} LUFS, TP ${j.input_tp} dB → target −14 LUFS${segs.length > 1 ? ` · ${segs.length - 1} cut${segs.length > 2 ? 's' : ''}` : ''}${segs.some(isHold) ? ` · ${segs.filter(isHold).length} pause(s)` : ''}${clips.length ? ` · ${clips.length} clip sound${clips.length > 1 ? 's' : ''}` : ''}${music ? ` · music ${Math.round(music.volume * 100)}%${music.duck ? ' (ducked under voice)' : ''}` : ''}`);
   const ln = `loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=${j.input_i}:measured_TP=${j.input_tp}:measured_LRA=${j.input_lra}:measured_thresh=${j.input_thresh}:offset=${j.target_offset}:linear=true`;
   await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', `${g},${ln},aresample=48000`, '-c:a', 'aac', '-b:a', '192k', out], { signal });
 }
@@ -181,20 +184,20 @@ async function openWorker(browser, url, errors, width, height) {
   return page;
 }
 
-async function captureFrame(page, t, width, height) {
+async function captureFrame(page, t, width, height, tau) {
   if (CAPTURE === 'screenshot') {
-    await page.evaluate(async (tt) => { if (window.prepareFrame) await window.prepareFrame(tt); window.drawFrame(tt); }, t);
+    await page.evaluate(async ([tt, ta]) => { if (window.prepareFrame) await window.prepareFrame(tt); window.drawFrame(tt, ta); }, [t, tau]);
     return page.screenshot({ type: 'jpeg', quality: 94, clip: { x: 0, y: 0, width, height } });
   }
-  const b64 = await page.evaluate(async (tt) => {
+  const b64 = await page.evaluate(async ([tt, ta]) => {
     if (window.prepareFrame) await window.prepareFrame(tt); // video clips: load the frame images this time needs
-    window.drawFrame(tt);
+    window.drawFrame(tt, ta); // source time (what to draw) + output time (progress bar, end fade)
     const blob = await new Promise((r) => document.getElementById('c').toBlob(r, 'image/jpeg', 0.95));
     const u8 = new Uint8Array(await blob.arrayBuffer());
     let s = '';
     for (let k = 0; k < u8.length; k += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(k, k + 0x8000));
     return btoa(s);
-  }, t);
+  }, [t, tau]);
   return Buffer.from(b64, 'base64');
 }
 
@@ -277,7 +280,7 @@ async function renderSegment({ pages, errors, i0, i1, total, timeOf, fps: FPS_, 
         const i = next++;
         if (i >= i1) return;
         while (i - written > nWorkers * 4) { if (stop()) return; await new Promise((r) => setTimeout(r, 5)); } // bounded look-ahead
-        try { ready.set(i, await captureFrame(page, timeOf(i), width, height)); }
+        try { ready.set(i, await captureFrame(page, timeOf(i), width, height, i / FPS_)); }
         catch (e) { failed = failed || new Error(`frame ${i}: ${e.message.split('\n')[0]}`); wake?.(); return; }
         wake?.();
       }
@@ -314,7 +317,7 @@ export async function muxFinal({ video, audio, out, signal }) {
 }
 
 export async function contactSheet({ video, out, duration, aspect = '9:16' }) {
-  const [tw, th, cols] = { '9:16': [270, 480, 6], '1:1': [320, 320, 6], '16:9': [384, 216, 4] }[aspect] || [270, 480, 6];
+  const [tw, th, cols] = { '9:16': [270, 480, 6], '1:1': [320, 320, 6], '16:9': [384, 216, 4], '4:5': [288, 360, 5] }[aspect] || [270, 480, 6];
   const count = Math.min(36, Math.max(cols, Math.round(duration * 2)));
   const rows = Math.ceil(count / cols);
   const fps = (count / duration).toFixed(4);

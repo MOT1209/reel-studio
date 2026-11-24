@@ -24,6 +24,8 @@ export const DEFAULTS = {
   llm: { baseUrl: 'http://127.0.0.1:31415/v1', apiKey: '', model: 'auto', temperature: 0.8 },
   elevenlabs: { baseUrl: 'https://api.elevenlabs.io', apiKey: '', voiceId: '', modelId: 'eleven_multilingual_v2', speed: 1, stability: 0.45, style: 0.2 },
   deepgram: { baseUrl: 'https://api.deepgram.com', apiKey: '', model: 'nova-3', language: 'ar' },
+  tts: { provider: 'elevenlabs' }, // elevenlabs | openai
+  openaiTts: { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini-tts', voice: 'alloy', speed: 1, instructions: 'Speak like a warm, clear science narrator.' },
   youtube: { clientId: '', clientSecret: '', privacy: 'private', autoPublish: false, tags: 'علوم, shorts, science', categoryId: '27' },
   pexels: { apiKey: '' },
   pixabay: { apiKey: '' },
@@ -57,15 +59,15 @@ export function resolvePalette(look = getSettings().look) {
   for (const k of COLOR_KEYS) if (HEX.test(look.colors?.[k] || '')) out[k] = look.colors[k];
   return out;
 }
-export const ASPECTS = ['9:16', '1:1', '16:9'];
+export const ASPECTS = ['9:16', '1:1', '16:9', '4:5'];
 export const QUALITIES = ['draft', 'standard', 'high'];
 export const STAGE_NAMES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 
 // Secret fields: [section, field, envVar]
 const SECRETS = [['llm', 'apiKey', 'LLM_API_KEY'], ['elevenlabs', 'apiKey', 'ELEVENLABS_API_KEY'], ['deepgram', 'apiKey', 'DEEPGRAM_API_KEY'], ['youtube', 'clientSecret', 'YOUTUBE_CLIENT_SECRET'],
-  ['pexels', 'apiKey', 'PEXELS_API_KEY'], ['pixabay', 'apiKey', 'PIXABAY_API_KEY'], ['unsplash', 'accessKey', 'UNSPLASH_ACCESS_KEY']];
+  ['openaiTts', 'apiKey', 'OPENAI_TTS_API_KEY'], ['pexels', 'apiKey', 'PEXELS_API_KEY'], ['pixabay', 'apiKey', 'PIXABAY_API_KEY'], ['unsplash', 'accessKey', 'UNSPLASH_ACCESS_KEY']];
 // Base URLs: env always wins (lets tools/mock-apis.mjs and tests redirect everything).
-const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', 'ELEVENLABS_BASE_URL'], ['deepgram', 'baseUrl', 'DEEPGRAM_BASE_URL']];
+const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', 'ELEVENLABS_BASE_URL'], ['deepgram', 'baseUrl', 'DEEPGRAM_BASE_URL'], ['openaiTts', 'baseUrl', 'OPENAI_TTS_BASE_URL']];
 // Other plain fields with env fallbacks (settings.json wins when set).
 const PLAIN_ENV = [['llm', 'model', 'LLM_MODEL'], ['elevenlabs', 'voiceId', 'ELEVENLABS_VOICE_ID'], ['elevenlabs', 'modelId', 'ELEVENLABS_MODEL_ID'], ['deepgram', 'model', 'DEEPGRAM_MODEL'], ['youtube', 'clientId', 'YOUTUBE_CLIENT_ID']];
 
@@ -149,7 +151,7 @@ export function getPublicSettings() {
 export function updateSettings(patch) {
   const stored = readStored();
   const next = structuredClone(stored);
-  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash']) {
+  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash', 'tts', 'openaiTts']) {
     if (!patch?.[sec] || typeof patch[sec] !== 'object') continue;
     next[sec] = next[sec] || {};
     for (const [f, v] of Object.entries(patch[sec])) {
@@ -165,6 +167,10 @@ export function updateSettings(patch) {
         if (['private', 'unlisted', 'public'].includes(v)) next[sec][f] = v;
       } else if (f === 'temperature') {
         const t = Number(v); if (Number.isFinite(t)) next[sec][f] = Math.max(0, Math.min(2, t));
+      } else if (sec === 'tts' && f === 'provider') {
+        if (['elevenlabs', 'openai'].includes(v)) next[sec][f] = v;
+      } else if (sec === 'openaiTts' && f === 'speed') {
+        const t = Number(v); if (Number.isFinite(t)) next[sec][f] = Math.max(0.25, Math.min(4, t));
       } else if (['speed', 'stability', 'style'].includes(f)) {
         const t = Number(v), [lo, hi] = f === 'speed' ? [0.7, 1.2] : [0, 1];
         if (Number.isFinite(t)) next[sec][f] = Math.max(lo, Math.min(hi, t));

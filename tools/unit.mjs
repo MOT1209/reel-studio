@@ -12,7 +12,8 @@ const { resolveIconKey, iconsFor } = await import('../server/icons.mjs');
 const { updateSettings, getPublicSettings, getSettings } = await import('../server/settings.mjs');
 
 let n = 0;
-const test = (name, fn) => { fn(); n++; console.log('✔', name); };
+const queue = [];
+const test = (name, fn) => queue.push([name, fn]); // run in order at the end; async tests are awaited
 
 test('<think> stripped even when tags are split across chunks', () => {
   const src = 'A<think>secret plan</think>B<th' + 'ink>more</thi' + 'nk>C';
@@ -177,4 +178,57 @@ test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue sp
   assert.deepEqual(split, ['واحد', 'تلاتة.']);
 });
 
+test('sequence: reordered parts + a pause map both ways; overlap and empty lists are refused', () => {
+  const seq = TL.cleanSequence([{ start: 6, end: 9 }, { hold: 1.5, at: 6 }, { start: 0, end: 4 }], 10);
+  const segs = TL.sequenceToSegments(seq);
+  assert.deepEqual(segs, [[6, 9], [6, 6, 1.5], [0, 4]]);
+  assert.equal(TL.outDuration(segs), 8.5);
+  assert.equal(TL.outToSrc(1, segs), 7);
+  assert.equal(TL.outToSrc(3.7, segs), 6, 'inside the pause the frame is held');
+  assert.equal(TL.outToSrc(4.5, segs), 0);
+  assert.equal(TL.srcToOut(0, segs), 4.5); assert.equal(TL.srcToOut(8, segs), 2); assert.equal(TL.srcToOut(5, segs), null);
+  assert.throws(() => TL.cleanSequence([{ start: 0, end: 5 }, { start: 4, end: 6 }], 10), /same moment/);
+  assert.throws(() => TL.cleanSequence([{ hold: 1, at: 0 }], 10), /at least one part/);
+  assert.throws(() => TL.cleanSequence([{ start: 0, end: 2 }, { hold: 30, at: 0 }], 10), /0.1–10/);
+  const words = tokenize('أول جملة هنا.\nتاني جملة هنا').map((t, i) => ({ ...t, start: i, end: i + 0.8 }));
+  const cues = buildCues(words, { segments: [[3, 6], [3, 3, 1], [0, 3]] });
+  assert.deepEqual(cues.map((c) => c.text), ['تاني جملة هنا', 'أول جملة هنا.'], 'subtitles come out in the new order');
+  assert.equal(cues[1].start, 4, 'after the 3 s part and the 1 s pause');
+});
+
+// regressions from the PR #3 review
+test('review: a word onset right after an inserted pause plays where the narration resumes', () => {
+  const segs = [[0, 1], [1, 1, 2], [1, 2]];
+  assert.equal(TL.srcToOut(1, segs), 3);
+  assert.equal(TL.srcToOut(2, segs), 4, 'the very end still maps');
+  assert.equal(TL.srcToOut(0.5, [[1, 2], [0, 1]]), 1.5);
+});
+test('review: a cue clipped at a shared boundary keeps its own part\'s output offset (no inverted cue)', () => {
+  const words = [{ text: 'أ', start: 0.2, end: 1, line: 0 }, { text: 'ب', start: 1.1, end: 1.8, line: 0 }];
+  const cues = buildCues(words, { segments: [[1, 2], [0, 1]], maxWords: 1 });
+  for (const c of cues) assert.ok(c.end > c.start, JSON.stringify(c));
+  assert.deepEqual(cues.map((c) => [c.text, c.start]), [['ب', 0.1], ['أ', 1.2]]);
+});
+test('review: a custom sequence shorter than 0.5 s is refused instead of silently replaced', () => {
+  assert.throws(() => TL.cleanSequence([{ start: 0, end: 0.2 }], 10), /half a second/);
+});
+test('review: estimated timing — boundary goes to the next interval; snaps keep the remaining budget', async () => {
+  const { allocateWords } = await import('../server/estimate.mjs');
+  const two = allocateWords('ab ab', [[0, 1], [3, 4]]);
+  assert.equal(two[1].start, 3, 'second word starts when speech resumes');
+  const w = allocateWords('a a\na a\na a a a a', [[0, 1], [2, 3], [4, 5]]);
+  for (const x of w) assert.ok(x.end > x.start, `usable interval ${JSON.stringify(x)}`);
+  assert.ok(w[w.length - 1].start < 5, 'last word starts before the audio ends');
+});
+test('review: OpenAI TTS never sends a key over plain HTTP to a remote host; responses must be audio', async () => {
+  const { assertSafeKeyUrl, isAudio } = await import('../server/apis.mjs');
+  assert.throws(() => assertSafeKeyUrl('http://tts.example.com/v1', 'sk-1'), /plain HTTP/);
+  assert.doesNotThrow(() => assertSafeKeyUrl('http://127.0.0.1:4399/v1', 'sk-1'));
+  assert.doesNotThrow(() => assertSafeKeyUrl('https://api.openai.com/v1', 'sk-1'));
+  assert.doesNotThrow(() => assertSafeKeyUrl('http://tts.example.com/v1', ''));
+  assert.equal(isAudio(Buffer.from('<html><body>' + 'x'.repeat(400))), false);
+  assert.equal(isAudio(Buffer.from('ID3\x04\x00\x00', 'latin1')), true);
+});
+
+for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }
 console.log(`\n${n} unit tests passed`);

@@ -4,7 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
-import { chatStream, ttsWithTimestamps, transcribeWords, applyPronunciation } from './apis.mjs';
+import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
+import { estimateWords } from './estimate.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
@@ -15,7 +16,8 @@ import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
-import { keptSegments, outDuration, srcToOut } from './timeline.mjs';
+import { keptSegments, outDuration, srcToOut, sequenceToSegments, isHold } from './timeline.mjs';
+import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -84,7 +86,8 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
-    edit: ['9:16', '1:1', '16:9'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
+    edit: PLATFORMS[options.platform] ? { export: { platform: options.platform, aspect: PLATFORMS[options.platform].aspect, resolution: PLATFORMS[options.platform].resolution, fps: PLATFORMS[options.platform].fps } }
+      : ['9:16', '1:1', '16:9', '4:5'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
     publish: { status: 'idle', log: [] },
   };
   fs.mkdirSync(projectDir(id), { recursive: true });
@@ -342,6 +345,13 @@ const STAGE_FN = {
     }
     const s = getSettings();
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
+    if (s.tts?.provider === 'openai') {
+      log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
+      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
+      p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
+      log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
+      return;
+    }
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
     fs.writeFileSync(out, audio);
@@ -353,10 +363,18 @@ const STAGE_FN = {
 
   async timing(p, signal) {
     const dir = projectDir(p.id);
-    let timed;
-    if (p.voice?.source === 'upload') {
-      const s = getSettings();
-      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on uploaded voice`);
+    let timed, estimated = false;
+    const s0 = getSettings();
+    if (['upload', 'openai'].includes(p.voice?.source) && !s0.deepgram.apiKey) {
+      // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
+      log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
+      const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
+      timed = wordsWithChars(dw);
+      estimated = true;
+    } else if (['upload', 'openai'].includes(p.voice?.source)) {
+      const s = s0;
+      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on the ${p.voice.source === 'upload' ? 'uploaded' : 'generated'} voice`);
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
@@ -372,7 +390,7 @@ const STAGE_FN = {
     p.words = words;
     const weak = words.filter((w) => w.weak);
     const avg = words.reduce((a, w) => a + w.match, 0) / Math.max(1, words.length);
-    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: p.voice.source };
+    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: estimated ? 'estimate' : p.voice.source, estimated };
     log(p, 'timing', `aligned ${words.length} script words · mean char match ${(avg * 100).toFixed(0)}% · ${weak.length} weak`);
     if (weak.length) log(p, 'timing', `weak: ${weak.slice(0, 12).map((w) => `#${w.i} ${w.text}`).join(', ')}${weak.length > 12 ? '…' : ''}`);
   },
@@ -429,7 +447,8 @@ const STAGE_FN = {
     const data = renderData(p);
     const { duration, start, segments } = data;
     const audioCfg = getSettings().audio;
-    log(p, 'render', `${duration.toFixed(2)} s${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    log(p, 'render', `${duration.toFixed(2)} s${E.sequence ? ` · custom order: ${segments.filter((x) => !isHold(x)).length} parts, ${segments.filter(isHold).length} pause(s)` : `${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''}`} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    if (data.platform?.check.level === 'over') log(p, 'render', `⚠ ${data.platform.check.message}`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
@@ -607,8 +626,9 @@ export function renderData(p) {
   const full = Math.max(p.voice?.duration || 0, lastEnd + 0.3) + 0.6;
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
-  let segments = keptSegments(start, end, E.cuts);
-  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a cut list that removes everything is ignored
+  let segments = E.sequence ? sequenceToSegments(E.sequence) : keptSegments(start, end, E.cuts); // custom order wins
+  // only the default trim/cut path falls back; a custom sequence is validated (cleanSequence) and kept as is
+  if (!E.sequence && outDuration(segments) < 0.5) segments = [[start, end]];
   const sc = p.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,
@@ -630,6 +650,7 @@ export function renderData(p) {
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
+    platform: E.export.platform ? { id: E.export.platform, ...PLATFORMS[E.export.platform], check: durationCheck(E.export.platform, outDuration(segments)) } : null,
     words: p.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
     accents: p.storyboard.accents, scenes, icons: p.icons || {}, media,
     overlays: E.overlays.map((o) => ({ ...o, clip: p.clips?.[`ov-${o.id}`] ? clipRef(p, `ov-${o.id}`) : null })),
