@@ -282,19 +282,35 @@ function validateEdit(p, stage, body) {
 }
 
 export async function saveUpload(id, buf, filename, mime) {
-  const p = getProject(id);
-  if (!p) throw httpError(404, 'project not found');
   if (!buf?.length) throw httpError(400, 'empty upload');
-  if (!looksLikeMedia(buf)) throw httpError(415, 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)');
-  await stopForEdit(p, 'new voice-over uploaded');
-  const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
-  for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
-  fs.writeFileSync(path.join(projectDir(id), `upload.${ext}`), buf);
-  p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size: buf.length };
-  p.voiceMode = 'upload';
-  if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
-  log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(buf.length / 1024).toFixed(0)} KB)`);
-  save(p);
+  if (!looksLikeMedia(buf)) throw httpError(415, UPLOAD_BAD);
+  const tmp = path.join(projectDir(id), `.upload-${crypto.randomBytes(6).toString('hex')}`);
+  if (!getProject(id)) throw httpError(404, 'project not found');
+  fs.writeFileSync(tmp, buf);
+  return saveUploadFile(id, tmp, filename, mime);
+}
+const UPLOAD_BAD = 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)';
+
+/** Takes ownership of an already-written temp file (streamed from the request — never held in RAM). Always removes it on failure. */
+export async function saveUploadFile(id, tmp, filename, mime) {
+  try {
+    const p = getProject(id);
+    if (!p) throw httpError(404, 'project not found');
+    const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(64); const got = fs.readSync(fd, head, 0, 64, 0); fs.closeSync(fd);
+    if (!got) throw httpError(400, 'empty upload');
+    if (!looksLikeMedia(head.subarray(0, got))) throw httpError(415, UPLOAD_BAD);
+    await stopForEdit(p, 'new voice-over uploaded');
+    const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
+    for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
+    const dest = path.join(projectDir(id), `upload.${ext}`);
+    try { fs.renameSync(tmp, dest); } catch { fs.copyFileSync(tmp, dest); fs.rmSync(tmp, { force: true }); }
+    const size = fs.statSync(dest).size;
+    p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size };
+    p.voiceMode = 'upload';
+    if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
+    log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(size / 1024).toFixed(0)} KB)`);
+    save(p);
+  } finally { fs.rmSync(tmp, { force: true }); }
 }
 
 /** Magic-byte check: the bytes must be a container ffmpeg can read as audio, whatever the file name says. */

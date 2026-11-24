@@ -21,10 +21,11 @@
     "templates": "node tools/templates-test.mjs",
     "test:export": "node tools/export-test.mjs",
     "test:ui": "node tools/ui-test.mjs",
-    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:ui && npm run templates",
+    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:ui && npm run test:xss && npm run templates",
     "test:skills": "node tools/skills-test.mjs",
     "test:vault": "node tools/vault-test.mjs",
-    "test:phase1": "node tools/phase1-test.mjs"
+    "test:phase1": "node tools/phase1-test.mjs",
+    "test:xss": "node tools/xss-test.mjs"
   },
   "dependencies": {
     "playwright": "^1.49.0"

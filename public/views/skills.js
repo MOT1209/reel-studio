@@ -64,9 +64,10 @@ export async function mountSkills(el) {
   });
   $('#mcNew', el).addEventListener('click', () => {
     const m = modal('إضافة خادم MCP', `<label>الاسم <input id="mName"></label><label>الرابط (Streamable HTTP) <input id="mUrl" dir="ltr" placeholder="https://example.com/mcp"></label>
-      <label>Authorization (اختياري — بيتحفظ مخفي) <input id="mAuth" dir="ltr" placeholder="Bearer …" autocomplete="off"></label><div class="tools"><button class="primary" id="mOk">إضافة ومزامنة</button></div>`);
+      <label>Authorization (اختياري — بيتحفظ مخفي) <input id="mAuth" dir="ltr" placeholder="Bearer …" autocomplete="off"></label>
+      <label class="row"><input type="checkbox" id="mLocal"> خادم محلي / شبكة داخلية (أنا فاهم إن الطلبات هتروح لجهاز جوّه شبكتي)</label><div class="tools"><button class="primary" id="mOk">إضافة ومزامنة</button></div>`);
     $('#mOk', m.el).addEventListener('click', async () => {
-      const r = await act(() => api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: $('#mName', m.el).value, url: $('#mUrl', m.el).value, headers: $('#mAuth', m.el).value ? { Authorization: $('#mAuth', m.el).value } : {} }) }));
+      const r = await act(() => api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: $('#mName', m.el).value, url: $('#mUrl', m.el).value, allowPrivate: $('#mLocal', m.el).checked, headers: $('#mAuth', m.el).value ? { Authorization: $('#mAuth', m.el).value } : {} }) }));
       if (!r) return;
       m.close(); await act(() => api(`/api/mcp/${r.id}/sync`, { method: 'POST' })); reload();
     });

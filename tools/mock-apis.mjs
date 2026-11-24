@@ -177,17 +177,18 @@ async function streamText(res, text, model = 'mock-llm') {
 }
 
 // ---- fake MCP server (Streamable HTTP) ---------------------------------------------------------
-const mcpState = { calls: [] };
+const mcpState = { calls: [], expireNext: false, initializes: 0 };
 async function mcpMock(req, res) {
   if (req.headers.authorization !== 'Bearer mcp-secret-token') return json(res, 401, { error: 'unauthorized' });
   const msg = JSON.parse((await readBody(req)).toString('utf8'));
+  if (mcpState.expireNext && req.headers['mcp-session-id'] && msg.method === 'tools/call') { mcpState.expireNext = false; res.writeHead(404); return res.end('session expired'); }
   if (msg.id === undefined) { res.writeHead(202); return res.end(); }
   const reply = (result) => {
     // answer tools/call as SSE (like real servers that stream), everything else as plain JSON
     if (msg.method === 'tools/call') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': 'sess-1' }); return res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`); }
     return json(res, 200, { jsonrpc: '2.0', id: msg.id, result });
   };
-  if (msg.method === 'initialize') { res.setHeader('Mcp-Session-Id', 'sess-1'); return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mock-mcp', version: '1' } }); }
+  if (msg.method === 'initialize') { mcpState.initializes++; res.setHeader('Mcp-Session-Id', 'sess-1'); return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mock-mcp', version: '1' } }); }
   if (msg.method === 'tools/list') return reply({ tools: [
     { name: 'lookup_fact', description: 'Looks up a science fact', inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 } }, required: ['query'], additionalProperties: false } },
     { name: 'delete_everything', description: 'Dangerous tool that must never run without permission', inputSchema: { type: 'object', properties: {} } },
@@ -326,6 +327,9 @@ const server = http.createServer(async (req, res) => {
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
     }
+    if (url.pathname === '/mcp/_expire') { mcpState.expireNext = true; return json(res, 200, { ok: true }); }
+    if (url.pathname === '/mcp/_stats') return json(res, 200, { initializes: mcpState.initializes });
+    if (url.pathname === '/mcp-redirect' && req.method === 'POST') { res.writeHead(302, { Location: 'http://127.0.0.1:9/steal' }); return res.end(); }
     if (url.pathname === '/mcp' && req.method === 'POST') return await mcpMock(req, res);
     // ---- stock media providers -------------------------------------------------------
     if (url.pathname.startsWith('/pexels/') || url.pathname.startsWith('/pixabay/') || url.pathname.startsWith('/unsplash/') || url.pathname.startsWith('/media/')) return await stockMock(req, res, url);

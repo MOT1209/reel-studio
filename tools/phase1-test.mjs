@@ -163,6 +163,24 @@ await test('queue endpoint: GET /api/queue reports the limit and jobs', async ()
   } finally { child.kill('SIGKILL'); }
 });
 
+await test('upload: streamed to disk, limit enforced (413), bad bytes refused (415), no temp files left behind', async () => {
+  const PORT = 4314, data = path.join(TMP, 'sd3'), BASE = `http://127.0.0.1:${PORT}`;
+  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data, RS_MAX_UPLOAD_MB: '1' }, stdio: 'ignore' });
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`${BASE}/api/health`); up = true; } catch { await sleep(100); } }
+    const H = { Origin: BASE, 'Content-Type': 'application/json' };
+    const proj = await (await fetch(`${BASE}/api/projects`, { method: 'POST', headers: H, body: JSON.stringify({ topic: 'اختبار', autostart: false }) })).json();
+    const post = (buf, name = 'v.mp3') => fetch(`${BASE}/api/projects/${proj.id}/upload`, { method: 'POST', headers: { Origin: BASE, 'x-filename': name, 'Content-Type': 'audio/mpeg' }, body: buf });
+    const mp3 = (bytes) => Buffer.concat([Buffer.from('ID3'), Buffer.alloc(bytes - 3, 1)]);
+    assert.equal((await post(mp3(2 * 1024 * 1024))).status, 413);
+    assert.equal((await post(Buffer.alloc(5000, 7))).status, 415);
+    const ok = await post(mp3(200 * 1024)); assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).upload.size, 200 * 1024);
+    const left = [...fs.readdirSync(path.join(data, 'assets')), ...fs.readdirSync(path.join(data, 'projects', proj.id))].filter((f) => f.startsWith('.upload-'));
+    assert.deepEqual(left, []);
+  } finally { child.kill('SIGKILL'); }
+});
+
 console.log(`\n${n} passed, ${failed} failed`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);
