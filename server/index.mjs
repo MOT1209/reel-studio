@@ -9,7 +9,7 @@ import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.m
 
 const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram };
 import { iconLicenses } from './icons.mjs';
-import { checkFfmpeg } from './render.mjs';
+import { checkFfmpeg, killAllChildren } from './render.mjs';
 import * as P from './pipeline.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
 import * as AR from './arabic.mjs';
@@ -102,6 +102,7 @@ async function route(req, res) {
       if (m === 'GET') return json(res, 200, getPublicSettings());
       if (m === 'PUT') return json(res, 200, updateSettings(await readJson(req)));
     }
+    if (a === 'queue' && m === 'GET') return json(res, 200, { limit: P.renderQueue.limit, jobs: P.renderQueue.snapshot() });
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
     if (a === 'test' && m === 'POST' && TESTS[id]) {
       // optional unsaved values from the Settings form (masked keys are ignored → saved key is used)
@@ -333,8 +334,22 @@ const server = http.createServer(async (req, res) => {
     if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
+let closing = false;
+/** SIGINT/SIGTERM: stop accepting requests, cancel running stages, kill ffmpeg + Chromium, flush projects, exit. */
+async function gracefulShutdown(sig) {
+  if (closing) return; closing = true;
+  slog('info', `${sig} received — shutting down`);
+  const force = setTimeout(() => { killAllChildren().finally(() => process.exit(1)); }, 8000); force.unref();
+  server.close();
+  server.closeAllConnections?.();
+  try { const n = await P.shutdown(); if (n) slog('info', `stopped ${n} running job(s)`); } catch (e) { slog('error', 'shutdown error', { err: e }); }
+  await killAllChildren();
+  process.exit(0);
+}
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => gracefulShutdown(sig));
+
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
-  console.log(`Reel Studio v2 → http://${HOST}:${PORT}`);
+  console.log(`Reel Studio v2.1 → http://${HOST}:${PORT}`);
   if (!ff) console.warn('⚠ ffmpeg not found in PATH (set FFMPEG_PATH) — rendering will fail.');
 });

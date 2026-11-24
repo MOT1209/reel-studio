@@ -15,11 +15,18 @@ import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
+import { JobQueue, runQueued, parseLimit } from './queue.mjs';
 import { keptSegments, outDuration, srcToOut } from './timeline.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
+
+// Rendering is the memory-hungry stage (Chromium + ffmpeg): at most RS_MAX_RENDERS run at once (default 1), the rest queue.
+const lim = parseLimit(process.env.RS_MAX_RENDERS);
+if (lim.note) slog('warn', lim.note);
+export const renderQueue = new JobQueue({ limit: lim.n });
+const TRANSIENT_RENDER = /Target (page, context or browser has been )?closed|browser has been closed|Protocol error|ECONNRESET|socket hang up/i;
 
 const cache = new Map(); // id → project
 const buses = new Map(); // id → EventEmitter
@@ -135,7 +142,13 @@ export function runPipeline(id) {
         log(p, stage, `▶ ${stage} started`);
         save(p);
         try {
-          await STAGE_FN[stage](p, entry.controller.signal);
+          if (stage === 'render') {
+            await runQueued(renderQueue, p.id, () => STAGE_FN.render(p, entry.controller.signal), {
+              signal: entry.controller.signal, retries: 1, backoffMs: 3000, retryable: (e) => TRANSIENT_RENDER.test(e.message),
+              onWait: (pos) => { log(p, 'render', `⏳ queued — position ${pos} (another render is running)`); bus(p.id).emit('event', { type: 'queue', data: { position: pos } }); },
+              onRetry: (n, e) => log(p, 'render', `⚠ transient browser failure (${e.message.split('\n')[0]}) — retry ${n}`),
+            });
+          } else await STAGE_FN[stage](p, entry.controller.signal);
           if (entry.controller.signal.aborted) throw new Error('cancelled');
           st.endedAt = new Date().toISOString();
           st.status = p.approvals[stage] === 'wait' ? 'review' : 'done';
@@ -161,6 +174,15 @@ export function runPipeline(id) {
     }
   })();
   return true;
+}
+
+/** Stops every running pipeline and publish and waits for them (used by the graceful shutdown). */
+export async function shutdown() {
+  const ids = [...running.keys()];
+  for (const id of ids) cancelPublish(id);
+  await Promise.all(ids.map((id) => stopRun(id)));
+  for (const id of ids) { const p = cache.get(id); if (p) { try { save(p); } catch {} } }
+  return ids.length;
 }
 
 export async function cancel(id) {
@@ -449,15 +471,18 @@ const STAGE_FN = {
     const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
-    writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
+    // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
+    const vdur = Math.ceil(duration * FPS - 1e-9) / FPS;
+    writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, segments, voiceVolume: E.audio.voiceVolume,
+      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
       clips: await clipSounds(E.overlays),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
-    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
+    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal, expect: { width: L.width, height: L.height, fps: FPS, duration: vdur, frames: Math.ceil(duration * FPS - 1e-9) } });
+    log(p, 'render', 'output verified with ffprobe (codecs, size, fps, frame count, durations)');
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });

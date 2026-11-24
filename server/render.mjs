@@ -5,15 +5,28 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { outToSrc } from './timeline.mjs';
+import { writeFileAtomic } from './settings.mjs';
 
 export const FPS = 30;
 export const W = 1080, H = 1920;
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 
+// Every child process and browser is registered so a shutdown can never leave orphans behind.
+const children = new Set();
+const browsers = new Set();
+export function trackChild(p) { children.add(p); p.once('close', () => children.delete(p)); return p; }
+export const activeProcessCount = () => children.size + browsers.size;
+/** Kills every ffmpeg/ffprobe child and closes every Chromium started by the renderer. */
+export async function killAllChildren() {
+  for (const c of children) { try { c.kill('SIGKILL'); } catch {} }
+  await Promise.all([...browsers].map((b) => Promise.race([b.close().catch(() => {}), new Promise((r) => setTimeout(r, 2000))])));
+  browsers.clear();
+}
+
 export function run(cmd, args, { signal, input, collect = true } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { windowsHide: true, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+    const p = trackChild(spawn(cmd, args, { windowsHide: true, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] }));
     let out = '', err = '';
     p.stdout.on('data', (d) => { if (collect) out += d; });
     p.stderr.on('data', (d) => { err += d; if (err.length > 200000) err = err.slice(-100000); });
@@ -146,6 +159,7 @@ export async function launchBrowser(log = () => {}) {
     try {
       const b = await chromium.launch({ ...opt, args: ['--font-render-hinting=none', '--disable-gpu'] /* software raster parallelises across pages */ });
       if (opt.channel) log(`using system browser channel "${opt.channel}"`);
+      browsers.add(b); b.on('disconnected', () => browsers.delete(b));
       return b;
     } catch (e) { lastErr = e; }
   }
@@ -161,12 +175,24 @@ export async function launchBrowser(log = () => {}) {
 const CAPTURE = process.env.RS_CAPTURE === 'screenshot' ? 'screenshot' : 'canvas';
 // Parallel pages: by CPU cores, but each headless page needs ~400 MB — on a memory-starved machine
 // extra pages only cause swapping (everything, the server included, slows to a crawl).
-function workerCount() {
-  if (Number(process.env.RS_RENDER_WORKERS)) return Math.max(1, Math.min(4, Number(process.env.RS_RENDER_WORKERS)));
-  const byCpu = Math.max(1, os.cpus().length - 1);
-  const byMem = Math.max(1, Math.floor((os.freemem() / 1024 ** 2 - 300) / 400));
-  return Math.max(1, Math.min(4, byCpu, byMem));
+export const MAX_WORKERS = 4;
+/**
+ * Parallel pages for one render. RS_RENDER_WORKERS must be an integer 1–MAX_WORKERS; anything else (text, 0, negative,
+ * fractions, Infinity, out of range) is rejected with a note and the memory-aware automatic value is used instead.
+ * An explicit valid value is still capped by free RAM (≈400 MB per page) unless RS_RENDER_WORKERS_FORCE=1.
+ */
+export function parseWorkers(raw, { cpus = os.cpus().length, freeMem = os.freemem(), force = false } = {}) {
+  const byCpu = Math.max(1, cpus - 1);
+  const byMem = Math.max(1, Math.floor((freeMem / 1024 ** 2 - 300) / 400));
+  const auto = Math.max(1, Math.min(MAX_WORKERS, byCpu, byMem));
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { n: auto, note: null };
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < 1 || v > MAX_WORKERS) return { n: auto, note: `RS_RENDER_WORKERS="${raw}" is invalid (use an integer 1–${MAX_WORKERS}) — using ${auto}` };
+  if (force) return { n: v, note: null };
+  const n = Math.min(v, byMem);
+  return { n, note: n < v ? `RS_RENDER_WORKERS=${v} reduced to ${n}: only ${(freeMem / 1024 ** 3).toFixed(1)} GB RAM is free` : null };
 }
+function workerCount() { return parseWorkers(process.env.RS_RENDER_WORKERS, { force: process.env.RS_RENDER_WORKERS_FORCE === '1' }); }
 
 async function openWorker(browser, url, errors, width, height) {
   const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
@@ -217,7 +243,12 @@ export async function renderFrames({ url, out, duration, start = 0, segments = n
   if (manifest.key !== key) { for (const f of fs.readdirSync(segDir)) fs.rmSync(path.join(segDir, f), { force: true }); manifest = { key, done: [] }; }
   const segFile = (k) => path.join(segDir, `seg_${String(k).padStart(4, '0')}.mp4`);
   const todo = [];
-  for (let k = 0; k < nSeg; k++) if (!(manifest.done.includes(k) && fs.existsSync(segFile(k)))) todo.push(k);
+  const segLen = (k) => Math.min(total, (k + 1) * SEG_FRAMES) - k * SEG_FRAMES;
+  for (let k = 0; k < nSeg; k++) {
+    let ok = manifest.done.includes(k) && fs.existsSync(segFile(k));
+    if (ok && (await countFrames(segFile(k)).catch(() => -1)) !== segLen(k)) { ok = false; log(`recovery: segment ${k} is damaged — rendering it again`); }
+    if (!ok) { todo.push(k); manifest.done = manifest.done.filter((x) => x !== k); }
+  }
   if (todo.length < nSeg) log(`recovery: reusing ${nSeg - todo.length}/${nSeg} segments rendered before`);
   const q = QUALITY[quality] || QUALITY.standard;
   const t0 = Date.now();
@@ -225,7 +256,9 @@ export async function renderFrames({ url, out, duration, start = 0, segments = n
     const browser = await launchBrowser(log);
     try {
       const errors = [];
-      const nWorkers = Math.min(workerCount(), Math.max(1, Math.floor(total / 30)));
+      const wc = workerCount();
+      if (wc.note) log(`⚠ ${wc.note}`);
+      const nWorkers = Math.min(wc.n, Math.max(1, Math.floor(total / 30)));
       const pages = await Promise.all(Array.from({ length: nWorkers }, () => openWorker(browser, url, errors, width, height)));
       log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''} · ${width}×${height} · ${quality} (crf ${q.crf}) · free RAM ${(os.freemem() / 1024 ** 3).toFixed(1)} GB`);
       if (os.freemem() < 1024 ** 3) log('⚠ الذاكرة الفاضية أقل من 1 GB — الرندر هيبقى بطيء؛ اقفل برامج تانية لو تقدر');
@@ -234,8 +267,10 @@ export async function renderFrames({ url, out, duration, start = 0, segments = n
         const i0 = k * SEG_FRAMES, i1 = Math.min(total, i0 + SEG_FRAMES);
         const timeOf = segments ? (i) => outToSrc(i / FPS_, segments) : (i) => start + i / FPS_; // output frame → source time
         await renderSegment({ pages, errors, i0, i1, total, timeOf, fps: FPS_, width, height, q, out: segFile(k), signal, onFrame });
+        const got = await countFrames(segFile(k));
+        if (got !== i1 - i0) throw new Error(`segment ${k}: expected ${i1 - i0} frames, encoded ${got}`);
         manifest.done.push(k);
-        fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+        writeFileAtomic(manifestFile, JSON.stringify(manifest));
       }
     } finally {
       await Promise.race([browser.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
@@ -243,7 +278,7 @@ export async function renderFrames({ url, out, duration, start = 0, segments = n
   } else onFrame(total - 1, total, null);
   // concat (stream copy — every segment starts with a keyframe and shares the same encoder settings)
   const list = path.join(segDir, 'list.txt');
-  fs.writeFileSync(list, Array.from({ length: nSeg }, (_, k) => `file '${segFile(k).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
+  writeFileAtomic(list, Array.from({ length: nSeg }, (_, k) => `file '${segFile(k).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
   await run(FFMPEG, ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', out], { signal });
   log(`encoded ${total} frames in ${((Date.now() - t0) / 1000).toFixed(1)} s (${nSeg} segment${nSeg > 1 ? 's' : ''})`);
   return total;
@@ -255,6 +290,7 @@ async function renderSegment({ pages, errors, i0, i1, total, timeOf, fps: FPS_, 
   const ff = spawn(FFMPEG, ['-hide_banner', '-y', '-f', 'image2pipe', '-framerate', String(FPS_), '-c:v', 'mjpeg', '-i', '-',
     '-vf', `scale=${width}:${height}:in_range=full:out_range=tv,format=yuv420p`,
     '-c:v', 'libx264', '-preset', q.preset, '-crf', String(q.crf), '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-r', String(FPS_), tmp], { windowsHide: true });
+  trackChild(ff);
   let ffErr = '';
   ff.stderr.on('data', (d) => { ffErr = (ffErr + d).slice(-4000); });
   // ffmpeg can die at any moment (bad codec, disk full, killed): `failed` stops every loop below.
@@ -309,8 +345,51 @@ async function renderSegment({ pages, errors, i0, i1, total, timeOf, fps: FPS_, 
   }
 }
 
-export async function muxFinal({ video, audio, out, signal }) {
-  await run(FFMPEG, ['-hide_banner', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-shortest', '-movflags', '+faststart', out], { signal });
+/** Number of video frames (packets) in a file — used to prove a segment has exactly the frames it should. */
+export async function countFrames(file) {
+  const { out } = await run(FFPROBE, ['-v', 'error', '-count_packets', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', file]);
+  return parseInt(out, 10);
+}
+
+/**
+ * ffprobe-based output check. Throws one error listing every problem: codecs, size, fps, frame count,
+ * missing audio, and video/audio/container durations that disagree with the expected duration.
+ */
+export async function verifyVideo(file, { width, height, fps, duration, frames, audio = true, tol = 0.12 }) {
+  const { out } = await run(FFPROBE, ['-v', 'error', '-count_packets', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,nb_read_packets,duration:format=duration', '-of', 'json', file]);
+  const j = JSON.parse(out);
+  const v = (j.streams || []).find((s) => s.codec_type === 'video'), a = (j.streams || []).find((s) => s.codec_type === 'audio');
+  const bad = [];
+  if (!v) bad.push('no video stream');
+  else {
+    if (v.codec_name !== 'h264') bad.push(`video codec ${v.codec_name}`);
+    if (width && v.width !== width) bad.push(`width ${v.width} ≠ ${width}`);
+    if (height && v.height !== height) bad.push(`height ${v.height} ≠ ${height}`);
+    const [n, d] = String(v.r_frame_rate).split('/').map(Number);
+    if (fps && Math.abs(n / (d || 1) - fps) > 0.01) bad.push(`fps ${(n / (d || 1)).toFixed(3)} ≠ ${fps}`);
+    if (frames && Number(v.nb_read_packets) !== frames) bad.push(`${v.nb_read_packets} frames ≠ ${frames}`);
+    if (duration && Math.abs(Number(v.duration) - duration) > tol) bad.push(`video ${Number(v.duration).toFixed(2)} s ≠ ${duration.toFixed(2)} s`);
+  }
+  if (audio) {
+    if (!a) bad.push('no audio stream');
+    else {
+      if (a.codec_name !== 'aac') bad.push(`audio codec ${a.codec_name}`);
+      if (duration && Math.abs(Number(a.duration) - duration) > tol + 0.05) bad.push(`audio ${Number(a.duration).toFixed(2)} s ≠ ${duration.toFixed(2)} s`);
+    }
+  }
+  if (duration && Math.abs(Number(j.format?.duration) - duration) > tol + 0.05) bad.push(`container ${Number(j.format?.duration).toFixed(2)} s ≠ ${duration.toFixed(2)} s`);
+  if (bad.length) throw new Error(`output check failed: ${bad.join('; ')}`);
+  return { video: v, audio: a };
+}
+
+/** Muxes into <out>.part.mp4, verifies it (when `expect` is given) and only then renames — a cancel/crash never leaves a bad file at `out`. */
+export async function muxFinal({ video, audio, out, signal, expect = null }) {
+  const tmp = `${out}.part.mp4`;
+  try {
+    await run(FFMPEG, ['-hide_banner', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', tmp], { signal });
+    if (expect) await verifyVideo(tmp, expect);
+    fs.renameSync(tmp, out);
+  } finally { fs.rmSync(tmp, { force: true }); }
 }
 
 export async function contactSheet({ video, out, duration, aspect = '9:16' }) {

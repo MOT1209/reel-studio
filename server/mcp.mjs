@@ -90,7 +90,7 @@ async function rpc(s, method, params, { notify = false, timeout = 30000 } = {}) 
 }
 
 async function connect(s) {
-  const r = await rpc(s, 'initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'reel-studio', version: '2.0.0' } });
+  const r = await rpc(s, 'initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'reel-studio', version: '2.1.0' } });
   await rpc(s, 'notifications/initialized', null, { notify: true }).catch(() => {});
   return r;
 }
