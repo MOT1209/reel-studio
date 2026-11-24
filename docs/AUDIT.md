@@ -110,15 +110,24 @@ Implemented: declarative skills (prompt / MCP), validation (all-or-nothing impor
 | No kashida | `public/kashida.js` — tatweel only between joining letters, never after ا د ذ ر ز و ة ى or inside لا; caption alignment "justify" | Arabic test: rules + Amiri line measured in the render browser |
 | Egyptian / MSA only | Levantine, Gulf and Maghrebi markers (+ b-/ka- prefixes), script generation and rewrites in Levantine / Gulf | Arabic test: one sentence per dialect, mixed, unknown |
 
+## 6b. v2.2 — the suggested features
+
+| Feature | What it does | Evidence |
+|---|---|---|
+| **Voice providers** | `tts.provider`: ElevenLabs (char timestamps) or any OpenAI-compatible `/audio/speech`. Timing for generated/uploaded audio comes from Deepgram when a key exists, otherwise `server/estimate.mjs` estimates word onsets from the audio's pauses (flagged as estimated) | `tools/voice-test.mjs`: error vs the synthesizer's real onsets — Deepgram median 2 ms; estimate median 132 ms, max 350 ms |
+| **Reorder + pauses** | `edit.sequence`: source ranges in any order plus pauses (held frame, silent voice); validated (no overlapping ranges). Preview player rewritten around output time | unit (mapping, subtitle order), export (duration +1.5 s, pause measured silent, first subtitle from the second half), UI (pause, drag reorder, reset) |
+| **Platform presets** | 7 presets incl. new 4:5; captions kept out of each app's UI zones (card shrinks if needed), preview-only guides, duration advice / render-log warning | export (TikTok caption position measured in the render page; 4:5 MP4 at 1080×1350), UI |
+
 ### Still open
 - **Real services:** the provider, TTS/STT, YouTube and MCP integrations are tested against mocks built from the documented API shapes. This environment's network blocks the real hosts (connection refused for api.pexels.com, pixabay.com, api.unsplash.com, api.elevenlabs.io, api.deepgram.com), so a first real run must be watched in `data/logs/server.log`.
 - **DPAPI** is implemented but could only be exercised on Windows; here the file-key and env-key paths are the ones tested. If PowerShell DPAPI fails, the vault falls back to the 0600 key file and says so.
-- The narration is still the master clock: you can remove parts of it, but not re-order it or insert silence.
+- Safe zones are approximate (apps change their UI) and duration limits are the documented upload limits at the time of writing — both are advice, never a block.
+- Estimated timing (no Deepgram key) is good enough for captions that light up near their word; for exact timing use ElevenLabs or add a Deepgram key.
 - Dialect detection is a marker heuristic (good for clear text, not a classifier); Maghrebi has detection but no generation preset.
 - Playwright's own Chromium could not be downloaded here; tests ran with the system Chrome fallback (the same path Windows users get when the download fails).
 
 ## 7. Release checklist
-- [x] `npm test` (unit · Arabic · library · skills · vault · robustness), `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
+- [x] `npm test` (unit · Arabic · library · skills · vault · voice · robustness), `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
 - [x] `npm audit --omit=dev` → 0 vulnerabilities
 - [x] Fonts bundled only with their OFL licence files; icon licences in `assets/icons/LICENSES.md`
 - [x] No secret reaches the browser (settings, MCP, providers tested) or the logs (redaction tested)

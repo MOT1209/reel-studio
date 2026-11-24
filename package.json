@@ -1,6 +1,6 @@
 {
   "name": "reel-studio",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Reel Studio — AI video studio for Arabic educational reels, shorts and explainers, rendered locally.",
   "type": "module",
