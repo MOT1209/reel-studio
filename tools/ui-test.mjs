@@ -218,6 +218,24 @@ try {
     assert.ok(await page.isVisible('#lyFront'));
   });
 
+  await test('editor: duplicate an overlay, crop inputs reach the project, ripple delete closes the gap', async () => {
+    const ovs = async () => (await saved()).edit.overlays;
+    const n0 = (await ovs()).length;
+    await page.click('#addText'); await until('text A', async () => (await ovs()).length === n0 + 1);
+    const a = (await ovs()).at(-1);
+    await page.click('#ovDup'); await until('duplicate', async () => (await ovs()).length === n0 + 2);
+    const all = await ovs(); const dup = all.at(-1);
+    assert.notEqual(dup.id, a.id); assert.equal(dup.text, a.text); assert.ok(Math.abs(dup.start - a.end) < 0.02, 'the copy starts where the original ends');
+    // ripple: move the copy after the original, then delete the original with ripple on → the copy moves earlier by the original's length
+    const mv = +(a.end + 0.6).toFixed(2); await page.fill('[data-o="start"]', String(mv)); await page.fill('[data-o="end"]', String(+(mv + 1.5).toFixed(2))); await page.press('[data-o="end"]', 'Tab');
+    await until('copy moved', async () => { const d2 = (await ovs()).find((x) => x.id === dup.id); return d2 && Math.abs(d2.start - mv) < 0.02; });
+    await page.check('#rippleOn');
+    await (await page.$(`#tlInner .blk.ov[data-ov="${a.id}"]`)).click({ position: { x: 12, y: 10 } });
+    await page.click('#ovDel');
+    await until('ripple applied', async () => { const o2 = await ovs(); const d2 = o2.find((x) => x.id === dup.id); return !o2.some((x) => x.id === a.id) && d2 && Math.abs(d2.start - (mv - (a.end - a.start))) < 0.02; });
+    await page.uncheck('#rippleOn');
+  });
+
   await test('skills page: run a built-in skill from its dialog', async () => {
     await page.goto(`${BASE}/#/skills`);
     await page.waitForSelector('tr[data-sk="titles"] [data-run]');

@@ -25,7 +25,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   E().audio = E().audio || {};
   E().overlays = E().overlays || [];
   E().audio.tracks = E().audio.tracks || [];
-  const sn = { on: true, grid: 0 }; // magnet to word/scene/clip edges + the playhead; optional time grid
+  const sn = { on: true, grid: 0, ripple: false }; // magnet to word/scene/clip edges + the playhead; optional time grid
   E().typography = E().typography || {};
   E().trim = E().trim || { start: 0, end: null };
   E().cuts = E().cuts || [];
@@ -37,6 +37,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       <button class="small" id="edUndo" title="تراجع (Ctrl+Z)">↶</button><button class="small" id="edRedo" title="إعادة (Ctrl+Y)">↷</button>
       <button class="small primary" id="edPlay" title="تشغيل (مسافة)">▶</button><span class="mono" id="edTime">0:00.0</span>
       <label class="inl">زووم <input type="range" id="edZoom" min="20" max="240" value="70"></label>
+      <label class="inl" title="ريبل: لما تحذف عنصر أو تقصّر نهايته، اللي بعده في نفس الصف بيتحرك معاه"><input type="checkbox" id="rippleOn"> ريبل</label>
       <label class="inl" title="التقاط الحواف: الكلمات والمشاهد والعناصر والمؤشر"><input type="checkbox" id="snapOn" checked> مغناطيس</label>
       <select id="gridSel" title="شبكة زمنية"><option value="0">بدون شبكة</option><option value="0.25">شبكة 0.25 ث</option><option value="0.5">شبكة 0.5 ث</option><option value="1">شبكة 1 ث</option></select>
       <span class="sep"></span>
@@ -208,7 +209,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       box.innerHTML = `<h4>مشهد ${sel.i + 1} <span class="hint">${tm.start.toFixed(2)}–${tm.end.toFixed(2)} ث</span></h4>
         <div class="two"><label>القالب <select data-s="template">${opt(TEMPLATES, sc.template, TPL_AR)}</select></label><label>النوع <select data-s="type">${opt(TYPES, sc.type, TYPE_AR)}</select></label></div>
         <label>العنوان <input data-s="title" value="${esc(sc.title)}" maxlength="40"></label>
-        <h5>العناصر</h5>${sc.items.map((it, k) => `<div class="two"><input data-item="${k}" data-k="label" value="${esc(it.label)}" placeholder="نص"><input data-item="${k}" data-k="icon" dir="ltr" value="${esc(it.icon)}" placeholder="icon (english)"></div>`).join('')}
+        <h5>العناصر</h5>${sc.items.map((it, k) => `<div class="two"><input data-item="${k}" data-k="label" aria-label="نص العنصر ${k + 1}" value="${esc(it.label)}" placeholder="نص"><input data-item="${k}" data-k="icon" aria-label="أيقونة العنصر ${k + 1}" dir="ltr" value="${esc(it.icon)}" placeholder="icon (english)"></div>`).join('')}
         <div class="tools"><button class="small" id="itAdd">＋ عنصر</button>${sc.items.length ? '<button class="small" id="itDel">− آخر عنصر</button>' : ''}</div>
         <h5>صورة / فيديو</h5>
         ${sc.image ? `<div class="thumbrow"><img src="/api/assets/${esc(sc.image)}/thumb" alt="" onerror="this.style.display='none'"><button class="small danger" id="imgDel">شيل</button></div>` : '<p class="hint">مفيش.</p>'}
@@ -229,12 +230,14 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
         <div class="two"><label>الحجم النسبي <input type="range" min="0.15" max="1" step="0.05" data-o="scale" value="${o.scale ?? 0.6}"></label><label>الشفافية <input type="range" min="0.1" max="1" step="0.05" data-o="opacity" value="${o.opacity ?? 1}"></label></div>
         <div class="two"><label>إزاحة أفقية <input type="number" step="0.01" min="-1" max="1" data-o="x" value="${o.x || 0}"></label><label>إزاحة رأسية <input type="number" step="0.01" min="-1" max="1" data-o="y" value="${o.y || 0}"></label></div>
         <label>دوران (درجة) <input type="number" step="1" min="-360" max="360" data-o="rot" value="${o.rot || 0}"></label>
+        ${o.kind !== 'text' ? `<h5>قص الصورة / الفيديو (نسبة من الأصل)</h5><div class="two"><label>من اليسار <input type="number" min="0" max="0.95" step="0.01" data-crop="x" value="${o.crop?.x ?? 0}"></label><label>من فوق <input type="number" min="0" max="0.95" step="0.01" data-crop="y" value="${o.crop?.y ?? 0}"></label></div>
+        <div class="two"><label>العرض <input type="number" min="0.05" max="1" step="0.01" data-crop="w" value="${o.crop?.w ?? 1}"></label><label>الارتفاع <input type="number" min="0.05" max="1" step="0.01" data-crop="h" value="${o.crop?.h ?? 1}"></label></div>` : ''}
         <h5>الطبقات</h5><div class="tools"><button class="small" id="lyFront" title="أمام كل العناصر">⇧⇧ أمام الكل</button><button class="small" id="lyUp">⇧ للأمام</button><button class="small" id="lyDown">⇩ للخلف</button><button class="small" id="lyBack">⇩⇩ خلف الكل</button></div>
         <p class="hint">ترتيب الطبقة: ${E().overlays.indexOf(o) + 1} من ${E().overlays.length} (الأعلى رقمًا يظهر قدّام).</p>
         <h5>كي فريمات (حركة)</h5>
         ${(o.keyframes || []).map((k, ki) => `<div class="kf" data-ki="${ki}"><label>ث <input type="number" step="0.05" min="0" data-kf="t" value="${k.t}"></label>${['x', 'y', 'scale', 'opacity', 'rot'].map((p) => `<label>${p} <input type="number" step="0.05" data-kf="${p}" value="${k[p] ?? ''}" placeholder="—"></label>`).join('')}<label>سلاسة <select data-kf="ease">${opt(['linear', 'in', 'out', 'inOut', 'hold'], k.ease || 'linear', { linear: 'خطي', in: 'بداية بطيئة', out: 'نهاية بطيئة', inOut: 'الاتنين', hold: 'ثبات' })}</select></label><button class="small danger" data-kfdel="${ki}">✕</button></div>`).join('') || '<p class="hint">مفيش كي فريمات — العنصر ثابت. حط المؤشر على اللحظة وضيف كي فريم، بعدين غيّر القيم.</p>'}
         <div class="tools"><button class="small" id="kfAdd">＋ كي فريم عند المؤشر</button></div>
-        <div class="tools"><button class="small danger" id="ovDel">حذف (Delete)</button></div>`;
+        <div class="tools"><button class="small" id="ovDup" title="نسخة من العنصر بعده مباشرة">⧉ تكرار</button><button class="small danger" id="ovDel">حذف (Delete)</button></div>`;
     } else if (sel.kind === 'track') {
       const x = E().audio.tracks.find((y) => y.id === sel.id);
       box.innerHTML = `<h4>مسار صوت</h4><p>${esc(x.name || x.asset)}</p>
@@ -295,6 +298,16 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       const o = E().overlays.find((x) => x.id === sel.id);
       $$('[data-o]', box).forEach((i) => i.addEventListener('change', () => change(() => { o[i.dataset.o] = val(i); if (o.end <= o.start) o.end = o.start + 0.5; })));
       $('#ovDel', box).addEventListener('click', () => removeSelected());
+      $('#ovDup', box).addEventListener('click', () => change(() => {
+        const len = o.end - o.start, start = +Math.min(Math.max(0, full - len), o.end).toFixed(2), c = clone(o);
+        Object.assign(c, { id: uid(), start, end: +(start + len).toFixed(2) });
+        E().overlays.splice(E().overlays.indexOf(o) + 1, 0, c); sel = { kind: 'overlay', id: c.id };
+      }));
+      $$('[data-crop]', box).forEach((i) => i.addEventListener('change', () => change(() => {
+        const cr = { x: 0, y: 0, w: 1, h: 1, ...(o.crop || {}) }; cr[i.dataset.crop] = Number(i.value) || 0;
+        cr.w = Math.min(cr.w, 1 - cr.x); cr.h = Math.min(cr.h, 1 - cr.y);
+        if (cr.x === 0 && cr.y === 0 && cr.w >= 0.999 && cr.h >= 0.999) delete o.crop; else o.crop = cr;
+      })));
       const moveLayer = (to) => change(() => { const a = E().overlays, i = a.indexOf(o); a.splice(i, 1); a.splice(to(i, a.length), 0, o); });
       $('#lyFront', box).addEventListener('click', () => moveLayer((i, n) => n));
       $('#lyUp', box).addEventListener('click', () => moveLayer((i, n) => Math.min(n, i + 1)));
@@ -364,9 +377,16 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     mark = { in: null, out: null };
     toast(`اتحذف ${(b - a).toFixed(1)} ث — الفيديو بقى ${outLen().toFixed(1)} ث`);
   }
+  /** Ripple: shift the overlays in the same row (text vs picture/video) that start at or after `from` by `delta` seconds. */
+  function rippleAfter(o, from, delta, skip = []) {
+    const row = (x) => (x.kind === 'text' ? 'text' : 'media');
+    for (const x of E().overlays) if (x.id !== o.id && !skip.includes(x.id) && row(x) === row(o) && x.start >= from - 1e-6) {
+      const len = x.end - x.start; x.start = +Math.max(0, Math.min(full - len, x.start + delta)).toFixed(2); x.end = +(x.start + len).toFixed(2);
+    }
+  }
   function removeSelected() {
     if (sel?.kind === 'cut') { change(() => { E().cuts.splice(sel.i, 1); sel = null; }); return; }
-    if (sel?.kind === 'overlay' || sel?.kind === 'overlays') { const ids = selOvIds(); change(() => { E().overlays = E().overlays.filter((o) => !ids.includes(o.id)); sel = null; }); return; }
+    if (sel?.kind === 'overlay' || sel?.kind === 'overlays') { const ids = selOvIds(); change(() => { if (sn.ripple) for (const o of E().overlays.filter((x) => ids.includes(x.id))) rippleAfter(o, o.end, -(o.end - o.start), ids); E().overlays = E().overlays.filter((o) => !ids.includes(o.id)); sel = null; }); return; }
     else if (sel?.kind === 'music') change(() => { E().audio.music = null; sel = null; });
     else if (sel?.kind === 'track') change(() => { E().audio.tracks = E().audio.tracks.filter((x) => x.id !== sel.id); sel = null; });
   }
@@ -385,6 +405,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   }
   $('#addTrack', el).addEventListener('click', addTrack);
   $('#snapOn', el).addEventListener('change', (e) => { sn.on = e.target.checked; });
+  $('#rippleOn', el).addEventListener('change', (e) => { sn.ripple = e.target.checked; });
   $('#gridSel', el).addEventListener('change', (e) => { sn.grid = Number(e.target.value); });
   $('#addMedia', el).addEventListener('click', addMedia);
   $('#markIn', el).addEventListener('click', () => setMark('in'));
@@ -482,7 +503,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
         for (const x of g.group) { x.o.start = +(x.start + d).toFixed(2); x.o.end = +(x.end + d).toFixed(2); }
       } else if (g.type === 'ovMove') { const s0 = g.o0.start + dx; o.start = +Math.max(0, Math.min(full - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); o.end = +(o.start + len).toFixed(2); }
       if (g.type === 'ovStart') { const v = g.o0.start + dx; o.start = +Math.max(0, Math.min(o.end - 0.2, v + snapBy(v, v, pts))).toFixed(2); }
-      if (g.type === 'ovEnd') { const v = g.o0.end + dx; o.end = +Math.min(full, Math.max(o.start + 0.2, v + snapBy(v, v, pts))).toFixed(2); }
+      if (g.type === 'ovEnd') { const v = g.o0.end + dx; o.end = +Math.min(full, Math.max(o.start + 0.2, v + snapBy(v, v, pts))).toFixed(2); if (sn.ripple) { g.ripBase = g.ripBase || E().overlays.map((x) => [x.id, x.start, x.end]); const d = o.end - g.o0.end; for (const [rid, rs, re] of g.ripBase) { const x = E().overlays.find((y) => y.id === rid); if (x && x.id !== o.id && (x.kind === 'text') === (o.kind === 'text') && rs >= g.o0.end - 1e-6) { const len = re - rs; x.start = +Math.max(0, Math.min(full - len, rs + d)).toFixed(2); x.end = +(x.start + len).toFixed(2); } } } }
     } else if (g.type === 'wordMove') {
       const w = S.words[g.i], prev = S.words[g.i - 1], next = S.words[g.i + 1], len = g.w0.end - g.w0.start;
       w.start = +Math.max(prev ? prev.start + 0.02 : 0, Math.min(next ? next.start - 0.02 : full, g.w0.start + dx)).toFixed(3);

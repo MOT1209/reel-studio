@@ -26,7 +26,7 @@ fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 const lim = parseLimit(process.env.RS_MAX_RENDERS);
 if (lim.note) slog('warn', lim.note);
 export const renderQueue = new JobQueue({ limit: lim.n });
-const TRANSIENT_RENDER = /Target (page, context or browser has been )?closed|browser has been closed|Protocol error|ECONNRESET|socket hang up/i;
+const TRANSIENT_RENDER = /Target (page, context or browser has been )?(closed|crashed)|Target crashed|Page crashed|browser has been closed|Protocol error|ECONNRESET|socket hang up/i;
 
 const cache = new Map(); // id → project
 const buses = new Map(); // id → EventEmitter
@@ -143,7 +143,7 @@ export function runPipeline(id) {
         save(p);
         try {
           if (stage === 'render') {
-            await runQueued(renderQueue, p.id, () => STAGE_FN.render(p, entry.controller.signal), {
+            await runQueued(renderQueue, p.id, (attempt) => STAGE_FN.render(p, entry.controller.signal, attempt), {
               signal: entry.controller.signal, retries: 1, backoffMs: 3000, retryable: (e) => TRANSIENT_RENDER.test(e.message),
               onWait: (pos) => { log(p, 'render', `⏳ queued — position ${pos} (another render is running)`); bus(p.id).emit('event', { type: 'queue', data: { position: pos } }); },
               onRetry: (n, e) => log(p, 'render', `⚠ transient browser failure (${e.message.split('\n')[0]}) — retry ${n}`),
@@ -373,7 +373,9 @@ const STAGE_FN = {
     if (p.voiceMode === 'upload') {
       if (!p.upload) throw new Error('voice mode is "upload" but no file was uploaded');
       log(p, 'voice', `converting ${p.upload.file} → voice.mp3`);
-      await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
+      const part = path.join(dir, 'voice.part.mp3'); // converted aside, then renamed: a crash never leaves a truncated voice.mp3
+      try { await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', part], { signal }); fs.renameSync(part, out); }
+      finally { fs.rmSync(part, { force: true }); }
       p.voice = { file: 'voice.mp3', source: 'upload', duration: await probeDuration(out) };
       log(p, 'voice', `voice-over ${p.voice.duration.toFixed(2)} s`);
       return;
@@ -382,9 +384,9 @@ const STAGE_FN = {
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
-    fs.writeFileSync(out, audio);
+    writeFileAtomic(out, audio);
     const timed = charsToWords(chars);
-    fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
+    writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
     p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length };
     log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s · ${chars.length} timed characters → ${timed.length} words`);
   },
@@ -398,7 +400,7 @@ const STAGE_FN = {
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
-      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
+      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
       timed = wordsWithChars(dw);
       log(p, 'timing', `Deepgram heard ${dw.length} words`);
     } else {
@@ -447,7 +449,7 @@ const STAGE_FN = {
     log(p, 'storyboard', `icons: ${Object.entries(p.icons).map(([n, v]) => `${n}→${v.key}`).join(', ')}`);
   },
 
-  async render(p, signal) {
+  async render(p, signal, attempt = 0) {
     const dir = projectDir(p.id);
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
@@ -479,7 +481,7 @@ const STAGE_FN = {
     await renderFrames({
       url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
       out: tmpVideo, duration, start, segments, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
-      segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
+      segDir: path.join(dir, 'segments'), key, signal, maxWorkers: attempt > 0 ? 1 : 0 /* a retry after a browser crash (usually out of memory) uses one page */, log: (l) => log(p, 'render', l),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
@@ -673,6 +675,7 @@ export function renderData(p) {
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
     id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
+    tracks: (E.audio.tracks || []).filter((x) => getAsset(x.asset)).map((x) => ({ id: x.id, src: `/api/assets/${x.asset}/file`, start: x.start, end: x.end, offset: x.offset || 0, volume: Math.min(1, x.volume), fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 })),
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,

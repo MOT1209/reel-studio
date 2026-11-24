@@ -183,14 +183,36 @@ const CAPTURE = process.env.RS_CAPTURE === 'screenshot' ? 'screenshot' : 'canvas
 // Parallel pages: by CPU cores, but each headless page needs ~400 MB — on a memory-starved machine
 // extra pages only cause swapping (everything, the server included, slows to a crawl).
 export const MAX_WORKERS = 4;
+const readNum = (f) => { try { const t = fs.readFileSync(f, 'utf8').trim(); return t === 'max' ? Infinity : Number(t); } catch { return NaN; } };
+const statKey = (f, key) => { try { const m = new RegExp(`^${key} (\\d+)$`, 'm').exec(fs.readFileSync(f, 'utf8')); return m ? Number(m[1]) : 0; } catch { return 0; } };
+/**
+ * Memory this process tree can really use: the smaller of the machine's free RAM and what is left under a container/cgroup
+ * limit (cgroup v2 `memory.max`, or v1 `memory.limit_in_bytes`), page cache not counted. Containers and VMs with a memory
+ * limit report the HOST's free RAM through os.freemem(), which would let the renderer start pages that get OOM-killed.
+ */
+export function availableMemory() {
+  let free = os.freemem();
+  // the cgroup THIS process lives in (…/memory/<name> on v1, /<name> on v2), not the root one, then the root as a fallback
+  let own1 = '', own2 = '';
+  try { for (const l of fs.readFileSync('/proc/self/cgroup', 'utf8').split('\n')) { const [, ctl, p] = l.split(':'); if (ctl === 'memory') own1 = p || ''; else if (ctl === '') own2 = p || ''; } } catch {}
+  const cands = [[`/sys/fs/cgroup${own2}`, 'memory.max', 'memory.current', 'memory.stat', 'inactive_file'], ['/sys/fs/cgroup', 'memory.max', 'memory.current', 'memory.stat', 'inactive_file'],
+    [`/sys/fs/cgroup/memory${own1}`, 'memory.limit_in_bytes', 'memory.usage_in_bytes', 'memory.stat', 'total_inactive_file'], ['/sys/fs/cgroup/memory', 'memory.limit_in_bytes', 'memory.usage_in_bytes', 'memory.stat', 'total_inactive_file']];
+  for (const [dir, lf, uf, sf, key] of cands) {
+    const limit = readNum(`${dir}/${lf}`), used = readNum(`${dir}/${uf}`);
+    if (Number.isFinite(limit) && Number.isFinite(used) && limit < 2 ** 60) { free = Math.min(free, Math.max(0, limit - Math.max(0, used - statKey(`${dir}/${sf}`, key)))); break; }
+  }
+  return free;
+}
+
 /**
  * Parallel pages for one render. RS_RENDER_WORKERS must be an integer 1–MAX_WORKERS; anything else (text, 0, negative,
  * fractions, Infinity, out of range) is rejected with a note and the memory-aware automatic value is used instead.
- * An explicit valid value is still capped by free RAM (≈400 MB per page) unless RS_RENDER_WORKERS_FORCE=1.
+ * An explicit valid value is still capped by available RAM (≈450 MB per page + 600 MB base) unless RS_RENDER_WORKERS_FORCE=1.
  */
-export function parseWorkers(raw, { cpus = os.cpus().length, freeMem = os.freemem(), force = false } = {}) {
+export function parseWorkers(raw, { cpus = os.cpus().length, freeMem = availableMemory(), force = false } = {}) {
   const byCpu = Math.max(1, cpus - 1);
-  const byMem = Math.max(1, Math.floor((freeMem / 1024 ** 2 - 300) / 400));
+  // measured (docs/REMOTION-EVALUATION.md §4 and a 1.5 GB cgroup run): ≈ 600 MB for the server + ffmpeg + headroom, ≈ 450 MB per page
+  const byMem = Math.max(1, Math.floor((freeMem / 1024 ** 2 - 600) / 450));
   const auto = Math.max(1, Math.min(MAX_WORKERS, byCpu, byMem));
   if (raw === undefined || raw === null || String(raw).trim() === '') return { n: auto, note: null };
   const v = Number(raw);
@@ -199,7 +221,7 @@ export function parseWorkers(raw, { cpus = os.cpus().length, freeMem = os.freeme
   const n = Math.min(v, byMem);
   return { n, note: n < v ? `RS_RENDER_WORKERS=${v} reduced to ${n}: only ${(freeMem / 1024 ** 3).toFixed(1)} GB RAM is free` : null };
 }
-function workerCount() { return parseWorkers(process.env.RS_RENDER_WORKERS, { force: process.env.RS_RENDER_WORKERS_FORCE === '1' }); }
+function workerCount(cap) { const r = parseWorkers(process.env.RS_RENDER_WORKERS, { force: process.env.RS_RENDER_WORKERS_FORCE === '1' }); return cap ? { ...r, n: Math.min(r.n, cap) } : r; }
 
 async function openWorker(browser, url, errors, width, height) {
   const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
@@ -239,7 +261,7 @@ const SEG_FRAMES = 300; // 10 s at 30 fps per segment: a crash or a cancel only 
  * Segments whose key (render data + settings hash) already exist on disk are reused — that is the recovery path
  * after a cancel, a crash or a server restart. width/height: output size; quality: draft | standard | high.
  */
-export async function renderFrames({ url, out, duration, start = 0, segments = null, fps: FPS_ = FPS, width = W, height = H, quality = 'standard', segDir, key = '', signal, log = () => {}, onFrame = () => {} }) {
+export async function renderFrames({ url, out, duration, start = 0, segments = null, fps: FPS_ = FPS, width = W, height = H, quality = 'standard', segDir, key = '', signal, log = () => {}, onFrame = () => {}, maxWorkers = 0 }) {
   const total = Math.ceil(duration * FPS_ - 1e-9);
   const nSeg = Math.max(1, Math.ceil(total / SEG_FRAMES));
   segDir = segDir || path.join(path.dirname(out), 'segments');
@@ -263,12 +285,12 @@ export async function renderFrames({ url, out, duration, start = 0, segments = n
     const browser = await launchBrowser(log);
     try {
       const errors = [];
-      const wc = workerCount();
+      const wc = workerCount(maxWorkers);
       if (wc.note) log(`⚠ ${wc.note}`);
       const nWorkers = Math.min(wc.n, Math.max(1, Math.floor(total / 30)));
       const pages = await Promise.all(Array.from({ length: nWorkers }, () => openWorker(browser, url, errors, width, height)));
-      log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''} · ${width}×${height} · ${quality} (crf ${q.crf}) · free RAM ${(os.freemem() / 1024 ** 3).toFixed(1)} GB`);
-      if (os.freemem() < 1024 ** 3) log('⚠ الذاكرة الفاضية أقل من 1 GB — الرندر هيبقى بطيء؛ اقفل برامج تانية لو تقدر');
+      log(`capture: ${CAPTURE} · ${nWorkers} parallel page${nWorkers > 1 ? 's' : ''} · ${width}×${height} · ${quality} (crf ${q.crf}) · available RAM ${(availableMemory() / 1024 ** 3).toFixed(1)} GB`);
+      if (availableMemory() < 1024 ** 3) log('⚠ الذاكرة الفاضية أقل من 1 GB — الرندر هيبقى بطيء؛ اقفل برامج تانية لو تقدر');
       for (const k of todo) {
         if (signal?.aborted) throw new Error('cancelled');
         const i0 = k * SEG_FRAMES, i1 = Math.min(total, i0 + SEG_FRAMES);

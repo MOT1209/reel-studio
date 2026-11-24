@@ -17,6 +17,17 @@ export const ANIMS = ['fade', 'pop', 'slide', 'none'];
 export const EASES = ['linear', 'in', 'out', 'inOut', 'hold'];
 export const MAX_TRACKS = 12, MAX_KEYFRAMES = 24;
 
+/** Crop rectangle as fractions of the source {x,y,w,h}; null when absent, malformed or the whole frame. */
+export function cleanCrop(c) {
+  if (!c || typeof c !== 'object') return null;
+  const v = (k) => Number(c[k]);
+  if (![v('x'), v('y'), v('w'), v('h')].every(Number.isFinite)) return null;
+  const x = Math.max(0, Math.min(0.95, v('x'))), y = Math.max(0, Math.min(0.95, v('y')));
+  const w = Math.max(0.05, Math.min(1 - x, v('w'))), h = Math.max(0.05, Math.min(1 - y, v('h')));
+  if (x === 0 && y === 0 && w >= 0.999 && h >= 0.999) return null;
+  return { x: +x.toFixed(4), y: +y.toFixed(4), w: +w.toFixed(4), h: +h.toFixed(4) };
+}
+
 /** Keyframes [{t, x?, y?, scale?, opacity?, rot?, ease?}]: t is seconds after the overlay's start; sorted, clamped, capped. */
 export function cleanKeyframes(list, length) {
   if (!Array.isArray(list)) return [];
@@ -120,6 +131,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
         const a = getAsset(o.asset);
         if (!a || a.kind !== o.kind) throw Object.assign(new Error(`عنصر ${o.kind} بيشاور على ملف مش موجود في المكتبة`), { status: 400 });
         c.asset = a.id; c.name = a.name; c.offset = Math.max(0, Number(o.offset) || 0); // where inside the clip to start (video)
+        const cr = cleanCrop(o.crop); if (cr) c.crop = cr;
         if (o.kind === 'video') c.volume = num(o.volume, 0, 2, 0); // clip sound: muted unless the user turns it up
       }
       return c;

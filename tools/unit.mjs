@@ -180,7 +180,7 @@ test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue sp
 // ---- animation + snapping (public/anim.js is shared by the renderer and the editor) -----------------------------------
 const animCtx = {}; (await import('node:vm')).runInNewContext(fs.readFileSync(new URL('../public/anim.js', import.meta.url), 'utf8'), animCtx);
 const ANIM = { ...animCtx.ReelAnim, sample: (o, t) => ({ ...animCtx.ReelAnim.sample(o, t) }) }; // plain objects (the vm context has its own Object prototype)
-const { cleanKeyframes, checkRenderInputs } = await import('../server/edit.mjs');
+const { cleanKeyframes, checkRenderInputs, cleanCrop } = await import('../server/edit.mjs');
 test('keyframes: no keyframes → base values; before/after hold; linear midpoint; eases; hold', () => {
   const o = { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 };
   assert.deepEqual(ANIM.sample(o, 3), { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 });
@@ -230,6 +230,13 @@ test('render input gate: accepts a valid project; names every kind of broken inp
   has({ hasAsset: () => false }, /image aaaaaaaaaaaa is not in the library/);
   has({ edit: { overlays: [{ id: 'o1', asset: 'bbbbbbbbbbbb' }] }, hasAsset: () => false }, /overlay o1/);
   has({ duration: 0.4 }, /minimum 1 s/);
+});
+
+test('crop: clamped to the source, never empty, whole-frame/malformed → none', () => {
+  assert.deepEqual(cleanCrop({ x: 0.5, y: 0, w: 0.5, h: 1 }), { x: 0.5, y: 0, w: 0.5, h: 1 });
+  assert.deepEqual(cleanCrop({ x: 0.8, y: 0.9, w: 5, h: 5 }), { x: 0.8, y: 0.9, w: 0.2, h: 0.1 });
+  assert.deepEqual(cleanCrop({ x: -3, y: 0, w: 0, h: 1 }), { x: 0, y: 0, w: 0.05, h: 1 });
+  for (const bad of [null, undefined, 'x', {}, { x: 'a', y: 0, w: 1, h: 1 }, { x: 0, y: 0, w: 1, h: 1 }]) assert.equal(cleanCrop(bad), null);
 });
 
 console.log(`\n${n} unit tests passed`);

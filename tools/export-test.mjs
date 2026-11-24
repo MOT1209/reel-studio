@@ -151,9 +151,11 @@ await test('recovery: a render cancelled after its first segment resumes from th
   const t0 = Date.now();
   while (!(fs.existsSync(man) && JSON.parse(fs.readFileSync(man, 'utf8')).done?.length >= 1)) { if (Date.now() - t0 > 180000) throw new Error('first segment never finished'); await sleep(200); }
   await api(`/api/projects/${id}/cancel`, { method: 'POST' });
+  // the cancel can land just after the 2nd segment finished too: whatever the manifest holds now is what must be reused
+  const kept = JSON.parse(fs.readFileSync(man, 'utf8')).done.length; assert.ok(kept >= 1);
   await api(`/api/projects/${id}/run`, { method: 'POST' });
   const done = await waitStage(id, 'render', 'done');
-  assert.match(done.stages.render.log.join('\n'), /recovery: reusing 1\/2 segments/);
+  assert.match(done.stages.render.log.join('\n'), new RegExp(`recovery: reusing ${kept}/2 segments`), done.stages.render.log.filter((l) => !/clip|loudness|mixing/.test(l)).slice(-14).join(' | '));
   const pr = probe(path.join(DATA, 'projects', id, 'video.mp4'));
   assert.ok(Math.abs(Number(pr.format.duration) - done.render.duration) < 0.15, `duration ${pr.format.duration} vs ${done.render.duration}`);
 });
@@ -246,6 +248,25 @@ await test('audio tracks: an independent track is mixed at its start time (and n
   assert.match(done.stages.render.log.join('\n'), /1 clip sound/);
   const inT = toneDb(f, 6.2, 7.5), outT = toneDb(f, 1.0, 2.5);
   assert.ok(inT > outT + 12, `track window ${inT} dB vs elsewhere ${outT} dB`);
+});
+
+await test('crop: only the cropped half of a two-colour image is drawn; render-data carries the audio tracks for the live preview', async () => {
+  const two = path.join(TMP, 'two.png');
+  execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=magenta:s=200x400', '-f', 'lavfi', '-i', 'color=c=lime:s=200x400', '-filter_complex', 'hstack', '-frames:v', '1', two]);
+  const tA = await add(two, 'img');
+  const run = async (crop) => {
+    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, audio: { tracks: [] }, overlays: [{ kind: 'image', asset: tA.id, start: 1, end: 5, pos: 'center', scale: 0.4, anim: 'none', ...(crop ? { crop } : {}) }] } }) });
+    await api(`/api/projects/${id}/run`, { method: 'POST' }); await waitStage(id, 'render', 'done');
+    const buf = frameRgb(path.join(DATA, 'projects', id, 'video.mp4'), 2, 720, 1280);
+    return { mag: centroid(buf, 720, 1280, isMag)?.n || 0, grn: centroid(buf, 720, 1280, isGrn)?.n || 0 };
+  };
+  const full = await run(null), right = await run({ x: 0.5, y: 0, w: 0.5, h: 1 });
+  assert.ok(full.mag > 500 && full.grn > 500, `uncropped shows both colours: ${JSON.stringify(full)}`);
+  assert.ok(right.grn > 500 && right.mag < full.mag * 0.05, `cropped to the right half shows only green: ${JSON.stringify(right)}`);
+  const bA = await add(path.join(TMP, 'beep.mp3'), 'sfx');
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { audio: { tracks: [{ asset: bA.id, start: 2, end: 3, volume: 0.5, fadeIn: 0.2 }] } } }) });
+  const d = await api(`/api/projects/${id}/render-data`);
+  assert.equal(d.tracks.length, 1); assert.equal(d.tracks[0].start, 2); assert.equal(d.tracks[0].volume, 0.5); assert.match(d.tracks[0].src, /^\/api\/assets\/[a-f0-9]{12}\/file$/);
 });
 
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);

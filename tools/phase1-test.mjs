@@ -93,7 +93,8 @@ await test('RS_RENDER_WORKERS: invalid values are rejected with a note, valid on
   const env = { cpus: 8, freeMem: 16 * 1024 ** 3 };
   for (const bad of ['abc', '0', '-2', '1.5', 'Infinity', '9']) { const r = R.parseWorkers(bad, env); assert.ok(r.note, bad); assert.ok(r.n >= 1 && r.n <= R.MAX_WORKERS, bad); }
   assert.equal(R.parseWorkers('2', env).n, 2);
-  const low = R.parseWorkers('4', { cpus: 8, freeMem: 1.2 * 1024 ** 3 }); assert.equal(low.n, 2); assert.match(low.note, /reduced/);
+  const low = R.parseWorkers('4', { cpus: 8, freeMem: 2.2 * 1024 ** 3 }); assert.equal(low.n, 3); assert.match(low.note, /reduced/);
+  assert.equal(R.parseWorkers(undefined, { cpus: 8, freeMem: 1.2 * 1024 ** 3 }).n, 1, 'a 1.2 GB budget gets one page');
   assert.equal(R.parseWorkers('4', { cpus: 8, freeMem: 1.2 * 1024 ** 3, force: true }).n, 4);
   assert.equal(R.parseWorkers(undefined, { cpus: 1, freeMem: 16 * 1024 ** 3 }).n, 1);
 });
@@ -186,6 +187,45 @@ await test('upload: streamed to disk, limit enforced (413), bad bytes refused (4
     assert.equal((await ok.json()).upload.size, 200 * 1024);
     const left = [...fs.readdirSync(path.join(data, 'assets')), ...fs.readdirSync(path.join(data, 'projects', proj.id))].filter((f) => f.startsWith('.upload-'));
     assert.deepEqual(left, []);
+  } finally { child.kill('SIGKILL'); }
+});
+
+await test('credentials: stored encrypted, deletable one by one (disk + API), .env-provided values reported; unknown key → 404', async () => {
+  const PORT = 4318, data = path.join(TMP, 'sd4'), BASE = `http://127.0.0.1:${PORT}`;
+  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data, DEEPGRAM_API_KEY: 'from-env-key-123456' }, stdio: 'ignore' });
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`${BASE}/api/health`); up = true; } catch { await sleep(100); } }
+    const H = { Origin: BASE, 'Content-Type': 'application/json' };
+    const call = async (m, p, b) => { const r = await fetch(BASE + p, { method: m, headers: H, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, body: await r.json() }; };
+    await call('PUT', '/api/settings', { llm: { apiKey: 'sk-secret-value-123456' }, elevenlabs: { apiKey: 'el-secret-value-654321' } });
+    const file = fs.readFileSync(path.join(data, 'settings.json'), 'utf8');
+    assert.ok(!file.includes('sk-secret-value') && !file.includes('el-secret-value') && file.includes('enc:v1:'), 'keys are sealed on disk');
+    const r = await call('DELETE', '/api/settings/secrets/llm.apiKey');
+    assert.equal(r.status, 200); assert.equal(r.body.deleted, true); assert.equal(r.body.stillSetBy, null);
+    assert.equal(r.body.settings._source['llm.apiKey'], 'none'); assert.equal(r.body.settings.llm.apiKey, '');
+    assert.equal(r.body.settings._source['elevenlabs.apiKey'], 'settings', 'other credentials untouched');
+    assert.equal((await call('DELETE', '/api/settings/secrets/llm.apiKey')).body.deleted, false, 'deleting twice is harmless');
+    const env = await call('DELETE', '/api/settings/secrets/deepgram.apiKey'); assert.equal(env.body.stillSetBy, '.env');
+    assert.equal((await call('DELETE', '/api/settings/secrets/llm.model')).status, 404);
+    assert.equal((await call('DELETE', '/api/settings/secrets/__proto__')).status, 404);
+  } finally { child.kill('SIGKILL'); }
+});
+await test('concurrency: 30 simultaneous project creations + settings writes — nothing lost or corrupted', async () => {
+  const PORT = 4319, data = path.join(TMP, 'sd5'), BASE = `http://127.0.0.1:${PORT}`;
+  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data }, stdio: 'ignore' });
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`${BASE}/api/health`); up = true; } catch { await sleep(100); } }
+    const H = { Origin: BASE, 'Content-Type': 'application/json' };
+    const post = (p, b, m = 'POST') => fetch(BASE + p, { method: m, headers: H, body: JSON.stringify(b) });
+    const jobs = [...Array.from({ length: 30 }, (_, i) => post('/api/projects', { topic: `موضوع ${i}`, autostart: false })),
+      post('/api/settings', { llm: { model: 'model-A' } }, 'PUT'), post('/api/settings', { pronunciation: 'DNA = دي إن إيه' }, 'PUT'), post('/api/settings', { seriesTag: 'tag-Z' }, 'PUT')];
+    const res = await Promise.all(jobs); assert.ok(res.every((r) => r.status === 201 || r.status === 200), res.map((r) => r.status).join());
+    const list = (await (await fetch(`${BASE}/api/projects`)).json()).projects;
+    assert.equal(list.length, 30); assert.equal(new Set(list.map((p) => p.id)).size, 30);
+    for (const p of list) JSON.parse(fs.readFileSync(path.join(data, 'projects', p.id, 'project.json'), 'utf8')); // every file is complete JSON
+    const set = await (await fetch(`${BASE}/api/settings`)).json();
+    assert.equal(set.llm.model, 'model-A'); assert.equal(set.pronunciation, 'DNA = دي إن إيه'); assert.equal(set.seriesTag, 'tag-Z');
+    assert.deepEqual(fs.readdirSync(path.join(data)).filter((f) => f.endsWith('.tmp')), [], 'no temp files left');
   } finally { child.kill('SIGKILL'); }
 });
 

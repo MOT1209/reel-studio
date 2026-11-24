@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
+import { ROOT, getSettings, getPublicSettings, updateSettings, deleteSecret, resolveFonts } from './settings.mjs';
 import { listVoices, testLlm, testElevenLabs, testDeepgram } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
 import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
@@ -104,6 +104,7 @@ async function route(req, res) {
       if (m === 'GET') return json(res, 200, getPublicSettings());
       if (m === 'PUT') return json(res, 200, updateSettings(await readJson(req)));
     }
+    if (a === 'settings' && id === 'secrets' && b && m === 'DELETE') return json(res, 200, { ...deleteSecret(b), settings: getPublicSettings() });
     if (a === 'queue' && m === 'GET') return json(res, 200, { limit: P.renderQueue.limit, jobs: P.renderQueue.snapshot() });
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
     if (a === 'test' && m === 'POST' && TESTS[id]) {

@@ -19,7 +19,7 @@ export async function mountVoice(el) {
         <label>الأسلوب <span class="hint" id="vStyleV"></span><input type="range" id="vStyle" min="0" max="1" step="0.05" value="${S.elevenlabs.style ?? 0.2}"></label>
         <h4>قاموس النطق</h4>
         <p class="hint">سطر لكل كلمة: <code>الكلمة = إزاي تتنطق</code>. بيتطبق على الكلام المبعوت للصوت بس — الكابشن بيفضل بإملاء السكريبت.</p>
-        <textarea id="vPron" rows="6" dir="auto" placeholder="DNA = دي إن إيه&#10;CO2 = سي أو تو">${esc(S.pronunciation || '')}</textarea>
+        <textarea id="vPron" aria-label="قاموس النطق" rows="6" dir="auto" placeholder="DNA = دي إن إيه&#10;CO2 = سي أو تو">${esc(S.pronunciation || '')}</textarea>
         <div class="tools"><button id="vLoad">تحميل الأصوات</button><button class="primary" id="vSave">💾 حفظ</button></div>
       </div>
       <div class="panel">
@@ -32,7 +32,7 @@ export async function mountVoice(el) {
     <div class="panel">
       <h3>أدوات اللغة العربية</h3>
       <p class="hint">التحليل والتشكيل المحلي بيشتغلوا على جهازك. أدوات الـ LLM بتطلع <b>اقتراح</b> بالفروقات — مفيش حاجة بتتغيّر غير لما تنسخها أو تطبقها على السكريبت من المشروع.</p>
-      <textarea id="arText" rows="6" dir="auto" placeholder="الصق نص عربي…"></textarea>
+      <textarea id="arText" aria-label="النص العربي" rows="6" dir="auto" placeholder="الصق نص عربي…"></textarea>
       <div class="tools">
         <button id="arAnalyze">تحليل اللهجة</button>
         <button data-local="strip-tashkeel">شيل التشكيل</button><button data-local="arabic-digits">أرقام ١٢٣</button><button data-local="latin-digits">أرقام 123</button>

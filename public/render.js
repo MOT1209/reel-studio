@@ -574,9 +574,14 @@
   }
   const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
   /** Draws img covering (x,y,w,h) with a slow Ken Burns push k∈[0,1]. */
-  function drawCover(img, x, y, w, h, k = 0, alpha = 1) {
+  function drawCover(img, x, y, w, h, k = 0, alpha = 1, crop = null) {
     const [iw, ih] = dims(img);
     if (!iw || !ih) return;
+    if (crop) { // draw only the cropped part of the source (fractions of its width/height), cover-fitted
+      const sx = crop.x * iw, sy = crop.y * ih, sw = crop.w * iw, sh = crop.h * ih, sc2 = Math.max(w / sw, h / sh);
+      ctx.save(); ctx.globalAlpha *= alpha; ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      ctx.drawImage(img, sx, sy, sw, sh, x + (w - sw * sc2) / 2, y + (h - sh * sc2) / 2, sw * sc2, sh * sc2); ctx.restore(); return;
+    }
     const sc = Math.max(w / iw, h / ih) * (1 + 0.08 * k);
     const dw = iw * sc, dh = ih * sc;
     ctx.save(); ctx.globalAlpha *= alpha;
@@ -675,7 +680,7 @@
         if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);
         if (o.pos !== 'full') { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24; rrect(b.x, b.y, b.w, b.h, 18); ctx.fillStyle = C.card; ctx.fill(); ctx.restore(); }
         ctx.save(); if (o.pos !== 'full') { rrect(b.x, b.y, b.w, b.h, 18); ctx.clip(); }
-        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
+        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0, 1, o.crop || null); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
         ctx.restore();
       }
       ctx.restore();
@@ -1047,6 +1052,20 @@
       if (D.music) { music = new Audio(D.music.src); music.loop = true; }
     };
     setMusic();
+    // independent audio tracks (source time, like the voice): each plays while the playhead is inside [start, end)
+    let trackEls = [];
+    const setTracks = () => { trackEls.forEach((x) => x.el.pause()); trackEls = (D.tracks || []).map((x) => ({ x, el: new Audio(x.src) })); };
+    setTracks();
+    const syncTracks = () => {
+      for (const { x, el } of trackEls) {
+        const inside = PLAYING && t >= x.start && t < x.end;
+        if (!inside) { if (!el.paused) el.pause(); continue; }
+        const want = (x.offset || 0) + (t - x.start);
+        const fade = Math.min(1, x.fadeIn > 0 ? (t - x.start) / x.fadeIn : 1, x.fadeOut > 0 ? (x.end - t) / x.fadeOut : 1);
+        el.volume = Math.max(0, Math.min(1, x.volume * fade));
+        if (el.paused || Math.abs(el.currentTime - want) > 0.35) { el.currentTime = want; el.play().catch(() => {}); }
+      }
+    };
     const syncMusic = () => {
       if (!music) return;
       // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
@@ -1059,6 +1078,7 @@
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
       if (on) { if (t >= D.end - 0.05) t = D.start; t = keptFrom(t) ?? D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
       if (music) { music.pause(); }
+      if (!on) trackEls.forEach((x) => x.el.pause());
     };
     const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
     let lastPost = 0;
@@ -1068,7 +1088,7 @@
         const k = keptFrom(t); // jump over cut ranges, like the export does
         if (k === null || t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } else if (k > t + 0.01) { t = k; audio.currentTime = k; if (music) music.currentTime = outT(t) % (music.duration || 1e9); }
       }
-      syncMusic();
+      syncMusic(); syncTracks();
       drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
@@ -1082,7 +1102,7 @@
       if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); setTracks(); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }
