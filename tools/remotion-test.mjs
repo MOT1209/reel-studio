@@ -97,7 +97,7 @@ await test('remotion engine renders the same project: same size, fps, frame coun
   assert.equal(P.render.engine, 'remotion', `engine used: ${P.render.engine} · fallback from ${P.render.fallbackFrom}\n${log.slice(-800)}`);
   assert.equal(P.render.fallbackFrom, null);
   assert.match(log, /engine: Remotion/);
-  assert.match(log, /checked: 720×1280 · 30\/1 fps · h264\/aac/);
+  assert.match(log, /checked: 720×1280 · 30\/1 fps · 180 frames · h264\/aac/); // exact frame count (no -shortest loss)
   timing.remotion = P.render.renderSeconds;
   fs.copyFileSync(video, remotionOut);
   const [a, b] = [probe(legacyOut), probe(remotionOut)];
