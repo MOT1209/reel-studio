@@ -331,5 +331,15 @@ test('the Remotion composition loads exactly the scripts render.html loads, in t
   assert.deepEqual(comp, page);
 });
 
+test('MCP private hosts: the whole fe80::/10 link-local block (fe80–febf), not fec0', async () => {
+  const { isPrivateHost } = await import('../server/mcp.mjs');
+  for (const h of ['fe80::1', 'fe81::1', 'febf::1', '[fe80::1]', '::ffff:7f00:1', '100.64.0.1']) assert.equal(isPrivateHost(h), true, h);
+  for (const h of ['fec0::1', '2001:db8::1', '8.8.8.8', 'example.com']) assert.equal(isPrivateHost(h), false, h);
+});
+test('render gate: an audio track whose file left the library stops the render', () => {
+  const p = checkRenderInputs({ words: [{ start: 0, end: 1 }], storyboard: { scenes: [{ at: 0, items: [] }] }, edit: { overlays: [], audio: { tracks: [{ asset: 'aaaaaaaaaaaa' }] } }, voiceExists: true, hasAsset: () => false, duration: 5 });
+  assert.match(p.join('|'), /audio track 1: asset aaaaaaaaaaaa is not in the library/);
+});
+
 for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }
 console.log(`\n${n} unit tests passed`);

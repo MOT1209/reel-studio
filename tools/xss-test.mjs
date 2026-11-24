@@ -24,8 +24,19 @@ const api = async (p, opts = {}) => { const r = await fetch(BASE + p, { ...opts,
 const EXAMPLES = path.join(TMP, 'examples'); fs.mkdirSync(EXAMPLES, { recursive: true });
 const repoExamples = () => fs.readdirSync(path.join(ROOT, 'references', 'examples')).sort().join('|');
 const repoBefore = repoExamples();
-procs.push(spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data'), RS_EXAMPLES_DIR: EXAMPLES } }));
-for (let i = 0; i < 100; i++) { try { await fetch(`${BASE}/api/health`); break; } catch { await sleep(100); } }
+// another server already on the port would receive the hostile payloads (and could write them into a real data folder)
+if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) { console.error(`port ${PORT} is already in use — stop that server first`); process.exit(1); }
+const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data'), RS_EXAMPLES_DIR: EXAMPLES } });
+procs.push(child);
+// ready = OUR child printed its listening line (not merely "something answers on the port")
+const listening = await new Promise((resolve) => {
+  let buf = '';
+  child.stdout.on('data', (d) => { buf += d; if (buf.includes(`:${PORT}`)) resolve(true); });
+  child.once('exit', () => resolve(false));
+  setTimeout(() => resolve(false), 15000);
+});
+if (!listening) { console.error('the test server did not start — nothing was planted'); process.exit(1); }
+child.stdout.resume();
 
 const planted = [];
 const proj = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: PAY, autostart: false }) }); planted.push(['project', proj.status]);

@@ -376,7 +376,11 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       });
       $$('[data-kf]', box).forEach((i) => i.addEventListener('change', () => change(() => {
         const k = o.keyframes[Number(i.closest('[data-ki]').dataset.ki)], f = i.dataset.kf;
-        if (f === 'ease') k.ease = i.value; else if (i.value === '') delete k[f]; else k[f] = Number(i.value);
+        // same bounds as server/edit.mjs cleanKeyframes, so what is kept here is exactly what gets saved
+        const B = { t: [0, Math.max(0, o.end - o.start)], x: [-1, 1], y: [-1, 1], scale: [0.05, 2], opacity: [0, 1], rot: [-360, 360] };
+        if (f === 'ease') k.ease = i.value;
+        else if (i.value === '' && f !== 't') delete k[f];
+        else if (Number.isFinite(Number(i.value))) { const [lo, hi] = B[f] || [-Infinity, Infinity]; k[f] = Math.max(lo, Math.min(hi, Number(i.value))); i.value = String(k[f]); }
         o.keyframes.sort((a, b) => a.t - b.t);
       })));
       $$('[data-kfdel]', box).forEach((b) => b.addEventListener('click', () => change(() => { o.keyframes.splice(Number(b.dataset.kfdel), 1); if (!o.keyframes.length) delete o.keyframes; })));
@@ -576,7 +580,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     else if (g.type === 'trimEnd') E().trim = { ...E().trim, end: +Math.min(full, Math.max((E().trim.start || 0) + 1, tts)).toFixed(2) };
     else if (g.trk) {
       const x = E().audio.tracks.find((y) => y.id === g.trk), len = g.o0.end - g.o0.start;
-      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); }
+      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full + 30 - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); } // same bound as trkEnd
       if (g.type === 'trkStart') { const v = g.o0.start + dx; x.start = +Math.max(0, Math.min(x.end - 0.1, v + snapBy(v, v, pts))).toFixed(2); }
       if (g.type === 'trkEnd') { const v = g.o0.end + dx; x.end = +Math.min(full + 30, Math.max(x.start + 0.1, v + snapBy(v, v, pts))).toFixed(2); }
     }

@@ -690,6 +690,10 @@
         const img = mediaDrawable(`ov-${o.id}`, o.asset, t, t - o.start, o.offset || 0);
         const m = D.media[o.asset] || {};
         const b = overlayBox({ ...o, scale: kp.scale }, m.width, m.height);
+        if (o.pos === 'full' && o.scale > 0 && kp.scale !== o.scale) { // keyframed scale on a full-frame overlay: zoom the frame box
+          const k = kp.scale / o.scale, cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+          b.w *= k; b.h *= k; b.x = cx - b.w / 2; b.y = cy - b.h / 2;
+        }
         rotAbout(b.x + b.w / 2, b.y + b.h / 2);
         if (o.anim === 'pop') { const k = lerp(0.7, 1, eBack(prog(t, o.start, 0.45))); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.translate(-(b.x + b.w / 2), -(b.y + b.h / 2)); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);

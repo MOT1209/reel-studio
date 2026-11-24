@@ -220,6 +220,7 @@ export function checkRenderInputs({ words, storyboard, edit, voiceExists, hasAss
     });
   }
   for (const o of edit?.overlays || []) if (o.asset && !hasAsset(o.asset)) bad.push(`overlay ${o.id}: asset ${o.asset} is not in the library`);
+  for (const [i, t] of (edit?.audio?.tracks || []).entries()) if (t?.asset && !hasAsset(t.asset)) bad.push(`audio track ${i + 1}: asset ${t.asset} is not in the library`);
   if (duration !== undefined && !(duration >= 1)) bad.push(`the video would be ${Number(duration).toFixed(2)} s (minimum 1 s)`);
   return bad;
 }

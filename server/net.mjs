@@ -4,7 +4,7 @@
 //
 // Requests that cost money or create something (TTS, transcription: POST) are NOT idempotent: once the request may
 // have reached the provider, sending it again could bill it twice. For those (idempotent: false — the default for
-// anything but GET/HEAD) only failures that prove the provider did not process it are retried: 429/503 answers and
+// anything but GET/HEAD) only failures that prove the provider did not process it are retried: 429 answers and
 // connection errors before anything was sent (refused, DNS).
 //
 // The timeout covers the whole exchange, body included: the body is read here and the returned Response is buffered,
@@ -18,18 +18,22 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
 });
 
 export const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-/** Answers that mean the provider did not process the request — safe to retry even a paid POST. */
-const NOT_PROCESSED_STATUS = new Set([429, 503]);
+/** Answers that establish the provider rejected the request before processing it — safe to retry even a paid POST.
+ *  Only 429 (rate limit) qualifies; a 503 can come after the work was done (and billed), so it is reported instead. */
+const NOT_PROCESSED_STATUS = new Set([429]);
+/** Longest wait the app accepts before a retry; a provider asking for longer gets its answer returned, not an early retry. */
+export const MAX_RETRY_WAIT_MS = 30000;
 /** Connection failures that happen before the request is sent. */
 const PRE_SEND_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT']);
 
 export function retryDelay(res, attempt, base = Number(process.env.RS_RETRY_BASE_MS) || 800) {
   const raw = res?.headers?.get?.('retry-after');
   if (raw != null && String(raw).trim() !== '') { // a missing header must not become Number(null) = 0
+    // never shortened: retrying before the provider's delay is exactly what Retry-After forbids (the caller stops instead)
     const sec = Number(raw);
-    if (Number.isFinite(sec) && sec >= 0) return Math.min(30000, sec * 1000);
+    if (Number.isFinite(sec) && sec >= 0) return sec * 1000;
     const at = Date.parse(raw); // HTTP-date form
-    if (Number.isFinite(at)) return Math.min(30000, Math.max(0, at - Date.now()));
+    if (Number.isFinite(at)) return Math.max(0, at - Date.now());
   }
   return Math.min(15000, base * 2 ** attempt);
 }
@@ -48,9 +52,10 @@ export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2,
     try {
       const res = await fetch(url, { ...init, signal: ctl.signal });
       const retryable = safe ? retryStatus.has(res.status) : NOT_PROCESSED_STATUS.has(res.status);
-      if (retryable && attempt < retries) {
+      const wait = retryable && attempt < retries ? retryDelay(res, attempt) : null;
+      if (wait !== null && wait <= MAX_RETRY_WAIT_MS) {
         done();
-        const d = retryDelay(res, attempt);
+        const d = wait;
         await res.body?.cancel().catch(() => {});
         onRetry?.(attempt + 1, `HTTP ${res.status}`, d);
         await sleep(d, user);

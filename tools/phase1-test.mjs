@@ -30,6 +30,8 @@ const srv = http.createServer((req, res) => {
   if (k === '/auth') { res.writeHead(401); return res.end('bad key'); }
   if (k === '/stall') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.write('partial'); return; } // headers, then nothing
   if (k === '/paid-busy') return hits[k] < 2 ? (res.writeHead(503), res.end()) : res.end('ok');
+  if (k === '/paid-limited') return hits[k] < 2 ? (res.writeHead(429, { 'Retry-After': '0' }), res.end()) : res.end('ok');
+  if (k === '/slow-down') { res.writeHead(429, { 'Retry-After': '120' }); return res.end('later'); }
   if (k === '/paid-500') { res.writeHead(500); return res.end('x'); }
   if (k.startsWith('/hang')) return; // never answers
   res.end('ok');
@@ -65,8 +67,15 @@ await test('fetchRetry: a paid POST is never sent twice after it may have reache
   assert.equal(hits['/hang-post'], 1, 'sent once — a timed-out paid request may have been processed');
   const r = await fetchRetry(U('/paid-500'), { method: 'POST', body: 'x' }, { retries: 2 });
   assert.equal(r.status, 500); assert.equal(hits['/paid-500'], 1);
-  const ok = await fetchRetry(U('/paid-busy'), { method: 'POST', body: 'x' }, { retries: 2 });
-  assert.equal(await ok.text(), 'ok'); assert.equal(hits['/paid-busy'], 2, '503 = not processed → retried');
+  const busy = await fetchRetry(U('/paid-busy'), { method: 'POST', body: 'x' }, { retries: 2 });
+  assert.equal(busy.status, 503); assert.equal(hits['/paid-busy'], 1, 'a 503 may come after the work was billed → reported, not re-sent');
+  const ok = await fetchRetry(U('/paid-limited'), { method: 'POST', body: 'x' }, { retries: 2 });
+  assert.equal(await ok.text(), 'ok'); assert.equal(hits['/paid-limited'], 2, '429 = rejected before processing → retried');
+});
+await test('fetchRetry: a Retry-After longer than the app accepts is honoured by returning the answer, never by retrying early', async () => {
+  const t0 = Date.now();
+  const r = await fetchRetry(U('/slow-down'), {}, { retries: 3 });
+  assert.equal(r.status, 429); assert.equal(hits['/slow-down'], 1); assert.ok(Date.now() - t0 < 2000);
 });
 srv.closeAllConnections?.(); srv.close();
 
@@ -74,6 +83,7 @@ await test('retryDelay: a missing Retry-After falls back to the exponential dela
   const h = (v) => ({ headers: new Headers(v == null ? {} : { 'retry-after': v }) });
   assert.equal(retryDelay(h(null), 2, 100), 400);
   assert.equal(retryDelay(h('3'), 0, 100), 3000);
+  assert.equal(retryDelay(h('120'), 0, 100), 120000, 'never capped (the caller decides not to wait that long)');
   assert.equal(retryDelay(h('0'), 2, 100), 0);
   const d = retryDelay(h(new Date(Date.now() + 2000).toUTCString()), 0, 100); assert.ok(d > 500 && d <= 2000, String(d));
 });
@@ -147,13 +157,18 @@ await test('run(): a child that exceeds its execution limit is killed and report
 await test('shutdown: SIGTERM stops the server, kills its children and exits cleanly', async () => {
   const PORT = 4311;
   const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'sd') }, stdio: 'ignore' });
-  let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
-  assert.ok(up, 'server did not start');
   const exited = new Promise((r) => child.once('exit', (code, sig) => r({ code, sig })));
-  child.kill('SIGTERM');
-  const r = await Promise.race([exited, sleep(10000).then(() => 'TIMEOUT')]);
-  assert.notEqual(r, 'TIMEOUT'); assert.equal(r.code, 0);
-  await assert.rejects(fetch(`http://127.0.0.1:${PORT}/api/health`));
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
+    assert.ok(up, 'server did not start');
+    child.kill('SIGTERM');
+    const r = await Promise.race([exited, sleep(10000).then(() => 'TIMEOUT')]);
+    assert.notEqual(r, 'TIMEOUT'); assert.equal(r.code, 0);
+    await assert.rejects(fetch(`http://127.0.0.1:${PORT}/api/health`));
+  } finally {
+    // a server that started late or ignored SIGTERM must not keep the port for the next tests
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+  }
 });
 await test('queue endpoint: GET /api/queue reports the limit and jobs', async () => {
   const PORT = 4312;

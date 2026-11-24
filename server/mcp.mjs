@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import { DATA_DIR, writeFileAtomic, mask } from './settings.mjs';
 import { log as slog, addSecret } from './logger.mjs';
 import { seal, open as unseal } from './vault.mjs';
@@ -36,7 +37,7 @@ export function isPrivateHost(host) {
   const mapped = /^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(h);
   if (mapped) h = mapped[1] || [parseInt(mapped[2], 16) >> 8, parseInt(mapped[2], 16) & 255, parseInt(mapped[3], 16) >> 8, parseInt(mapped[3], 16) & 255].join('.');
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  if (h === '::1' || h === '::' || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
+  if (h === '::1' || h === '::' || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h) /* fe80::/10 link-local */) return true;
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
@@ -80,10 +81,27 @@ export function setPermissions(id, { allowedTools, enabled }) {
 
 // ---- transport ---------------------------------------------------------------------------------
 const sessions = new Map(); // server id → Mcp-Session-Id
+/**
+ * Destination check before a request: the name is resolved and every address it maps to must be public unless the
+ * server was registered as local (allowPrivate). Catches a public-looking name that points into the machine or the
+ * network. Not a full guard against DNS rebinding — fetch() resolves again — see docs/AUDIT.md (open decision).
+ */
+async function assertPublicDestination(s) {
+  if (s.allowPrivate) return;
+  const host = new URL(s.url).hostname.replace(/^\[|\]$/g, '');
+  if (isPrivateHost(host)) throw err(400, `MCP ${s.name}: العنوان ده جوّه جهازك/شبكتك الداخلية — فعّل «خادم محلي» لو متأكد`);
+  let addrs = [];
+  try { addrs = await dns.lookup(host, { all: true, verbatim: true }); } catch { return; } // unresolvable: fetch reports it
+  const priv = addrs.find((a) => isPrivateHost(a.address));
+  if (priv) throw err(400, `MCP ${s.name}: الاسم ${host} بيشاور على عنوان داخلي (${priv.address}) — فعّل «خادم محلي» لو متأكد`);
+}
+
 async function rpc(s, method, params, { notify = false, timeout = 30000 } = {}) {
+  await assertPublicDestination(s);
   const id = notify ? undefined : crypto.randomBytes(6).toString('hex');
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL, ...s.headers };
-  const sent = sessions.get(s.id) || null; // the session THIS request carries
+  // the session THIS request carries — never on initialize, which always opens a new one (MCP transport spec)
+  const sent = method === 'initialize' ? null : (sessions.get(s.id) || null);
   if (sent) headers['Mcp-Session-Id'] = sent;
   const res = await fetch(s.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', ...(notify ? {} : { id }), method, ...(params ? { params } : {}) }), signal: AbortSignal.timeout(timeout), redirect: 'manual' })
     .catch((e) => { throw err(502, `MCP ${s.name}: ${e.message}`); });

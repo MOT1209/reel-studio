@@ -87,7 +87,8 @@ export function parseLimit(raw, { max = 4 } = {}) {
 /** Queue view for GET /api/queue: waiting jobs get their position. */
 export function queueSnapshot() {
   let pos = 0;
-  return { limit: maxJobs, running, waiting: waiting.length, jobs: listJobs().map((j) => ({ ...j, position: j.status === 'queued' ? ++pos : 0 })) };
+  const all = [...jobs.values()].map((j) => ({ ...publicJob(j), position: j.status === 'queued' ? ++pos : 0 })); // positions over the whole queue
+  return { limit: maxJobs, running, waiting: waiting.length, jobs: all.slice(-50) };
 }
 function pump() { while (running < maxJobs && waiting.length) { running++; waiting.shift()(); } }
 async function slot(signal) {

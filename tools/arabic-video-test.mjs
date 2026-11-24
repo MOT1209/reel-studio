@@ -43,8 +43,8 @@ await up(`${MOCK}/media/_stats`); await up(`${BASE}/api/health`);
 const p0 = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: 'ليه السما لونها أزرق؟', seconds: 10, approvals: { script: 'auto', voice: 'auto', timing: 'auto', storyboard: 'wait', render: 'auto' } }) });
 const P = await waitStage(p0.id, 'storyboard', 'review'); const id = P.id;
 
-// One real render per case. The case text replaces the words of the FIRST script line (timing kept); if the line has more
-// words than the text, the text repeats, so the caption chunk is always full of that case's script.
+// One real render per case. The case text replaces the words of the FIRST script line (timing kept): all of it, grouped
+// over the line's slots when it is longer, repeated when it is shorter — the caption chunk always shows that case.
 const CASES = {
   arabic: 'السرعة الهائلة للضوء في الفراغ',
   english: 'Light travels very fast indeed',
@@ -60,8 +60,13 @@ const edit = { export: { aspect: '9:16', resolution: 720, quality: 'standard', f
   overlays: [{ kind: 'text', text: 'سرعة الضوء ⚡ Light speed', start: 0.5, end: 4, pos: 'top', size: 56, anim: 'pop', box: true }] };
 let approved = false;
 const renderCase = async (k) => {
+  // the case's words are spread over the first line's timed slots: more words than slots → neighbours share a slot,
+  // fewer → the text repeats; either way the whole case text is on screen, whatever the mock script's line length
   const toks = CASES[k].split(' ');
-  const words = P.words.map((w, i) => ({ start: w.start, end: w.end, text: line0.includes(i) ? toks[line0.indexOf(i) % toks.length] : w.text }));
+  const n = line0.length, slots = Array.from({ length: n }, (_, j) => (toks.length >= n
+    ? toks.slice(Math.floor((j * toks.length) / n), Math.floor(((j + 1) * toks.length) / n)).join(' ')
+    : toks[j % toks.length]));
+  const words = P.words.map((w, i) => ({ start: w.start, end: w.end, text: line0.includes(i) ? slots[line0.indexOf(i)] : w.text }));
   await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ words, edit }) });
   if (!approved) { approved = true; await api(`/api/projects/${id}/stages/storyboard/approve`, { method: 'POST' }); } else await api(`/api/projects/${id}/run`, { method: 'POST' });
   await waitStage(id, 'render', 'done');
