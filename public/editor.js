@@ -26,6 +26,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   E().overlays = E().overlays || [];
   E().typography = E().typography || {};
   E().trim = E().trim || { start: 0, end: null };
+  E().cuts = E().cuts || [];
+  let mark = { in: null, out: null }; // I / O marks for cutting a range out of the middle
 
   el.innerHTML = `
   <div class="editor">
@@ -33,6 +35,10 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       <button class="small" id="edUndo" title="تراجع (Ctrl+Z)">↶</button><button class="small" id="edRedo" title="إعادة (Ctrl+Y)">↷</button>
       <button class="small primary" id="edPlay" title="تشغيل (مسافة)">▶</button><span class="mono" id="edTime">0:00.0</span>
       <label class="inl">زووم <input type="range" id="edZoom" min="20" max="240" value="70"></label>
+      <span class="sep"></span>
+      <button class="small" id="markIn" title="بداية المقطع عند المؤشر (I)">[ بداية</button><button class="small" id="markOut" title="نهاية المقطع عند المؤشر (O)">نهاية ]</button>
+      <button class="small danger" id="cutRange" title="احذف المقطع المحدد من الفيديو والصوت والكابشن (X)" disabled>✂ احذف المقطع</button>
+      <span class="hint" id="edDur"></span>
       <span class="sep"></span>
       <select id="edAspect" title="مقاس الفيديو"><option value="9:16">9:16 طولي</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 عرضي</option></select>
       <select id="edRes" title="الدقة"><option value="1080">1080p</option><option value="720">720p</option></select>
@@ -83,6 +89,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (sel?.kind === 'scene' && !S.storyboard.scenes[sel.i]) sel = null;
     if (sel?.kind === 'overlay' && !E().overlays.some((o) => o.id === sel.id)) sel = null;
     if (sel?.kind === 'music' && !E().audio.music) sel = null;
+    if (sel?.kind === 'cut' && !E().cuts[sel.i]) sel = null;
+    if (sel?.kind === 'overlays') { sel.ids = sel.ids.filter((x) => E().overlays.some((o) => o.id === x)); if (sel.ids.length < 2) sel = sel.ids.length ? { kind: 'overlay', id: sel.ids[0] } : null; }
   }
   function status(txt, cls = '') { const s = $('#edStatus', el); s.textContent = txt; s.className = 'hint ' + cls; }
   function scheduleSave() { dirty = true; status('… تعديلات مش محفوظة'); clearTimeout(saveTimer); saveTimer = setTimeout(save, 700); }
@@ -136,10 +144,15 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     for (let s = 0; s <= full; s += tickEvery) h += `<span class="tick" style="left:${X(s)}px">${fmtTime(s).replace(/\.0$/, '')}</span>`;
     if (tr.start > 0) h += `<div class="trimshade" style="left:0;width:${X(tr.start)}px"></div>`;
     if (tr.end) h += `<div class="trimshade" style="left:${X(tr.end)}px;width:${X(full - tr.end)}px"></div>`;
-    h += `<div class="trimh" data-drag="trimStart" style="left:${X(tr.start || 0)}px" title="بداية القص"></div><div class="trimh end" data-drag="trimEnd" style="left:${X(tr.end || full)}px" title="نهاية القص"></div></div>`;
+    h += `<div class="trimh" data-drag="trimStart" style="left:${X(tr.start || 0)}px" title="بداية القص"></div><div class="trimh end" data-drag="trimEnd" style="left:${X(tr.end || full)}px" title="نهاية القص"></div>`;
+    E().cuts.forEach((c, k) => { h += `<div class="cutblk ${sel?.kind === 'cut' && sel.i === k ? 'sel' : ''}" data-cut="${k}" style="left:${X(c.start)}px;width:${Math.max(3, X(c.end - c.start))}px" title="مقطع محذوف ${c.start.toFixed(2)}–${c.end.toFixed(2)} — دوس عشان ترجّعه"></div>`; });
+    if (mark.in != null) h += `<div class="markh in" style="left:${X(mark.in)}px" title="بداية المقطع"></div>`;
+    if (mark.out != null) h += `<div class="markh out" style="left:${X(mark.out)}px" title="نهاية المقطع"></div>`;
+    if (mark.in != null && mark.out != null && mark.out > mark.in) h += `<div class="markrange" style="left:${X(mark.in)}px;width:${X(mark.out - mark.in)}px"></div>`;
+    h += `</div>`;
     h += `<div class="tl-row" data-seek>${S.storyboard.scenes.map((sc, i) => `<div class="blk scene ${sel?.kind === 'scene' && sel.i === i ? 'sel' : ''}" draggable="true" data-scene="${i}" style="left:${X(st[i].start)}px;width:${Math.max(4, X(st[i].end - st[i].start) - 2)}px">
       ${i > 0 ? `<i class="h l" data-drag="sceneStart" data-i="${i}"></i>` : ''}<span>${i + 1}. ${esc(TPL_AR[sc.template] || sc.template)}${sc.image ? ' 🖼' : ''} · ${esc(sc.title)}</span></div>`).join('')}</div>`;
-    const ovRow = (kinds) => E().overlays.filter((o) => kinds.includes(o.kind)).map((o) => `<div class="blk ov ${o.kind} ${sel?.kind === 'overlay' && sel.id === o.id ? 'sel' : ''}" data-ov="${esc(o.id)}" data-drag="ovMove" style="left:${X(o.start)}px;width:${Math.max(6, X(o.end - o.start))}px">
+    const ovRow = (kinds) => E().overlays.filter((o) => kinds.includes(o.kind)).map((o) => `<div class="blk ov ${o.kind} ${isSelOv(o.id) ? 'sel' : ''}" data-ov="${esc(o.id)}" data-drag="ovMove" style="left:${X(o.start)}px;width:${Math.max(6, X(o.end - o.start))}px">
       <i class="h l" data-drag="ovStart"></i><span>${o.kind === 'text' ? esc(o.text || 'نص') : (o.kind === 'video' ? '🎞 ' : '🖼 ') + esc(o.name || '')}</span><i class="h r" data-drag="ovEnd"></i></div>`).join('');
     h += `<div class="tl-row" data-seek>${ovRow(['image', 'video'])}</div>`;
     h += `<div class="tl-row" data-seek>${ovRow(['text'])}</div>`;
@@ -147,10 +160,18 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     h += `<div class="tl-row voice ${sel?.kind === 'voice' ? 'sel' : ''}" data-voice><canvas id="tlWave"></canvas></div>`;
     const mu = E().audio.music;
     h += `<div class="tl-row" data-seek>${mu ? `<div class="blk music ${sel?.kind === 'music' ? 'sel' : ''}" data-music style="left:${X(tr.start || 0)}px;width:${X((tr.end || full) - (tr.start || 0))}px"><span>♪ ${esc(mu.name || 'موسيقى')} · ${Math.round((mu.volume ?? 0.25) * 100)}%${mu.duck !== false ? ' · تخفيض تحت الصوت' : ''}</span></div>` : ''}</div>`;
+    E().cuts.forEach((c) => { h += `<div class="cutshade" style="left:${X(c.start)}px;width:${X(c.end - c.start)}px"></div>`; });
     h += `<div class="playhead" id="tlHead" style="left:${X(t)}px"></div>`;
     inner.style.width = W + 'px';
     inner.innerHTML = h;
     drawWave();
+  }
+
+  const isSelOv = (oid) => (sel?.kind === 'overlay' && sel.id === oid) || (sel?.kind === 'overlays' && sel.ids.includes(oid));
+  const selOvIds = () => (sel?.kind === 'overlay' ? [sel.id] : sel?.kind === 'overlays' ? sel.ids : []);
+  function outLen() {
+    const a = E().trim?.start || 0, b = E().trim?.end || full;
+    return Math.max(0, b - a - E().cuts.reduce((s2, c) => s2 + Math.max(0, Math.min(b, c.end) - Math.max(a, c.start)), 0));
   }
 
   // ---------- inspector ----------
@@ -169,6 +190,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
         <label>حجم الكابشن <input type="number" min="28" max="90" step="2" data-f="typography.captionSize" value="${ty.captionSize || ''}" placeholder="52"></label></div>
         <div class="two"><label>الأرقام <select data-f="typography.digits"><option value="">الافتراضي</option>${opt(['latin', 'arabic'], ty.digits, { latin: '123', arabic: '١٢٣' })}</select></label>
         <label>اتجاه الكابشن <select data-f="typography.direction"><option value="">الافتراضي</option>${opt(['auto', 'rtl', 'ltr'], ty.direction, { auto: 'تلقائي', rtl: 'يمين←شمال', ltr: 'شمال←يمين' })}</select></label></div>
+        <label>محاذاة الكابشن <select data-f="typography.align"><option value="">الافتراضي</option>${opt(['center', 'right', 'left', 'justify'], ty.align, { center: 'وسط', right: 'يمين', left: 'شمال', justify: 'ضبط بالكشيدة' })}</select></label>
         <label class="row"><input type="checkbox" data-f="typography.captions" ${ty.captions === false ? '' : 'checked'}> كابشن في الفيديو</label>
         <h4>الصوت</h4>
         <label>صوت الراوي <span class="hint">${Math.round((E().audio.voiceVolume ?? 1) * 100)}%</span><input type="range" min="0" max="2" step="0.05" data-f="audio.voiceVolume" value="${E().audio.voiceVolume ?? 1}"></label>
@@ -192,12 +214,21 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       box.innerHTML = `<h4>${o.kind === 'text' ? 'نص' : o.kind === 'video' ? 'فيديو' : 'صورة'} فوق الفيديو</h4>
         ${o.kind === 'text' ? `<label>النص <textarea data-o="text" rows="2" dir="auto">${esc(o.text || '')}</textarea></label>
           <div class="two"><label>الحجم <input type="number" min="18" max="120" data-o="size" value="${o.size || 44}"></label><label>اللون <input type="color" data-o="color" value="${esc(o.color || '#F4F3EE')}"></label></div>
-          <label class="row"><input type="checkbox" data-o="box" ${o.box === false ? '' : 'checked'}> خلفية للنص</label>` : `<div class="thumbrow"><img src="/api/assets/${esc(o.asset)}/thumb" alt=""><button class="small" id="ovSwap">تغيير</button></div>${o.kind === 'video' ? `<label>يبدأ من ثانية في الكليب <input type="number" step="0.1" min="0" data-o="offset" value="${o.offset || 0}"></label>` : ''}`}
+          <label class="row"><input type="checkbox" data-o="box" ${o.box === false ? '' : 'checked'}> خلفية للنص</label>` : `<div class="thumbrow"><img src="/api/assets/${esc(o.asset)}/thumb" alt=""><button class="small" id="ovSwap">تغيير</button></div>${o.kind === 'video' ? `<label>يبدأ من ثانية في الكليب <input type="number" step="0.1" min="0" data-o="offset" value="${o.offset || 0}"></label>
+          <label>صوت الكليب <span class="hint">${Math.round((o.volume || 0) * 100)}%${o.volume ? '' : ' (صامت)'}</span><input type="range" min="0" max="2" step="0.05" data-o="volume" value="${o.volume || 0}"></label>` : ''}`}
         <div class="two"><label>البداية <input type="number" step="0.05" data-o="start" value="${o.start}"></label><label>النهاية <input type="number" step="0.05" data-o="end" value="${o.end}"></label></div>
         <div class="two"><label>المكان <select data-o="pos">${opt(['top', 'center', 'bottom', 'full'], o.pos, { top: 'فوق', center: 'وسط', bottom: 'تحت', full: 'ملء الشاشة' })}</select></label>
         <label>الحركة <select data-o="anim">${opt(['fade', 'pop', 'slide', 'none'], o.anim, { fade: 'تلاشي', pop: 'نطّة', slide: 'انزلاق', none: 'بدون' })}</select></label></div>
         <div class="two"><label>الحجم النسبي <input type="range" min="0.15" max="1" step="0.05" data-o="scale" value="${o.scale ?? 0.6}"></label><label>الشفافية <input type="range" min="0.1" max="1" step="0.05" data-o="opacity" value="${o.opacity ?? 1}"></label></div>
         <div class="tools"><button class="small danger" id="ovDel">حذف (Delete)</button></div>`;
+    } else if (sel.kind === 'cut') {
+      const c = E().cuts[sel.i];
+      box.innerHTML = `<h4>مقطع محذوف</h4><p class="hint">الجزء ده مش هيظهر في الفيديو ولا الصوت ولا الترجمة، والباقي بيتلم على بعضه.</p>
+        <div class="two"><label>من <input type="number" step="0.05" data-c="start" value="${c.start}"></label><label>لحد <input type="number" step="0.05" data-c="end" value="${c.end}"></label></div>
+        <div class="tools"><button class="small primary" id="cutUndo">↺ رجّع المقطع</button></div>`;
+    } else if (sel.kind === 'overlays') {
+      box.innerHTML = `<h4>${sel.ids.length} عناصر محددة</h4><p class="hint">اسحب أي واحد منهم وكلهم هيتحركوا مع بعض. Shift + ضغطة عشان تضيف أو تشيل من التحديد.</p>
+        <div class="tools"><button class="small" id="ovAlign">ابدأهم كلهم عند المؤشر</button><button class="small danger" id="ovDelAll">حذف الكل (Delete)</button></div>`;
     } else if (sel.kind === 'word') {
       const w = S.words[sel.i];
       box.innerHTML = `<h4>كلمة كابشن #${sel.i + 1}</h4><label>النص <input data-w="text" dir="auto" value="${esc(w.text)}"></label>
@@ -243,6 +274,15 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       $('#ovDel', box).addEventListener('click', () => removeSelected());
       $('#ovSwap', box)?.addEventListener('click', async () => { const a = await pickAsset({ kinds: [o.kind] }); if (a) change(() => { o.asset = a.id; o.name = a.name; }); });
     }
+    if (sel?.kind === 'cut') {
+      const c = E().cuts[sel.i];
+      $$('[data-c]', box).forEach((i) => i.addEventListener('change', () => change(() => { c[i.dataset.c] = Number(i.value); if (c.end < c.start + 0.1) c.end = c.start + 0.1; normCuts(); })));
+      $('#cutUndo', box).addEventListener('click', () => change(() => { E().cuts.splice(sel.i, 1); sel = null; }));
+    }
+    if (sel?.kind === 'overlays') {
+      $('#ovDelAll', box).addEventListener('click', removeSelected);
+      $('#ovAlign', box).addEventListener('click', () => change(() => { for (const o of E().overlays) if (sel.ids.includes(o.id)) { const len = o.end - o.start; o.start = +t.toFixed(2); o.end = +Math.min(full, t + len).toFixed(2); } }));
+    }
     if (sel?.kind === 'word') {
       const w = S.words[sel.i];
       $$('[data-w]', box).forEach((i) => i.addEventListener('change', () => change(() => { w[i.dataset.w] = val(i); if (w.end < w.start + 0.05) w.end = w.start + 0.05; })));
@@ -262,8 +302,28 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (w <= st[i].at || (st[i + 1] && w >= st[i + 1].at)) { toast('حط المؤشر جوه المشهد (مش على بدايته) وجرّب تاني', 'bad'); return; }
     change(() => { st.splice(i + 1, 0, { ...clone(st[i]), at: w, type: 'concept', title: '', items: st[i].items.length ? [clone(st[i].items.at(-1))] : [] }); sel = { kind: 'scene', i: i + 1 }; });
   }
+  function normCuts() {
+    const list = E().cuts.map((c) => [Math.max(0, c.start), Math.min(full, c.end)]).filter(([a, b]) => b - a >= 0.1).sort((x, y) => x[0] - y[0]);
+    const out = [];
+    for (const [a, b] of list) { const l = out[out.length - 1]; if (l && a <= l[1] + 0.02) l[1] = Math.max(l[1], b); else out.push([a, b]); }
+    E().cuts = out.map(([a, b]) => ({ start: +a.toFixed(3), end: +b.toFixed(3) }));
+  }
+  function setMark(which) {
+    mark[which] = +t.toFixed(2);
+    if (mark.in != null && mark.out != null && mark.out < mark.in) [mark.in, mark.out] = [mark.out, mark.in];
+    renderAll();
+  }
+  function cutRange() {
+    if (!(mark.in != null && mark.out != null && mark.out - mark.in >= 0.1)) { toast('حدّد بداية ونهاية المقطع الأول (I و O)', 'bad'); return; }
+    const a = mark.in, b = mark.out;
+    if (outLen() - (b - a) < 1) { toast('مش هينفع تحذف الفيديو كله', 'bad'); return; }
+    change(() => { E().cuts.push({ start: a, end: b }); normCuts(); sel = { kind: 'cut', i: E().cuts.findIndex((c) => c.start <= a && c.end >= b) }; });
+    mark = { in: null, out: null };
+    toast(`اتحذف ${(b - a).toFixed(1)} ث — الفيديو بقى ${outLen().toFixed(1)} ث`);
+  }
   function removeSelected() {
-    if (sel?.kind === 'overlay') change(() => { E().overlays = E().overlays.filter((o) => o.id !== sel.id); sel = null; });
+    if (sel?.kind === 'cut') { change(() => { E().cuts.splice(sel.i, 1); sel = null; }); return; }
+    if (sel?.kind === 'overlay' || sel?.kind === 'overlays') { const ids = selOvIds(); change(() => { E().overlays = E().overlays.filter((o) => !ids.includes(o.id)); sel = null; }); return; }
     else if (sel?.kind === 'music') change(() => { E().audio.music = null; sel = null; });
   }
   async function addMedia() {
@@ -276,21 +336,30 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (a) change(() => { E().audio.music = { ...(E().audio.music || { volume: 0.25, duck: true, fadeIn: 1, fadeOut: 1.5 }), asset: a.id, name: a.name }; sel = { kind: 'music' }; });
   }
   $('#addMedia', el).addEventListener('click', addMedia);
+  $('#markIn', el).addEventListener('click', () => setMark('in'));
+  $('#markOut', el).addEventListener('click', () => setMark('out'));
+  $('#cutRange', el).addEventListener('click', cutRange);
   $('#addMusic', el).addEventListener('click', addMusic);
   $('#addText', el).addEventListener('click', () => change(() => { const o = { id: uid(), kind: 'text', text: 'نص جديد', start: +t.toFixed(2), end: +Math.min(full, t + 2.5).toFixed(2), pos: 'top', size: 44, anim: 'pop', box: true, scale: 1, opacity: 1 }; E().overlays.push(o); sel = { kind: 'overlay', id: o.id }; }));
 
   // ---------- pointer interactions ----------
   const inner = $('#tlInner', el), scroller = $('#tlScroll', el);
   const timeOf = (e) => T(e.clientX - inner.getBoundingClientRect().left);
-  function seek(sec) { t = Math.max(0, Math.min(full, sec)); post({ type: 'reel:seek', t }); updateHead(); }
+  let lastSeek = 0;
+  function seek(sec) { t = Math.max(0, Math.min(full, sec)); lastSeek = performance.now(); post({ type: 'reel:seek', t }); updateHead(); }
   function updateHead() { const h = $('#tlHead', el); if (h) h.style.left = X(t) + 'px'; $('#edTime', el).textContent = fmtTime(t); }
   inner.addEventListener('pointerdown', (e) => {
     const d = e.target.closest('[data-drag]');
-    const blk = e.target.closest('[data-scene],[data-ov],[data-word],[data-music],[data-voice]');
+    const blk = e.target.closest('[data-scene],[data-ov],[data-word],[data-music],[data-voice],[data-cut]');
     if (blk) {
       const s0 = sel;
+      if (blk.dataset.cut !== undefined) { sel = { kind: 'cut', i: Number(blk.dataset.cut) }; renderAll(); return; }
       if (blk.dataset.scene !== undefined) sel = { kind: 'scene', i: Number(blk.dataset.scene) };
-      else if (blk.dataset.ov) sel = { kind: 'overlay', id: blk.dataset.ov };
+      else if (blk.dataset.ov && e.shiftKey) {
+        const ids = new Set(selOvIds()); ids.has(blk.dataset.ov) ? ids.delete(blk.dataset.ov) : ids.add(blk.dataset.ov);
+        sel = ids.size > 1 ? { kind: 'overlays', ids: [...ids] } : ids.size ? { kind: 'overlay', id: [...ids][0] } : null;
+        renderAll(); return;
+      } else if (blk.dataset.ov) { if (!isSelOv(blk.dataset.ov)) sel = { kind: 'overlay', id: blk.dataset.ov }; }
       else if (blk.dataset.word !== undefined) sel = { kind: 'word', i: Number(blk.dataset.word) };
       else if (blk.dataset.music !== undefined) sel = { kind: 'music' };
       else sel = { kind: 'voice' };
@@ -299,7 +368,11 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (!d) return;
     e.preventDefault();
     dragging = { type: d.dataset.drag, x0: e.clientX, before: snap(), moved: false, i: Number(d.dataset.i ?? blk?.dataset.word), ov: blk?.dataset.ov };
-    if (dragging.ov) { const o = E().overlays.find((x) => x.id === dragging.ov); dragging.o0 = { start: o.start, end: o.end }; }
+    if (dragging.ov) {
+      const o = E().overlays.find((x) => x.id === dragging.ov); dragging.o0 = { start: o.start, end: o.end };
+      // moving one block of a multi-selection moves the whole group
+      dragging.group = dragging.type === 'ovMove' && sel?.kind === 'overlays' ? E().overlays.filter((x) => sel.ids.includes(x.id)).map((x) => ({ o: x, start: x.start, end: x.end })) : null;
+    }
     if (dragging.type === 'wordMove') { const w = S.words[dragging.i]; dragging.w0 = { start: w.start, end: w.end }; }
     inner.setPointerCapture(e.pointerId);
   });
@@ -318,7 +391,11 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       sc[g.i].at = Math.max(lo, Math.min(hi, wordAt(tt)));
     } else if (g.ov) {
       const o = E().overlays.find((x) => x.id === g.ov), len = g.o0.end - g.o0.start;
-      if (g.type === 'ovMove') { o.start = +Math.max(0, Math.min(full - len, g.o0.start + dx)).toFixed(2); o.end = +(o.start + len).toFixed(2); }
+      if (g.type === 'ovMove' && g.group) {
+        const lo = -Math.min(...g.group.map((x) => x.start)), hi = full - Math.max(...g.group.map((x) => x.end));
+        const d = Math.max(lo, Math.min(hi, dx));
+        for (const x of g.group) { x.o.start = +(x.start + d).toFixed(2); x.o.end = +(x.end + d).toFixed(2); }
+      } else if (g.type === 'ovMove') { o.start = +Math.max(0, Math.min(full - len, g.o0.start + dx)).toFixed(2); o.end = +(o.start + len).toFixed(2); }
       if (g.type === 'ovStart') o.start = +Math.max(0, Math.min(o.end - 0.2, g.o0.start + dx)).toFixed(2);
       if (g.type === 'ovEnd') o.end = +Math.min(full, Math.max(o.start + 0.2, g.o0.end + dx)).toFixed(2);
     } else if (g.type === 'wordMove') {
@@ -377,6 +454,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   });
   const onMsg = (e) => {
     if (e.origin !== location.origin || e.data?.type !== 'reel:time' || e.source !== frame.contentWindow) return;
+    // a time report sent before the preview handled our seek would jump the playhead back: ignore it briefly
+    if (!e.data.playing && performance.now() - lastSeek < 400) return;
     if (!dragging) { t = e.data.t; updateHead(); if (e.data.playing) { const h = X(t); if (h < scroller.scrollLeft || h > scroller.scrollLeft + scroller.clientWidth - 40) scroller.scrollLeft = h - 60; } }
     if (playing !== e.data.playing) { playing = e.data.playing; $('#edPlay', el).textContent = playing ? '❚❚' : '▶'; }
   };
@@ -387,7 +466,10 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y' && !typing) { e.preventDefault(); redo(); }
     else if (e.key === ' ' && !typing) { e.preventDefault(); togglePlay(); }
-    else if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && (sel?.kind === 'overlay' || sel?.kind === 'music')) { e.preventDefault(); removeSelected(); }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && ['overlay', 'overlays', 'music', 'cut'].includes(sel?.kind)) { e.preventDefault(); removeSelected(); }
+    else if (!typing && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'i') setMark('in');
+    else if (!typing && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'o') setMark('out');
+    else if (!typing && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'x') cutRange();
   };
   document.addEventListener('keydown', onKey);
   const onLeave = (e) => { if (dirty) { save(); e.preventDefault(); } };
@@ -395,6 +477,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
 
   function renderAll() {
     $('#edUndo', el).disabled = !hist.undo.length; $('#edRedo', el).disabled = !hist.redo.length;
+    $('#cutRange', el).disabled = !(mark.in != null && mark.out != null && mark.out - mark.in >= 0.1);
+    $('#edDur', el).textContent = `الفيديو: ${outLen().toFixed(1)} ث${E().cuts.length ? ` · ${E().cuts.length} مقطع محذوف` : ''}`;
     renderTimeline(); renderInspector(); updateHead();
   }
   renderAll();

@@ -12,23 +12,44 @@ export const hasTashkeel = (s) => /[ً-ْ]/.test(s);
 export const toArabicDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
 export const toLatinDigits = (s) => String(s).replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x6f0));
 
-// Frequent function words that separate Egyptian colloquial from Modern Standard Arabic.
-const EGY = ['ده', 'دي', 'دول', 'إزاي', 'ازاي', 'ليه', 'عشان', 'علشان', 'مش', 'بتاع', 'بتاعة', 'كده', 'أوي', 'اوي', 'إيه', 'ايه', 'فين', 'امتى', 'إمتى', 'دلوقتي', 'كمان', 'بقى', 'يعني', 'اللي', 'برضه', 'خالص', 'هو', 'زي', 'لسه', 'عايز', 'عاوز'];
-const MSA = ['هذا', 'هذه', 'هؤلاء', 'لماذا', 'كيف', 'ليس', 'ليست', 'سوف', 'الذي', 'التي', 'الذين', 'إن', 'إنه', 'إنها', 'لقد', 'قد', 'أيضا', 'أيضًا', 'حيث', 'لكن', 'متى', 'أين', 'ماذا', 'الآن', 'جدا', 'جدًا', 'يجب'];
-const EGY_N = new Set(EGY.map(normWord)), MSA_N = new Set(MSA.map(normWord));
+// Distinctive function words per variety (normalised before matching). Words shared by most dialects
+// (مش، ليه، عشان، يعني، اللي، بس، كمان) only count as "colloquial", not as evidence for one dialect.
+const MARKERS = {
+  egyptian: ['ده', 'دي', 'دول', 'إزاي', 'ازاي', 'فين', 'امتى', 'إمتى', 'دلوقتي', 'كده', 'كدا', 'أوي', 'اوي', 'بتاع', 'بتاعة', 'عايز', 'عاوز', 'برضه', 'برضو', 'لسه', 'إيه', 'ايه', 'خالص', 'إمبارح', 'النهارده', 'ازيك'],
+  levantine: ['شو', 'هلق', 'هلأ', 'هلا', 'كتير', 'منيح', 'بدي', 'بدك', 'بدو', 'هيك', 'ليش', 'وين', 'لسا', 'هون', 'هونيك', 'هاد', 'هاي', 'هدول', 'كيفك', 'شي', 'مبارح', 'منشان', 'كرمال'],
+  gulf: ['شلون', 'وايد', 'زين', 'الحين', 'ابي', 'أبي', 'يبي', 'تبي', 'وش', 'ايش', 'إيش', 'هذي', 'ترى', 'حق', 'يالله', 'چذي', 'جذي', 'شفيك', 'اشلون', 'عيل'],
+  maghrebi: ['بزاف', 'واش', 'ديال', 'دابا', 'كيفاش', 'علاش', 'مزيان', 'بغيت', 'كاين', 'ماشي', 'هادشي', 'غادي', 'راه', 'ياك', 'شحال', 'فاش', 'بلي', 'هكا'],
+  msa: ['هذا', 'هذه', 'هؤلاء', 'لماذا', 'كيف', 'ليس', 'ليست', 'سوف', 'الذي', 'التي', 'الذين', 'إن', 'إنه', 'إنها', 'لقد', 'قد', 'أيضا', 'أيضًا', 'حيث', 'لكن', 'متى', 'أين', 'ماذا', 'الآن', 'جدا', 'جدًا', 'يجب', 'لأن', 'ذلك', 'تلك'],
+};
+const SHARED = ['مش', 'ليه', 'عشان', 'علشان', 'يعني', 'اللي', 'بس', 'كمان', 'هو', 'زي', 'بقى', 'مو', 'مب'];
+const SETS = Object.fromEntries(Object.entries(MARKERS).map(([k, v]) => [k, new Set(v.map(normWord))]));
+const SHARED_N = new Set(SHARED.map(normWord));
+export const DIALECT_AR = { egyptian: 'عامية مصرية', levantine: 'شامي', gulf: 'خليجي', maghrebi: 'مغاربي', msa: 'فصحى', mixed: 'مختلط', colloquial: 'عامية (مش محددة)', unknown: 'مش واضح' };
 
-/** Dialect estimate from marker words + the Egyptian "b-" present-tense prefix (بيعمل، بتروح). */
+/**
+ * Dialect estimate from distinctive marker words, the "b-" present-tense prefix (Egyptian/Levantine: بيعمل، بتروح)
+ * and the Maghrebi "ka-/ki-" prefix (كيدير). Returns the best guess plus every score — a heuristic, not a classifier.
+ */
 export function detectDialect(text) {
   const toks = tokenize(text).map((t) => normWord(t.text)).filter(Boolean);
-  let egy = 0, msa = 0;
+  const sc = { egyptian: 0, levantine: 0, gulf: 0, maghrebi: 0, msa: 0 };
+  let colloquial = 0;
   for (const t of toks) {
-    if (EGY_N.has(t)) egy++;
-    if (MSA_N.has(t)) msa++;
-    if (/^(ب|هي|هت|هن)(ي|ت|ن)[ء-ي]{2,}/.test(t) && !/^(بين|بيت|بيئ)/.test(t)) egy += 0.5;
+    for (const [k, set] of Object.entries(SETS)) if (set.has(t)) sc[k]++;
+    if (SHARED_N.has(t)) colloquial++;
+    if (/^(ب|هي|هت|هن|رح|ح)(ي|ت|ن)[ء-ي]{2,}/.test(t) && !/^(بين|بيت|بيئ|حين|حيث|حتي)/.test(t)) colloquial += 0.5;
+    if (/^ك(ي|ن|ت)[ء-ي]{3,}/.test(t) && !/^(كيف|كيم|كتب|كتاب|كنت|كثير)/.test(t)) sc.maghrebi += 0.5;
   }
-  const total = egy + msa;
-  const dialect = total < 1 ? 'unknown' : egy > msa * 1.3 ? 'egyptian' : msa > egy * 1.3 ? 'msa' : 'mixed';
-  return { dialect, egyptian: egy, msa, words: toks.length, latinTerms: tokenize(text).filter((t) => /[A-Za-z]/.test(t.text)).length };
+  const ranked = Object.entries(sc).sort((a, b) => b[1] - a[1]);
+  const [best, top] = ranked[0], second = ranked[1][1];
+  const total = ranked.reduce((a, [, v]) => a + v, 0) + colloquial;
+  let dialect;
+  if (total < 1) dialect = 'unknown';
+  else if (top === 0) dialect = 'colloquial';
+  else if (second > 0 && top < second * 1.3) dialect = 'mixed';
+  else if (best === 'msa' && colloquial > top) dialect = 'mixed';
+  else dialect = best;
+  return { dialect, label: DIALECT_AR[dialect], scores: sc, colloquial, egyptian: sc.egyptian, msa: sc.msa, words: toks.length, latinTerms: tokenize(text).filter((t) => /[A-Za-z]/.test(t.text)).length };
 }
 
 /** Splits a script into sentences (keeps the script's own lines; long lines are split on sentence punctuation). */
@@ -60,10 +81,12 @@ export function wordDiff(a, b) {
 // ---- LLM rewrites ------------------------------------------------------------------------------
 const KEEP = `Keep the line breaks exactly (one caption sentence per line). Keep English science terms in English. Do not add facts, do not remove facts, do not add any commentary. Reply with the rewritten text only.`;
 export const OPS = {
-  correct: { label: 'تصحيح إملائي ونحوي', prompt: `Correct spelling, hamza, taa marbuta / haa, alef maqsura, punctuation and grammar mistakes in this Arabic text. Keep its dialect (if it is Egyptian colloquial, keep it colloquial — do NOT convert it to MSA). Change as little as possible. ${KEEP}` },
+  correct: { label: 'تصحيح إملائي ونحوي', prompt: `Correct spelling, hamza, taa marbuta / haa, alef maqsura, punctuation and grammar mistakes in this Arabic text. Keep its dialect (if it is colloquial — Egyptian, Levantine, Gulf or Maghrebi — keep it colloquial; do NOT convert it to MSA). Change as little as possible. ${KEEP}` },
   tashkeel: { label: 'تشكيل', prompt: `Add full, correct Arabic diacritics (tashkeel) to every Arabic word, according to its meaning and grammatical role in context. Do not change any letter or word. ${KEEP}` },
   msa: { label: 'تحويل للفصحى', prompt: `Rewrite this text in clear, correct Modern Standard Arabic (فصحى) suitable for an educational video narration. Keep the meaning, the tone and roughly the same length. ${KEEP}` },
   egyptian: { label: 'تحويل للعامية المصرية', prompt: `Rewrite this text in natural Egyptian colloquial Arabic (العامية المصرية) as a friendly narrator would say it. Keep the meaning and roughly the same length. ${KEEP}` },
+  levantine: { label: 'تحويل للشامي', prompt: `Rewrite this text in natural Levantine Arabic (الشامي — Syrian/Lebanese/Palestinian/Jordanian everyday speech) as a friendly narrator would say it. Keep the meaning and roughly the same length. ${KEEP}` },
+  gulf: { label: 'تحويل للخليجي', prompt: `Rewrite this text in natural Gulf Arabic (الخليجي — Saudi/Emirati/Kuwaiti everyday speech) as a friendly narrator would say it. Keep the meaning and roughly the same length. ${KEEP}` },
   simplify: { label: 'تبسيط', prompt: `Simplify this Arabic text for a general audience: shorter sentences, everyday words, the same facts. Keep the same dialect. ${KEEP}` },
 };
 

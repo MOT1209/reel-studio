@@ -43,6 +43,18 @@
   const isArabic = (s) => /[؀-ۿ]/.test(s);
   const toArDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
   const dg = (s) => (TYPO.digits === 'arabic' ? toArDigits(s) : String(s));
+  // source time (narration) → output time (after trim + cuts); inside a cut → the output time where the cut sits
+  function outT(t) {
+    const segs = D.segments || [[D.start, D.end]];
+    let acc = 0;
+    for (const [a, b] of segs) { if (t < a) return acc; if (t <= b) return acc + (t - a); acc += b - a; }
+    return acc;
+  }
+  /** Next kept instant at/after t (skips cut ranges); null after the end. */
+  function keptFrom(t) {
+    for (const [a, b] of D.segments || [[D.start, D.end]]) { if (t < a) return a; if (t <= b) return t; }
+    return null;
+  }
 
   // ---------- text ----------
   function font(size, weight = 700, fam = FONT) { ctx.font = `${weight} ${size}px ${fam}`; }
@@ -703,19 +715,31 @@
     const sp = size * 0.3, lh = size * 1.42;
     const placed = [];
     const y0 = CAP.cy - ((lines.length - 1) * lh) / 2;
+    // justified Arabic: every line but the last is stretched to the widest line with kashida (tatweel),
+    // the way Arabic is justified — word gaps stay the same
+    if (TYPO.align === 'justify' && lines.length > 1 && window.ReelKashida) {
+      font(size, TYPO.captionWeight, CAPFONT);
+      const lw = (ln) => ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
+      const target = Math.max(...lines.map(lw));
+      lines.slice(0, -1).forEach((ln) => {
+        if (lw(ln) >= target - 1 || !ln.some((x) => isArabic(D.words[x.i].text))) return;
+        const out = window.ReelKashida.justifyWords(ln.map((x) => dg(D.words[x.i].text)), target, (str) => ctx.measureText(str).width, { space: sp });
+        ln.forEach((x, k) => { x.str = out[k]; x.w = ctx.measureText(out[k]).width; });
+      });
+    }
     // line breaks are found in logical order; then each line is reordered for display (UAX #9 at word level),
     // so an English term or a number inside an Arabic line keeps its reading order
     const base = TYPO.direction === 'rtl' || TYPO.direction === 'ltr' ? TYPO.direction : window.ReelBidi.baseDir(c.idx.map((i) => D.words[i].text));
     lines.forEach((ln, li) => {
       const total = ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
       const order = window.ReelBidi.visualOrder(ln.map((x) => D.words[x.i].text), base);
-      const left = TYPO.align === 'right' ? CAP.cx + maxW / 2 - total : TYPO.align === 'left' ? CAP.cx - maxW / 2 : CAP.cx - total / 2;
+      const left = TYPO.align === 'right' ? CAP.cx + maxW / 2 - total : TYPO.align === 'left' ? CAP.cx - maxW / 2 : CAP.cx - total / 2; // center + justify
       if (base === 'rtl') {
         let x = left + total; // start at the right edge
-        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, str: it.str, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
       } else {
         let x = left;
-        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, str: it.str, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
       }
     });
     c.layout = { size, placed };
@@ -740,7 +764,7 @@
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     for (const p of placed) {
       const w = D.words[p.i];
-      const str = dg(w.text);
+      const str = p.str || dg(w.text);
       const lit = t >= w.start; // lights exactly at its spoken onset
       const next = D.words[p.i + 1];
       const active = lit && t < (next ? next.start : w.end + 0.3);
@@ -842,7 +866,7 @@
   function drawHeader(t) {
     // progress (of the exported clip)
     ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
-    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp((t - D.start) / D.duration);
+    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(outT(t) / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
@@ -967,7 +991,9 @@
     for (const [id, m] of Object.entries(D.media || {})) {
       if (m.kind === 'image') jobs.push(loadImage(m.src).then((im) => IMG.set(id, im)));
       else if (m.kind === 'video' && PREVIEW && !VID.has(id)) {
-        const v = document.createElement('video'); v.src = m.src; v.muted = true; v.playsInline = true; v.preload = 'auto'; VID.set(id, v);
+        const v = document.createElement('video'); v.src = m.src; v.playsInline = true; v.preload = 'auto'; VID.set(id, v);
+        const vol = Math.max(0, ...(D.overlays || []).filter((o) => o.asset === id).map((o) => o.volume || 0));
+        v.muted = !(vol > 0); v.volume = Math.min(1, vol || 0);
         jobs.push(new Promise((r) => { v.onloadeddata = r; v.onerror = r; setTimeout(r, 4000); }));
       }
     }
@@ -1008,14 +1034,34 @@
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
     if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
     let t = D.start;
+    let music = null;
+    const setMusic = () => {
+      if (music) { music.pause(); music = null; }
+      if (D.music) { music = new Audio(D.music.src); music.loop = true; }
+    };
+    setMusic();
+    const syncMusic = () => {
+      if (!music) return;
+      // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
+      const speaking = D.words.some((w) => t >= w.start - 0.05 && t <= w.end + 0.2);
+      music.volume = Math.min(1, D.music.volume * (speaking ? 0.35 : 1));
+      if (PLAYING && music.paused) { music.currentTime = outT(t) % (music.duration || 1e9); music.play().catch(() => {}); }
+      if (!PLAYING && !music.paused) music.pause();
+    };
     const setPlaying = (on) => {
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
-      if (on) { if (t >= D.end - 0.05) t = D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
+      if (on) { if (t >= D.end - 0.05) t = D.start; t = keptFrom(t) ?? D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
+      if (music) { music.pause(); }
     };
     const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
     let lastPost = 0;
     const loop = (now) => {
-      if (PLAYING) { t = audio.currentTime; if (t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } }
+      if (PLAYING) {
+        t = audio.currentTime;
+        const k = keptFrom(t); // jump over cut ranges, like the export does
+        if (k === null || t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } else if (k > t + 0.01) { t = k; audio.currentTime = k; if (music) music.currentTime = outT(t) % (music.duration || 1e9); }
+      }
+      syncMusic();
       drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
@@ -1029,7 +1075,7 @@
       if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }

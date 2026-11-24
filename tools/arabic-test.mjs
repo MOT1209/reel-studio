@@ -58,10 +58,53 @@ await test('subtitles: trim offset shifts times and drops cues outside the clip;
   assert.ok(cues.every((c) => c.end <= 2.5 + 1e-9));
 });
 
-await test('dialect: Egyptian vs MSA vs mixed', () => {
+await test('dialect: Egyptian, Levantine, Gulf, Maghrebi, MSA, mixed, unknown', () => {
   assert.equal(AR.detectDialect('عارف ليه السما لونها أزرق؟ عشان الضوء بيتشتت كده').dialect, 'egyptian');
   assert.equal(AR.detectDialect('هل تعرف لماذا تبدو السماء زرقاء؟ لأن الضوء الذي يصل إلينا يتشتت').dialect, 'msa');
+  assert.equal(AR.detectDialect('شو بتعرف ليش السما زرقا؟ هيك الضو بيتشتت كتير هلق').dialect, 'levantine');
+  assert.equal(AR.detectDialect('تدري ليش السما زرقا؟ الحين بقولك، الضو يتشتت وايد وهذي السالفة').dialect, 'gulf');
+  assert.equal(AR.detectDialect('واش عرفتي علاش السما زرقا؟ دابا نقولك، الضو كيتشتت بزاف').dialect, 'maghrebi');
+  assert.equal(AR.detectDialect('ده شو إزاي هلق').dialect, 'mixed');
   assert.equal(AR.detectDialect('the sky').dialect, 'unknown');
+  assert.equal(AR.detectDialect('شو').label, 'شامي');
+});
+
+const ksb = { globalThis: {} };
+vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'public/kashida.js'), 'utf8'), ksb);
+const K = ksb.globalThis.ReelKashida;
+await test('kashida: tatweel only between joining letters — never after ا د ذ ر ز و ة, never inside لا', () => {
+  const spotsAfter = (w) => Array.from(K.spots(w), (s) => [...w][s.at - 1]); // plain arrays (vm arrays have another prototype)
+  assert.deepEqual(spotsAfter('السلام').sort(), ['س', 'ل'].sort(), 'ال → no spot after alef; لا ligature kept');
+  assert.equal(K.spots('وردة').length, 0, 'و ر د ة never connect forward');
+  const w = K.justifyWords(['محمد'], 1000, (s) => [...s].length * 10, { maxPerSpot: 2 })[0];
+  assert.ok([...w].every((c, i, a) => c !== K.TATWEEL || !'اأإآدذرزوؤةى'.includes(a[i - 1] === K.TATWEEL ? a[i - 2] : a[i - 1])));
+  assert.equal(w.replaceAll(K.TATWEEL, ''), 'محمد', 'letters unchanged');
+  assert.equal(K.justifyWords(['Hello'], 999, (s) => s.length)[0], 'Hello', 'Latin words are never stretched');
+});
+
+await test('kashida in the render browser: a real Arabic line is stretched to the target width and stays shaped', async () => {
+  const { launchBrowser } = await import('../server/render.mjs');
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    const font = fs.readFileSync(path.join(ROOT, 'assets/fonts/library/amiri/Amiri-Regular.ttf')).toString('base64');
+    await page.setContent('<canvas id=c width=900 height=200></canvas>');
+    await page.addScriptTag({ content: fs.readFileSync(path.join(ROOT, 'public/kashida.js'), 'utf8') });
+    const r = await page.evaluate(async (b64) => {
+      const f = new FontFace('A', `url(data:font/ttf;base64,${b64})`); await f.load(); document.fonts.add(f);
+      const ctx = document.getElementById('c').getContext('2d'); ctx.font = '40px A'; ctx.direction = 'rtl';
+      const m = (s) => ctx.measureText(s).width;
+      const words = ['السماء', 'لونها', 'أزرق', 'بسبب', 'تشتت', 'الضوء'], sp = 12;
+      const w0 = words.reduce((a, w) => a + m(w), 0) + sp * 5;
+      const target = w0 * 1.18;
+      const out = window.ReelKashida.justifyWords(words, target, m, { space: sp });
+      return { w0, target, w1: out.reduce((a, w) => a + m(w), 0) + sp * 5, out };
+    }, font);
+    assert.ok(r.w1 <= r.target + 0.5, `not wider than the target (${r.w1.toFixed(1)} > ${r.target.toFixed(1)})`);
+    assert.ok(r.w1 >= r.target - 25, `reaches the target within one tatweel (${r.w1.toFixed(1)} vs ${r.target.toFixed(1)})`);
+    assert.ok(r.out.join('').includes('ـ'));
+    assert.deepEqual(r.out.map((w) => w.replaceAll('ـ', '')), ['السماء', 'لونها', 'أزرق', 'بسبب', 'تشتت', 'الضوء']);
+  } finally { await browser.close(); }
 });
 await test('diacritics: strip, detect, digits', () => {
   assert.equal(AR.stripTashkeel('السَّمَاءُ زَرْقَاءُ'), 'السماء زرقاء');

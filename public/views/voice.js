@@ -67,8 +67,8 @@ export async function mountVoice(el) {
   $('#arAnalyze', el).addEventListener('click', async () => {
     const r = await act(() => api('/api/arabic/analyze', { method: 'POST', body: JSON.stringify({ text: text() }) }));
     if (!r) return;
-    const D = { egyptian: 'عامية مصرية', msa: 'فصحى', mixed: 'مختلط', unknown: 'مش واضح' };
-    out.innerHTML = `<p>اللهجة: <b>${D[r.dialect]}</b> (مؤشرات عامية ${r.egyptian} · فصحى ${r.msa}) · ${r.words} كلمة · ${r.sentences.length} جملة · مصطلحات إنجليزي: ${r.latinTerms} · ${r.tashkeel ? 'فيه تشكيل' : 'من غير تشكيل'}</p>`;
+    const S2 = r.scores, L = { egyptian: 'مصري', levantine: 'شامي', gulf: 'خليجي', maghrebi: 'مغاربي', msa: 'فصحى' };
+    out.innerHTML = `<p>اللهجة: <b>${esc(r.label)}</b> (${Object.entries(S2).filter(([, v]) => v).map(([k, v]) => `${L[k]} ${v}`).join(' · ') || 'مفيش مؤشرات'}${r.colloquial ? ` · عامي عام ${r.colloquial}` : ''}) · ${r.words} كلمة · ${r.sentences.length} جملة · مصطلحات إنجليزي: ${r.latinTerms} · ${r.tashkeel ? 'فيه تشكيل' : 'من غير تشكيل'}</p>`;
   });
   $$('[data-local]', el).forEach((b) => b.addEventListener('click', async () => { const r = await act(() => api('/api/arabic/' + b.dataset.local, { method: 'POST', body: JSON.stringify({ text: text() }) })); if (r) showProposal(r); }));
   $$('[data-op]', el).forEach((b) => b.addEventListener('click', async () => {

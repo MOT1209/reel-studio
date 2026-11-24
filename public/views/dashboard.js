@@ -14,6 +14,7 @@ export async function mountDashboard(el, { openProject }) {
     ['Deepgram', S._source['deepgram.apiKey'] !== 'none', 'للملفات الصوتية المرفوعة'],
     ...Object.values(prov).map((p) => [p.name, p.configured, p.configured ? 'متوصل' : 'مفيش مفتاح']),
     ['YouTube', yt.linked, yt.linked ? `«${yt.channel?.title || ''}»` : 'مش مربوط'],
+    ['تشفير المفاتيح', S._vault !== 'unavailable', { dpapi: 'AES-256 + Windows DPAPI (مربوط بحسابك)', env: 'AES-256 + مفتاح من متغير البيئة', file: 'AES-256 + مفتاح محلي (0600)' }[S._vault] || 'مش متاح'],
   ];
   el.innerHTML = `
     <div class="stats">

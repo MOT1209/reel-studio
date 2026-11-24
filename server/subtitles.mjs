@@ -1,4 +1,5 @@
 // Subtitle cues from the aligned words, and SRT / WebVTT export.
+import { srcToOut } from './timeline.mjs';
 // Cues follow the same rules as the burned-in captions (≤ 6 words, break on a new script line or a sentence end,
 // ≤ 42 characters) so the exported file matches what the video shows.
 
@@ -6,7 +7,7 @@ const RLM = '‏'; // keeps leading/trailing punctuation on the right side in pl
 const isArabic = (s) => /[؀-ۿ]/.test(s);
 
 /** words: [{text,start,end,line}] → cues [{start,end,text}] (times in seconds, relative to `offset`). */
-export function buildCues(words, { maxWords = 6, maxChars = 42, offset = 0, end: clipEnd = Infinity, digits = 'latin' } = {}) {
+export function buildCues(words, { maxWords = 6, maxChars = 42, offset = 0, end: clipEnd = Infinity, digits = 'latin', segments = null } = {}) {
   const chunks = [];
   let cur = [];
   const flush = () => { if (cur.length) chunks.push(cur); cur = []; };
@@ -24,9 +25,29 @@ export function buildCues(words, { maxWords = 6, maxChars = 42, offset = 0, end:
     const end = Math.min(words[idx[idx.length - 1]].end + 0.4, nextStart);
     let text = idx.map((i) => words[i].text).join(' ');
     if (digits === 'arabic') text = toArabicDigits(text);
-    return { start: start - offset, end: Math.min(end, clipEnd) - offset, text };
+    return { start: start - offset, end: Math.min(end, clipEnd) - offset, text, src: [start, end], idx };
   });
-  return cues.filter((c) => c.end > 0 && c.start < clipEnd - offset).map((c) => ({ ...c, start: Math.max(0, c.start) }));
+  if (segments) return mapCues(cues, segments, words, digits);
+  return cues.filter((c) => c.end > 0 && c.start < clipEnd - offset).map(({ src, ...c }) => ({ ...c, start: Math.max(0, c.start) }));
+}
+
+/** Cues in source time → output time: a cue split by a cut keeps its parts that survive; fully cut cues are dropped. */
+function mapCues(cues, segs, words, digits) {
+  const out = [];
+  for (const c of cues) {
+    const [a, b] = c.src;
+    for (const [s0, s1] of segs) {
+      const x = Math.max(a, s0), y = Math.min(b, s1);
+      if (y - x < 0.08) continue;
+      // only the words actually spoken inside this kept part (a word counts where most of it is)
+      const kept = c.idx.filter((i) => { const m = (words[i].start + Math.min(words[i].end, b)) / 2; return m >= s0 && m < s1; });
+      if (!kept.length) continue;
+      let text = kept.map((i) => words[i].text).join(' ');
+      if (digits === 'arabic') text = toArabicDigits(text);
+      out.push({ start: +srcToOut(x, segs).toFixed(3), end: +srcToOut(y, segs).toFixed(3), text });
+    }
+  }
+  return out;
 }
 
 export function toArabicDigits(s) { return String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d))); }

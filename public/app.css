@@ -276,3 +276,8 @@ button.ai { border-color: rgba(89,120,255,.45); }
 .tl-row.voice.sel { background: rgba(39,184,199,.06); }
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #FFD23F; pointer-events: none; z-index: 4; }
 @media (max-width: 1100px) { .cols2, .libbody, .emain { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } .stages { grid-template-columns: repeat(3, 1fr); } .capstyles { grid-template-columns: repeat(2, 1fr); } .fontlist { grid-template-columns: 1fr; } .grid3 { grid-template-columns: 1fr 1fr; } }
+.cutblk { position: absolute; top: 0; height: 28px; background: repeating-linear-gradient(45deg, rgba(242,80,60,.55) 0 6px, rgba(242,80,60,.25) 6px 12px); cursor: pointer; z-index: 2; }
+.cutblk.sel { outline: 2px solid #FF6B5A; }
+.cutshade { position: absolute; top: 28px; bottom: 0; background: repeating-linear-gradient(45deg, rgba(242,80,60,.16) 0 6px, transparent 6px 12px); pointer-events: none; z-index: 3; }
+.markh { position: absolute; top: 0; height: 28px; width: 3px; background: #FFD23F; z-index: 3; pointer-events: none; }
+.markrange { position: absolute; top: 18px; height: 10px; background: rgba(255,210,63,.35); pointer-events: none; }

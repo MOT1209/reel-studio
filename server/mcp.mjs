@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR, writeFileAtomic, mask } from './settings.mjs';
 import { log as slog, addSecret } from './logger.mjs';
+import { seal, open as unseal } from './vault.mjs';
 
 const FILE = path.join(DATA_DIR, 'mcp.json');
 const RUNS = path.join(DATA_DIR, 'logs', 'mcp-calls.jsonl');
@@ -13,10 +14,16 @@ const PROTOCOL = '2025-06-18';
 const MAX_RESULT = 100 * 1024;
 const err = (status, message) => Object.assign(new Error(message), { status });
 
-function load() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return { servers: [] }; } }
+function load() {
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return { servers: [] }; }
+  for (const s of cfg.servers) s.headers = Object.fromEntries(Object.entries(s.headers || {}).map(([k, v]) => [k, unseal(DATA_DIR, v, `MCP ${s.name} ${k}`)]).filter(([, v]) => v));
+  return cfg;
+}
 function store(cfg) {
   for (const s of cfg.servers) for (const v of Object.values(s.headers || {})) addSecret(v);
-  writeFileAtomic(FILE, JSON.stringify(cfg, null, 1), { mode: 0o600 });
+  const out = { ...cfg, servers: cfg.servers.map((s) => ({ ...s, headers: Object.fromEntries(Object.entries(s.headers || {}).map(([k, v]) => [k, seal(DATA_DIR, v)])) })) };
+  writeFileAtomic(FILE, JSON.stringify(out, null, 1), { mode: 0o600 });
 }
 load().servers.forEach((s) => Object.values(s.headers || {}).forEach(addSecret));
 

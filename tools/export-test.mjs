@@ -136,7 +136,7 @@ await test('subtitles follow the trim (start at 0, nothing after the clip end) a
 });
 
 await test('1:1 1080p export (draft) renders at 1080×1080', async () => {
-  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { aspect: '1:1', resolution: 1080, quality: 'draft', fps: 30 }, trim: { start: 0, end: 3 }, overlays: [], audio: { music: null } } }) });
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { aspect: '1:1', resolution: 1080, quality: 'draft', fps: 30 }, trim: { start: 0, end: 3 }, overlays: [], audio: { music: null }, typography: { align: 'justify', captionSize: 64, captionFont: 'amiri', digits: 'arabic' } } }) });
   await api(`/api/projects/${id}/run`, { method: 'POST' });
   await waitStage(id, 'render', 'done');
   const v = probe(path.join(DATA, 'projects', id, 'video.mp4')).streams.find((s) => s.codec_type === 'video');
@@ -156,6 +156,41 @@ await test('recovery: a render cancelled after its first segment resumes from th
   assert.match(done.stages.render.log.join('\n'), /recovery: reusing 1\/2 segments/);
   const pr = probe(path.join(DATA, 'projects', id, 'video.mp4'));
   assert.ok(Math.abs(Number(pr.format.duration) - done.render.duration) < 0.15, `duration ${pr.format.duration} vs ${done.render.duration}`);
+});
+
+/** Mean volume (dB) of the 1 kHz band in [t0, t1] of a file's audio. */
+function toneDb(f, t0, t1) {
+  const err = spawnSync(FFMPEG, ['-hide_banner', '-ss', String(t0), '-t', String(t1 - t0), '-i', f, '-af', 'bandpass=f=1000:width_type=q:w=8,volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+  return Number(err.match(/mean_volume:\s*(-?[\d.]+) dB/)?.[1]);
+}
+
+await test('cut from the middle + clip sound: video, audio and subtitles all lose the cut range; the clip is heard', async () => {
+  const tone = path.join(TMP, 'tone.mp4');
+  execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x568:rate=30:duration=3', '-f', 'lavfi', '-i', 'sine=f=1000:d=3', '-shortest', '-pix_fmt', 'yuv420p', '-c:a', 'aac', tone]);
+  const tA = await add(tone, 'clips');
+  assert.equal(tA.hasAudio, true);
+  const before = await api(`/api/projects/${id}/render-data`);
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: {
+    export: { aspect: '9:16', resolution: 720, quality: 'draft', fps: 30 }, trim: { start: 0, end: null },
+    cuts: [{ start: 2, end: 4 }],
+    overlays: [{ kind: 'video', asset: tA.id, start: 5, end: 6.5, pos: 'bottom', scale: 0.4, volume: 1 }] } }) });
+  const d = await api(`/api/projects/${id}/render-data`);
+  assert.deepEqual(d.segments, [[0, 2], [4, d.full]]);
+  assert.ok(Math.abs(d.duration - (before.full - 2)) < 0.01, `duration ${d.duration} vs ${before.full - 2}`);
+  await api(`/api/projects/${id}/run`, { method: 'POST' });
+  const done = await waitStage(id, 'render', 'done');
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  const pr = probe(f);
+  assert.ok(Math.abs(Number(pr.format.duration) - d.duration) < 0.15, `mp4 ${pr.format.duration} vs ${d.duration}`);
+  assert.match(done.stages.render.log.join('\n'), /1 cut .*1 clip sound/);
+  // source 5 s → output 3 s: the clip's 1 kHz tone is there, and it is not in the first second
+  const inClip = toneDb(f, 3.1, 4.3), outside = toneDb(f, 0.1, 1.2);
+  assert.ok(inClip > outside + 12, `tone in clip window ${inClip} dB vs outside ${outside} dB`);
+  const srt = await (await fetch(`${BASE}/api/projects/${id}/subtitles.srt`)).text();
+  const ends = [...srt.matchAll(/--> (\d\d):(\d\d):(\d\d),(\d{3})/g)].map((m) => m[3] * 1 + m[4] / 1000);
+  assert.ok(Math.max(...ends) <= d.duration + 0.001, `subtitles end at ${Math.max(...ends)} > ${d.duration}`);
+  const cutWords = before.words.filter((w) => w.start >= 2.05 && w.end <= 3.95).map((w) => w.text);
+  for (const w of cutWords) assert.ok(!srt.includes(w) || before.words.filter((x) => x.text === w).length > 1, `cut word «${w}» still in subtitles`);
 });
 
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);

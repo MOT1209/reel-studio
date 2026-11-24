@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { seal, open as unseal, isSealed, protection } from './vault.mjs';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DATA_DIR = path.resolve(process.env.RS_DATA_DIR || path.join(ROOT, 'data'));
@@ -82,8 +83,25 @@ export function writeFileAtomic(file, data, { mode = 0o644 } = {}) {
   try { fs.chmodSync(file, mode); } catch {}
 }
 
+/** settings.json with its secrets decrypted. Plaintext secrets left by an older version are sealed on first read. */
 function readStored() {
-  try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return {}; }
+  let s;
+  try { s = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return {}; }
+  let plain = false;
+  for (const [sec, f] of SECRETS) {
+    const v = s?.[sec]?.[f];
+    if (typeof v !== 'string' || !v) continue;
+    if (!isSealed(v)) { plain = true; continue; }
+    const p = unseal(DATA_DIR, v, `${sec}.${f}`);
+    if (p) s[sec][f] = p; else delete s[sec][f]; // undecryptable → missing (the .env value, if any, applies)
+  }
+  if (plain) writeStored(s);
+  return s;
+}
+function writeStored(obj) {
+  const out = structuredClone(obj);
+  for (const [sec, f] of SECRETS) if (typeof out?.[sec]?.[f] === 'string' && out[sec][f]) out[sec][f] = seal(DATA_DIR, out[sec][f]);
+  writeFileAtomic(FILE, JSON.stringify(out, null, 2), { mode: 0o600 });
 }
 
 function merge(base, over) {
@@ -124,7 +142,7 @@ export function getPublicSettings() {
     s[sec][f] = mask(s[sec][f]);
   }
   for (const [sec, f, env] of URL_ENV) if (process.env[env]) source[`${sec}.${f}`] = 'env (locked)';
-  return { ...s, _source: source, _themes: THEMES, _palette: resolvePalette(s.look) };
+  return { ...s, _source: source, _themes: THEMES, _palette: resolvePalette(s.look), _vault: protection(DATA_DIR) };
 }
 
 /** Partial update from the Settings screen. Masked/empty secrets mean "keep". */
@@ -187,7 +205,7 @@ export function updateSettings(patch) {
     next.approvals = { ...DEFAULTS.approvals, ...(next.approvals || {}) };
     for (const s of STAGE_NAMES) if (patch.approvals[s]) next.approvals[s] = patch.approvals[s] === 'wait' ? 'wait' : 'auto';
   }
-  writeFileAtomic(FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
+  writeStored(next);
   return getPublicSettings();
 }
 

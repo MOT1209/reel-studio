@@ -136,7 +136,6 @@ try {
     const h = await page.$('.trimh.end'); await h.scrollIntoViewIfNeeded(); const b = await h.boundingBox();
     await page.mouse.move(b.x + 4, b.y + 10); await page.mouse.down();
     await page.mouse.move(b.x - 140, b.y + 10, { steps: 8 }); await page.mouse.up();
-    if (process.env.UI_DEBUG) console.log('trim debug', b, await page.$eval('.trimh.end', (x) => x.style.left), await page.textContent('#edStatus'), JSON.stringify((await saved()).edit.trim));
     await until('trim saved', async () => { const e = (await saved()).edit.trim; return e?.end && e.end < 10.5; });
   });
 
@@ -149,6 +148,42 @@ try {
     const p = await saved();
     assert.equal(p.stages.render.status, 'idle');
     await shot('editor-edited');
+  });
+
+  await test('editor: mark in/out on the ruler and cut the range out (I / O / ✂); undo restores it', async () => {
+    const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();
+    const rb = await ruler.boundingBox();
+    // the toolbar can re-wrap after a mark, moving the timeline — measure the ruler before every click
+    const at = async (sec) => { const r = await page.$('.tl-row.ruler'); await r.scrollIntoViewIfNeeded(); const b = await r.boundingBox(); await page.mouse.click(b.x + sec * 70 + 1, b.y + 22); };
+    await at(2); await page.click('#markIn');
+    await at(3.5);
+    await page.click('#markOut');
+    assert.equal(await page.isDisabled('#cutRange'), false);
+    await page.click('#cutRange');
+    await until('cut saved', async () => { const c = (await saved()).edit.cuts; return c?.length === 1 && Math.abs(c[0].start - 2) < 0.05 && Math.abs(c[0].end - 3.5) < 0.05; });
+    assert.match(await page.textContent('#edDur'), /مقطع محذوف/);
+    const d = await api(`/api/projects/${proj.id}/render-data`);
+    assert.equal(d.segments.length, 2);
+    await page.click('#edUndo');
+    await until('cut undone', async () => (await saved()).edit.cuts.length === 0);
+    await page.click('#edRedo');
+    await until('cut redone', async () => (await saved()).edit.cuts.length === 1);
+    await shot('editor-cut');
+  });
+
+  await test('editor: shift-click selects several overlays; Delete removes them together', async () => {
+    const n0 = (await saved()).edit.overlays.length;
+    const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();
+    const rb = await ruler.boundingBox();
+    await page.mouse.click(rb.x + 0.5 * 70, rb.y + 22); await page.click('#addText');
+    await page.mouse.click(rb.x + 5 * 70, rb.y + 22); await page.click('#addText');
+    await until('two more saved', async () => (await saved()).edit.overlays.length === n0 + 2);
+    const blocks = await page.$$('#tlInner .blk.ov.text');
+    await blocks[blocks.length - 1].click({ position: { x: 20, y: 10 } });
+    await blocks[blocks.length - 2].click({ position: { x: 20, y: 10 }, modifiers: ['Shift'] });
+    await page.waitForSelector('#ovDelAll');
+    await page.keyboard.press('Delete');
+    await until('both removed', async () => (await saved()).edit.overlays.length === n0);
   });
 
   await test('skills page: run a built-in skill from its dialog', async () => {

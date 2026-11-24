@@ -21,7 +21,7 @@ export async function mountFonts(el) {
         <label>وزن الكابشن <select id="tCapW">${[400, 500, 600, 700, 800, 900].map((w) => `<option>${w}</option>`).join('')}</select></label>
         <label>الأرقام <select id="tDigits"><option value="latin">123 (لاتيني)</option><option value="arabic">١٢٣ (هندي/عربي)</option></select></label>
         <label>اتجاه الكابشن <select id="tDir"><option value="auto">تلقائي (حسب أول حرف قوي)</option><option value="rtl">يمين ← شمال</option><option value="ltr">شمال ← يمين</option></select></label>
-        <label>محاذاة <select id="tAlign"><option value="center">وسط</option><option value="right">يمين</option><option value="left">شمال</option></select></label>
+        <label>محاذاة <select id="tAlign"><option value="center">وسط</option><option value="right">يمين</option><option value="left">شمال</option><option value="justify">ضبط بالكشيدة (عربي)</option></select></label>
       </div>
       <div class="capstyles" id="capPrev"></div>
       <div class="tools"><button class="primary" id="tSave">💾 احفظ كافتراضي</button><span class="hint">المشاريع تقدر تغيّره من المحرر.</span></div>

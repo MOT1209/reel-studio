@@ -243,7 +243,7 @@ function renderStagePanel() {
         <div class="artools"><span class="hint">أدوات العربي على السكريبت:</span>
           <button class="small" data-arop="analyze">تحليل</button>
           <button class="small ai" data-arop="correct">✦ تصحيح</button><button class="small ai" data-arop="tashkeel">✦ تشكيل</button>
-          <button class="small ai" data-arop="msa">✦ للفصحى</button><button class="small ai" data-arop="egyptian">✦ للعامية</button><button class="small ai" data-arop="simplify">✦ تبسيط</button>
+          <button class="small ai" data-arop="msa">✦ للفصحى</button><button class="small ai" data-arop="egyptian">✦ للمصري</button><button class="small ai" data-arop="levantine">✦ للشامي</button><button class="small ai" data-arop="gulf">✦ للخليجي</button><button class="small ai" data-arop="simplify">✦ تبسيط</button>
           <button class="small" data-arop="strip-tashkeel">شيل التشكيل</button></div>
         <div id="arProposal"></div>`;
     }
@@ -323,7 +323,7 @@ function renderStagePanel() {
     const op = b.dataset.arop, text = $('#edText').value, box = $('#arProposal');
     if (op === 'analyze') {
       const r = await act(() => api('/api/arabic/analyze', { method: 'POST', body: JSON.stringify({ text }) }));
-      if (r) box.innerHTML = `<p class="hint">اللهجة: <b>${{ egyptian: 'عامية مصرية', msa: 'فصحى', mixed: 'مختلط', unknown: 'مش واضح' }[r.dialect]}</b> · ${r.words} كلمة · ${r.sentences.length} جملة · ${r.latinTerms} مصطلح إنجليزي</p>`;
+      if (r) box.innerHTML = `<p class="hint">اللهجة: <b>${esc(r.label)}</b> · ${r.words} كلمة · ${r.sentences.length} جملة · ${r.latinTerms} مصطلح إنجليزي</p>`;
       return;
     }
     b.disabled = true; box.innerHTML = '<p class="hint">بيشتغل…</p>';
