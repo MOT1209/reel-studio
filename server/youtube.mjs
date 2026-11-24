@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR, getSettings, writeFileAtomic } from './settings.mjs';
 import { addSecret } from './logger.mjs';
+import { seal, open as unseal } from './vault.mjs';
 
 const URLS = () => ({
   auth: process.env.YT_AUTH_URL || 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -18,10 +19,19 @@ const TOKEN_FILE = path.join(DATA_DIR, 'youtube-token.json');
 const pending = new Map(); // state → { verifier, redirectUri, at }
 
 const b64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const readToken = () => { try { const t = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); addSecret(t.refresh_token); addSecret(t.access_token); return t; } catch { return null; } };
+const TOKEN_KEYS = ['refresh_token', 'access_token'];
+function readToken() {
+  let t;
+  try { t = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); } catch { return null; }
+  for (const k of TOKEN_KEYS) if (t[k]) t[k] = unseal(DATA_DIR, t[k], `youtube ${k}`) || undefined;
+  addSecret(t.refresh_token); addSecret(t.access_token);
+  return t;
+}
 function writeToken(t) {
   addSecret(t.refresh_token); addSecret(t.access_token); // never logged
-  writeFileAtomic(TOKEN_FILE, JSON.stringify(t, null, 1), { mode: 0o600 });
+  const out = { ...t };
+  for (const k of TOKEN_KEYS) if (out[k]) out[k] = seal(DATA_DIR, out[k]); // encrypted at rest
+  writeFileAtomic(TOKEN_FILE, JSON.stringify(out, null, 1), { mode: 0o600 });
 }
 
 function creds() {

@@ -12,7 +12,7 @@
     "start": "node server/index.mjs",
     "mock": "node tools/mock-apis.mjs",
     "build-icons": "node tools/build-icons.mjs",
-    "test": "node tools/unit.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/robustness.mjs",
+    "test": "node tools/unit.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/vault-test.mjs && node tools/robustness.mjs",
     "test:library": "node tools/library-test.mjs",
     "test:arabic": "node tools/arabic-test.mjs",
     "test:unit": "node tools/unit.mjs",
@@ -22,7 +22,8 @@
     "test:export": "node tools/export-test.mjs",
     "test:ui": "node tools/ui-test.mjs",
     "test:all": "npm test && npm run e2e && npm run test:export && npm run test:ui && npm run templates",
-    "test:skills": "node tools/skills-test.mjs"
+    "test:skills": "node tools/skills-test.mjs",
+    "test:vault": "node tools/vault-test.mjs"
   },
   "dependencies": {
     "playwright": "^1.49.0"

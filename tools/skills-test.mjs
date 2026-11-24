@@ -78,7 +78,8 @@ await test('MCP: add server (secret header masked), sync tools — every tool st
   assert.ok(!JSON.stringify((await api('/api/mcp')).body).includes('mcp-secret-token'));
   const logf = path.join(DATA, 'logs', 'server.log');
   if (fs.existsSync(logf)) assert.ok(!fs.readFileSync(logf, 'utf8').includes('mcp-secret-token'));
-  assert.ok(!fs.readFileSync(path.join(DATA, 'mcp.json'), 'utf8').includes('"enabled": false'));
+  const mcpDisk = fs.readFileSync(path.join(DATA, 'mcp.json'), 'utf8');
+  assert.ok(!mcpDisk.includes('mcp-secret-token') && mcpDisk.includes('enc:v1:'), 'MCP auth header encrypted at rest');
   if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(DATA, 'mcp.json')).mode & 0o777, 0o600, 'mcp.json (holds the token) is owner-only');
 });
 await test('MCP: a tool that is not allowed never reaches the server', async () => {

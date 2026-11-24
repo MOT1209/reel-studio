@@ -179,6 +179,8 @@ async function main() {
   const ytNow = await api('/api/youtube');
   check('youtube: channel linked through the OAuth callback', cb.status === 200 && ytNow.linked && ytNow.channel?.title === 'قناة تجريبية', ytNow.channel?.title);
   check('youtube: tokens never sent to the browser', !/mock-refresh|mock-access/.test(JSON.stringify(ytNow) + cbHtml));
+  const tokDisk = fs.readFileSync(path.join(DATA, 'youtube-token.json'), 'utf8');
+  check('youtube: tokens encrypted at rest', !/mock-refresh|mock-access/.test(tokDisk) && /enc:v1:/.test(tokDisk));
   const replay = await fetch(hop.headers.get('location'), { redirect: 'manual' });
   check('youtube: OAuth state is single-use (replay refused)', replay.status === 400);
   await api(`/api/projects/${p.id}/publish`, { method: 'POST', body: '{}' });
