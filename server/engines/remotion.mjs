@@ -162,7 +162,12 @@ export const remotionEngine = {
     if (emitErr) throw emitErr;
   },
   async cleanup(ctx) {
-    if (ctx.rBrowser) { untrackBrowser(ctx.rBrowser); await Promise.race([ctx.rBrowser.close({ silent: true }).catch(() => {}), new Promise((r) => setTimeout(r, 5000))]); }
+    if (ctx.rBrowser) {
+      // untracked only once close() has settled: a close that hangs leaves it tracked, so the shutdown closes it again
+      const b = ctx.rBrowser;
+      const closed = await Promise.race([b.close({ silent: true }).then(() => true, () => true), new Promise((r) => setTimeout(() => r(false), 5000))]);
+      if (closed) untrackBrowser(b);
+    }
     ctx.rBrowser = null;
   },
 };

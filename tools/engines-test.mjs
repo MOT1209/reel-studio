@@ -225,6 +225,21 @@ await t('watchdog: an engine that stops producing frames is failed after RS_STAL
   } finally { delete process.env.RS_STALL_SEC; }
 });
 
+await t('ffmpeg dying while the engine is stuck ends the segment at once with the ffmpeg error (no watchdog wait)', async () => {
+  const { killAllChildren } = await import('../server/proc.mjs');
+  let abortedWith = null;
+  const stuck = { ...fake('remotion'), async produce(i0, i1, emit, ctx) {
+    await emit(i0, JPG[0]);
+    setTimeout(() => killAllChildren(), 300); // the encoder dies under a producer that waits for nothing it will get
+    await new Promise((_, rej) => ctx.signal.addEventListener('abort', () => { abortedWith = ctx.signal.reason; rej(new Error('cancelled')); }, { once: true }));
+  } };
+  EM.registerEngine(stuck);
+  const t0 = Date.now();
+  await assert.rejects(EM.renderVideo({ ...job({ total: 30 }), engine: 'remotion', fallback: false }), /ffmpeg exited/);
+  assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+  assert.match(String(abortedWith?.message), /ffmpeg exited/, 'the engine was told why');
+});
+
 await t('validateOutput rejects a wrong size, fps, duration, codec or a missing audio track', async () => {
   const f = shared.out;
   await assert.rejects(validateOutput(f, { width: 1080, height: H, fps: FPS }), /width 320 ≠ 1080/);

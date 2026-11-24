@@ -66,7 +66,10 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
   const segs = segments?.length ? segments : [[start, start + duration]];
   const f3 = (x) => Math.max(0, x).toFixed(3);
   const inputs = ['-i', voice, '-i', sfx];
-  let g = `[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=${(+voiceVolume).toFixed(3)},apad[v0];`;
+  // every stream in the graph has a fixed length: the voice is padded to the end of the last source range it is cut from,
+  // the result to the output duration (an endless apad relied on a later atrim; ffmpeg 8 then never finished pass 2)
+  const srcEnd = Math.max(duration, ...segs.filter((sg) => !isHold(sg)).map((sg) => sg[1])) + 0.5;
+  let g = `[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=${(+voiceVolume).toFixed(3)},apad=whole_dur=${srcEnd.toFixed(3)}[v0];`;
   const srcLabels = ['[v0]'];
   clips.forEach((c, k) => {
     const idx = 2 + k;
@@ -86,8 +89,8 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
     const [x, y] = sg, len = y - x, fd = Math.min(0.015, len / 4).toFixed(3);
     g += `[s${r++}]atrim=start=${f3(x)}:end=${f3(y)},asetpts=PTS-STARTPTS,afade=t=in:d=${fd},afade=t=out:st=${f3(len - fd)}:d=${fd}[k${k}];`;
   });
-  g += `${segs.map((_, k) => `[k${k}]`).join('')}concat=n=${segs.length}:v=0:a=1,apad[vp];`;
-  g += `[1:a]aresample=48000,aformat=channel_layouts=stereo[s];`;
+  g += `${segs.map((_, k) => `[k${k}]`).join('')}concat=n=${segs.length}:v=0:a=1,apad=whole_dur=${D}[vp];`;
+  g += `[1:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur=${D},atrim=0:${D}[s];`;
   let mixIn = '[v][s]', n = 2;
   if (music) {
     const mi = inputs.length / 2;
@@ -99,13 +102,13 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
     mixIn += '[m]'; n = 3;
   } else g += `[vp]anull[v];`;
   g += `${mixIn}amix=inputs=${n}:normalize=0:duration=longest,atrim=0:${D}`;
-  const pass1 = await run(FFMPEG, ['-hide_banner', '-nostats', ...inputs, '-filter_complex', `${g},loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json`, '-f', 'null', '-'], { signal });
+  const pass1 = await run(FFMPEG, ['-hide_banner', '-nostats', ...inputs, '-filter_complex', `${g},loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[aout]`, '-map', '[aout]', '-f', 'null', '-'], { signal });
   const m = pass1.err.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/);
   if (!m) throw new Error('loudnorm pass 1 produced no measurement');
   const j = JSON.parse(m[0]);
   log(`loudness measured: ${j.input_i} LUFS, TP ${j.input_tp} dB → target −14 LUFS${segs.length > 1 ? ` · ${segs.length - 1} cut${segs.length > 2 ? 's' : ''}` : ''}${segs.some(isHold) ? ` · ${segs.filter(isHold).length} pause(s)` : ''}${clips.length ? ` · ${clips.length} clip sound${clips.length > 1 ? 's' : ''}` : ''}${music ? ` · music ${Math.round(music.volume * 100)}%${music.duck ? ' (ducked under voice)' : ''}` : ''}`);
   const ln = `loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=${j.input_i}:measured_TP=${j.input_tp}:measured_LRA=${j.input_lra}:measured_thresh=${j.input_thresh}:offset=${j.target_offset}:linear=true`;
-  await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', `${g},${ln},aresample=48000`, '-c:a', 'aac', '-b:a', '192k', out], { signal });
+  await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', `${g},${ln},aresample=48000[aout]`, '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', out], { signal });
 }
 
 
@@ -240,8 +243,10 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
   };
   try {
     // racing the watchdog: an engine that ignores its signal cannot hold the render either (cleanup closes its browser)
-    try { await Promise.race([engine.produce(i0, i1, emit, segCtx), stalled]); }
-    catch (e) { failed = failed || e; throw failed; }
+    // ffmpeg dying settles the race too (only its failure: it can only finish after its input is closed below)
+    const ffFailed = ffDone.then(() => new Promise(() => {}));
+    try { await Promise.race([engine.produce(i0, i1, emit, segCtx), stalled, ffFailed]); }
+    catch (e) { failed = failed || e; stallCtl.abort(failed); throw failed; } // the engine stops too, with the real error
     await flushing;
     check();
     if (written !== i1) throw new Error(`engine ${engine.id} delivered ${written - i0} of ${i1 - i0} frames`);

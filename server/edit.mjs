@@ -118,7 +118,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
       if (!a || a.kind !== 'audio') throw Object.assign(new Error('مسار الصوت لازم يشاور على ملف صوت من المكتبة'), { status: 400 });
       const start = Math.max(0, Math.min(duration, Number(x.start) || 0));
       const end = Math.max(start + 0.1, Math.min(duration + 30, Number(x.end) || start + (a.duration || 3)));
-      return { id: /^[a-z0-9]{4,16}$/.test(x.id) ? x.id : crypto.randomBytes(4).toString('hex'), asset: a.id, name: a.name, start: +start.toFixed(3), end: +end.toFixed(3),
+      return { id: typeof x.id === 'string' && /^[a-z0-9]{4,16}$/.test(x.id) ? x.id : crypto.randomBytes(4).toString('hex'), asset: a.id, name: a.name, start: +start.toFixed(3), end: +end.toFixed(3),
         offset: Math.max(0, Number(x.offset) || 0), volume: num(x.volume, 0, 2, 1), fadeIn: num(x.fadeIn, 0, 5, 0), fadeOut: num(x.fadeOut, 0, 5, 0) };
     });
   }
@@ -131,7 +131,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
       const start = Math.max(0, Math.min(duration, Number(o.start) || 0));
       const end = Math.max(start + 0.2, Math.min(duration + 5, Number(o.end) || start + 3));
       const c = {
-        id: /^[a-z0-9]{4,16}$/.test(o.id) ? o.id : crypto.randomBytes(4).toString('hex'), kind: o.kind,
+        id: typeof o.id === 'string' && /^[a-z0-9]{4,16}$/.test(o.id) ? o.id : /* .test(undefined) is true ("undefined") */ crypto.randomBytes(4).toString('hex'), kind: o.kind,
         start: +start.toFixed(3), end: +end.toFixed(3),
         pos: POSITIONS.includes(o.pos) ? o.pos : o.kind === 'text' ? 'top' : 'center', anim: ANIMS.includes(o.anim) ? o.anim : 'fade',
         scale: num(o.scale, 0.15, 1, o.kind === 'text' ? 1 : 0.6), opacity: num(o.opacity, 0.1, 1, 1),

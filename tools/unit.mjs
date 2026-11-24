@@ -341,5 +341,11 @@ test('render gate: an audio track whose file left the library stops the render',
   assert.match(p.join('|'), /audio track 1: asset aaaaaaaaaaaa is not in the library/);
 });
 
+test('editor model: an overlay without an id gets a real one (regex.test(undefined) matched "undefined")', async () => {
+  const { cleanEdit } = await import('../server/edit.mjs');
+  const e = cleanEdit({ overlays: [{ kind: 'text', text: 'a', start: 0, end: 1 }, { kind: 'text', text: 'b', start: 0, end: 1, id: 'abcd1234' }] }, { duration: 10 });
+  assert.match(e.overlays[0].id, /^[0-9a-f]{8}$/); assert.equal(e.overlays[1].id, 'abcd1234');
+});
+
 for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }
 console.log(`\n${n} unit tests passed`);
