@@ -15,6 +15,7 @@ import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
+import { keptSegments, outDuration, srcToOut } from './timeline.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -426,32 +427,34 @@ const STAGE_FN = {
     }
     save(p);
     const data = renderData(p);
-    const { duration, start } = data;
+    const { duration, start, segments } = data;
     const audioCfg = getSettings().audio;
-    log(p, 'render', `${duration.toFixed(2)} s${start ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    log(p, 'render', `${duration.toFixed(2)} s${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
     await renderFrames({
       url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-      out: tmpVideo, duration, start, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
+      out: tmpVideo, duration, start, segments, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
       segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
-        if (jpg) { p.lastPreview = jpg; bus(p.id).emit('event', { type: 'preview', data: { t: start + i / FPS, jpeg: jpg.toString('base64') } }); }
+        if (jpg) { p.lastPreview = jpg; bus(p.id).emit('event', { type: 'preview', data: { t: i / FPS, jpeg: jpg.toString('base64') } }); }
       },
     });
     log(p, 'render', 'mixing voice + SFX' + (E.audio.music ? ' + music' : '') + ', normalising to −14 LUFS');
-    const inClip = (t) => t >= start && t < start + duration;
-    const cuts = data.scenes.slice(1).map((sc) => sc.start).filter(inClip).map((t) => t - start);
+    // SFX live in output time: a scene change or a pop that was cut out makes no sound
+    const toOut = (t) => srcToOut(t, segments);
+    const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
     const ticks = [];
-    data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null && inClip(p.words[it.at].start)) ticks.push(p.words[it.at].start - start); }));
+    data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
     writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, start, voiceVolume: E.audio.voiceVolume,
+      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, segments, voiceVolume: E.audio.voiceVolume,
+      clips: await clipSounds(E.overlays),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
     await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
@@ -591,7 +594,7 @@ export function cancelPublish(id) { publishing.get(id)?.abort(); }
 /** Subtitle export follows the project's trim and digit style. */
 export function subtitleOptions(p) {
   const e = p.edit || {};
-  return { offset: e.trim?.start || 0, end: e.trim?.end || Infinity, digits: e.typography?.digits || getSettings().look.typography?.digits || 'latin' };
+  return { segments: renderData(p).segments, digits: e.typography?.digits || getSettings().look.typography?.digits || 'latin' };
 }
 
 /** Everything render.html needs; times are resolved here so the page stays deterministic. */
@@ -604,6 +607,8 @@ export function renderData(p) {
   const full = Math.max(p.voice?.duration || 0, lastEnd + 0.3) + 0.6;
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
+  let segments = keptSegments(start, end, E.cuts);
+  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a cut list that removes everything is ignored
   const sc = p.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,
@@ -621,7 +626,8 @@ export function renderData(p) {
   scenes.forEach((s) => addMedia(s.image));
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
-    id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: end - start, start, end, full, fps: E.export.fps,
+    id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
+    music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
     words: p.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
@@ -629,5 +635,21 @@ export function renderData(p) {
     overlays: E.overlays.map((o) => ({ ...o, clip: p.clips?.[`ov-${o.id}`] ? clipRef(p, `ov-${o.id}`) : null })),
     fonts: { main: facesFor(typo.font), captions: facesFor(typo.captionFont) },
   };
+}
+/** Video overlays whose sound is turned up → mix inputs (source time). Files without an audio stream are skipped. */
+async function clipSounds(overlays) {
+  const out = [];
+  for (const o of overlays) {
+    if (o.kind !== 'video' || !(o.volume > 0)) continue;
+    const a = getAsset(o.asset);
+    if (!a || !(await hasAudio(a))) continue;
+    out.push({ file: assetFile(a), at: o.start, offset: o.offset || 0, length: Math.min(o.end - o.start, Math.max(0.1, (a.duration || 1e9) - (o.offset || 0))), volume: o.volume });
+  }
+  return out;
+}
+async function hasAudio(a) {
+  if (typeof a.hasAudio === 'boolean') return a.hasAudio;
+  const { out } = await run(process.env.FFPROBE_PATH || 'ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', assetFile(a)]).catch(() => ({ out: '' }));
+  return out.includes('audio');
 }
 const clipRef = (p, ref) => ({ ...p.clips[ref], url: `/api/projects/${p.id}/clips/${encodeURIComponent(p.clips[ref].key)}/` });

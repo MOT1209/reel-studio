@@ -82,7 +82,7 @@ export async function addAssetFromFile(tmpFile, { name, folder = '', tags = [], 
     }
     const meta = {
       id, kind, file, thumb, name: String(name || file).slice(0, 120), folder: cleanFolder(folder), tags: cleanTags(tags), size,
-      width: info.width, height: info.height, duration: kind === 'image' ? null : info.duration,
+      width: info.width, height: info.height, duration: kind === 'image' ? null : info.duration, hasAudio: kind === 'image' ? false : info.hasAudio,
       source: { type: source.type || 'upload', provider: source.provider || null, providerId: source.providerId ? String(source.providerId) : null, pageUrl: source.pageUrl || null, author: source.author || null, authorUrl: source.authorUrl || null },
       license: licenseRecord(license), createdAt: new Date().toISOString(),
     };

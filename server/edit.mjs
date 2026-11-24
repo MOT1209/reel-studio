@@ -7,6 +7,7 @@ import { getSettings, ASPECTS, QUALITIES } from './settings.mjs';
 import { cleanTypography } from './fonts.mjs';
 import { getAsset, assetFile, validAssetId } from './assets.mjs';
 import { run } from './render.mjs';
+import { cleanCuts } from './timeline.mjs';
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'none'];
@@ -25,6 +26,7 @@ export function effectiveEdit(e = {}) {
       quality: QUALITIES.includes(e.export?.quality) ? e.export.quality : s.render.quality || 'standard',
     },
     trim: { start: Math.max(0, Number(e.trim?.start) || 0), end: Number(e.trim?.end) > 0 ? Number(e.trim.end) : null },
+    cuts: Array.isArray(e.cuts) ? e.cuts : [],
     audio: {
       voiceVolume: num(e.audio?.voiceVolume, 0, 2, s.audio.voiceVolume ?? 1),
       sfxVolume: num(e.audio?.sfxVolume, 0, 1, s.audio.sfxVolume ?? 0.6),
@@ -66,6 +68,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
       out.audio.music = { asset: a.id, name: a.name, volume: num(e.audio.music.volume, 0, 1, 0.25), duck: e.audio.music.duck !== false, fadeIn: num(e.audio.music.fadeIn, 0, 5, 1), fadeOut: num(e.audio.music.fadeOut, 0, 5, 1.5) };
     }
   }
+  if (Array.isArray(e.cuts)) out.cuts = cleanCuts(e.cuts, duration);
   if (TRANSITIONS.includes(e.transition)) out.transition = e.transition;
   if (e.typography && typeof e.typography === 'object') out.typography = cleanTypography(e.typography);
   if (Array.isArray(e.overlays)) {
@@ -83,6 +86,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
         const a = getAsset(o.asset);
         if (!a || a.kind !== o.kind) throw Object.assign(new Error(`عنصر ${o.kind} بيشاور على ملف مش موجود في المكتبة`), { status: 400 });
         c.asset = a.id; c.name = a.name; c.offset = Math.max(0, Number(o.offset) || 0); // where inside the clip to start (video)
+        if (o.kind === 'video') c.volume = num(o.volume, 0, 2, 0); // clip sound: muted unless the user turns it up
       }
       return c;
     });

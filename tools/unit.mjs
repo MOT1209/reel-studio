@@ -154,4 +154,27 @@ test('script prompt: fixed length vs auto, reference scripts appended', () => {
   assert.ok(fixed[0].content.includes(ex[0].text.split('\n')[0]), 'examples included in system prompt');
 });
 
+const TL = await import('../server/timeline.mjs');
+const { buildCues } = await import('../server/subtitles.mjs');
+test('timeline: cuts are merged/clipped; kept segments and time mapping are exact', () => {
+  const cuts = TL.cleanCuts([{ start: 5, end: 6 }, { start: 2, end: 3 }, { start: 2.9, end: 3.5 }, { start: 9, end: 9.05 }, { start: 11, end: 20 }], 12);
+  assert.deepEqual(cuts, [{ start: 2, end: 3.5 }, { start: 5, end: 6 }, { start: 11, end: 12 }]);
+  const segs = TL.keptSegments(1, 12, cuts);
+  assert.deepEqual(segs, [[1, 2], [3.5, 5], [6, 11]]);
+  assert.equal(TL.outDuration(segs), 7.5);
+  assert.equal(TL.outToSrc(0, segs), 1); assert.equal(TL.outToSrc(1.2, segs), 3.7); assert.equal(TL.outToSrc(2.5, segs), 6);
+  assert.equal(TL.srcToOut(4, segs), 1.5); assert.equal(TL.srcToOut(3, segs), null); assert.equal(TL.srcToOut(0.5, segs), null);
+  for (const tau of [0, 0.7, 1.9, 2.6, 7.4]) assert.ok(Math.abs(TL.srcToOut(TL.outToSrc(tau, segs), segs) - tau) < 1e-9, `round trip ${tau}`);
+});
+test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue split by a cut keeps both parts', () => {
+  const words = tokenize('واحد اتنين تلاتة.\nأربعة خمسة ستة.\nسبعة تمانية').map((t, i) => ({ ...t, start: i, end: i + 0.8 }));
+  const segs = TL.keptSegments(0, 9, [{ start: 3, end: 6 }]); // removes the whole second line
+  const cues = buildCues(words, { segments: segs });
+  assert.ok(!cues.some((c) => /أربعة|خمسة|ستة/.test(c.text)));
+  assert.equal(cues.find((c) => c.text.startsWith('سبعة')).start, 3);
+  // the cut sits in the middle of «اتنين»: the cue becomes two parts and the cut word is in neither
+  const split = buildCues(words, { segments: TL.keptSegments(0, 9, [{ start: 1.2, end: 1.6 }]) }).slice(0, 2).map((c) => c.text);
+  assert.deepEqual(split, ['واحد', 'تلاتة.']);
+});
+
 console.log(`\n${n} unit tests passed`);

@@ -43,6 +43,18 @@
   const isArabic = (s) => /[؀-ۿ]/.test(s);
   const toArDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
   const dg = (s) => (TYPO.digits === 'arabic' ? toArDigits(s) : String(s));
+  // source time (narration) → output time (after trim + cuts); inside a cut → the output time where the cut sits
+  function outT(t) {
+    const segs = D.segments || [[D.start, D.end]];
+    let acc = 0;
+    for (const [a, b] of segs) { if (t < a) return acc; if (t <= b) return acc + (t - a); acc += b - a; }
+    return acc;
+  }
+  /** Next kept instant at/after t (skips cut ranges); null after the end. */
+  function keptFrom(t) {
+    for (const [a, b] of D.segments || [[D.start, D.end]]) { if (t < a) return a; if (t <= b) return t; }
+    return null;
+  }
 
   // ---------- text ----------
   function font(size, weight = 700, fam = FONT) { ctx.font = `${weight} ${size}px ${fam}`; }
@@ -842,7 +854,7 @@
   function drawHeader(t) {
     // progress (of the exported clip)
     ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
-    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp((t - D.start) / D.duration);
+    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(outT(t) / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
@@ -967,7 +979,9 @@
     for (const [id, m] of Object.entries(D.media || {})) {
       if (m.kind === 'image') jobs.push(loadImage(m.src).then((im) => IMG.set(id, im)));
       else if (m.kind === 'video' && PREVIEW && !VID.has(id)) {
-        const v = document.createElement('video'); v.src = m.src; v.muted = true; v.playsInline = true; v.preload = 'auto'; VID.set(id, v);
+        const v = document.createElement('video'); v.src = m.src; v.playsInline = true; v.preload = 'auto'; VID.set(id, v);
+        const vol = Math.max(0, ...(D.overlays || []).filter((o) => o.asset === id).map((o) => o.volume || 0));
+        v.muted = !(vol > 0); v.volume = Math.min(1, vol || 0);
         jobs.push(new Promise((r) => { v.onloadeddata = r; v.onerror = r; setTimeout(r, 4000); }));
       }
     }
@@ -1008,14 +1022,34 @@
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
     if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
     let t = D.start;
+    let music = null;
+    const setMusic = () => {
+      if (music) { music.pause(); music = null; }
+      if (D.music) { music = new Audio(D.music.src); music.loop = true; }
+    };
+    setMusic();
+    const syncMusic = () => {
+      if (!music) return;
+      // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
+      const speaking = D.words.some((w) => t >= w.start - 0.05 && t <= w.end + 0.2);
+      music.volume = Math.min(1, D.music.volume * (speaking ? 0.35 : 1));
+      if (PLAYING && music.paused) { music.currentTime = outT(t) % (music.duration || 1e9); music.play().catch(() => {}); }
+      if (!PLAYING && !music.paused) music.pause();
+    };
     const setPlaying = (on) => {
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
-      if (on) { if (t >= D.end - 0.05) t = D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
+      if (on) { if (t >= D.end - 0.05) t = D.start; t = keptFrom(t) ?? D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
+      if (music) { music.pause(); }
     };
     const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
     let lastPost = 0;
     const loop = (now) => {
-      if (PLAYING) { t = audio.currentTime; if (t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } }
+      if (PLAYING) {
+        t = audio.currentTime;
+        const k = keptFrom(t); // jump over cut ranges, like the export does
+        if (k === null || t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } else if (k > t + 0.01) { t = k; audio.currentTime = k; if (music) music.currentTime = outT(t) % (music.duration || 1e9); }
+      }
+      syncMusic();
       drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
@@ -1029,7 +1063,7 @@
       if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }
