@@ -663,12 +663,16 @@
     return { x: (DW - W) / 2, y: cy - h / 2, w: W, h };
   }
   function drawOverlays(t) {
+    // draw order = array order: later overlays are in front (layer order); position/scale/opacity/rotation may be keyframed
     for (const o of D.overlays || []) {
       if (t < o.start || t > o.end) continue;
+      const kp = ReelAnim.sample(o, t - o.start);
       const kin = o.anim === 'none' ? 1 : eOut(prog(t, o.start, 0.3)), kout = o.anim === 'none' ? 0 : eInOut(prog(t, o.end - 0.25, 0.25));
-      const a = kin * (1 - kout) * o.opacity;
+      const a = kin * (1 - kout) * Math.max(0, Math.min(1, kp.opacity));
       if (a <= 0.001) continue;
       ctx.save(); ctx.globalAlpha = a;
+      ctx.translate(kp.x * DW, kp.y * DH); // keyframed / manual offset (fraction of the design size)
+      const rotAbout = (cx, cy) => { if (kp.rot) { ctx.translate(cx, cy); ctx.rotate((kp.rot * Math.PI) / 180); ctx.translate(-cx, -cy); } };
       if (o.kind === 'text') {
         const size = o.size * (CAP.scale || 1);
         const lines = wrap(o.text, DW * 0.86 * o.scale, size, 800);
@@ -676,6 +680,8 @@
         font(size, 800); const w = Math.min(DW - 40, Math.max(...lines.map((l) => ctx.measureText(l).width)) + size * 1.2);
         const cy = o.pos === 'top' ? DH * 0.1 + h / 2 : o.pos === 'bottom' ? DH * 0.9 - h / 2 : DH / 2;
         ctx.translate(DW / 2, cy);
+        if (kp.rot) ctx.rotate((kp.rot * Math.PI) / 180);
+        if (kp.scale !== o.scale && o.scale > 0) { const k = kp.scale / o.scale; ctx.scale(k, k); }
         if (o.anim === 'pop') { const k = lerp(0.6, 1, eBack(prog(t, o.start, 0.45))); ctx.scale(k, k); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 80 - kout * 80, 0);
         if (o.box) { rrect(-w / 2, -h / 2, w, h, size * 0.4); ctx.fillStyle = hexA(C.card, 0.88); ctx.fill(); ctx.strokeStyle = hexA(o.color || C.accent, 0.7); ctx.lineWidth = 2.5; ctx.stroke(); }
@@ -683,7 +689,8 @@
       } else {
         const img = mediaDrawable(`ov-${o.id}`, o.asset, t, t - o.start, o.offset || 0);
         const m = D.media[o.asset] || {};
-        const b = overlayBox(o, m.width, m.height);
+        const b = overlayBox({ ...o, scale: kp.scale }, m.width, m.height);
+        rotAbout(b.x + b.w / 2, b.y + b.h / 2);
         if (o.anim === 'pop') { const k = lerp(0.7, 1, eBack(prog(t, o.start, 0.45))); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.translate(-(b.x + b.w / 2), -(b.y + b.h / 2)); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);
         if (o.pos !== 'full') { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24; rrect(b.x, b.y, b.w, b.h, 18); ctx.fillStyle = C.card; ctx.fill(); ctx.restore(); }

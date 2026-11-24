@@ -1,4 +1,5 @@
 // External API clients: OpenAI-compatible LLM (FreeLLMAPI), ElevenLabs TTS, Deepgram STT.
+import { fetchRetry } from './net.mjs';
 const trimSlash = (u) => String(u || '').replace(/\/+$/, '');
 
 async function failText(res) {
@@ -157,7 +158,7 @@ export async function testDeepgram(settings) {
 export async function listVoices(settings) {
   const { baseUrl, apiKey } = settings.elevenlabs;
   if (!apiKey) throw new Error('ElevenLabs API key is missing (Settings).');
-  const res = await fetch(`${trimSlash(baseUrl)}/v1/voices`, { headers: { 'xi-api-key': apiKey } });
+  const res = await fetchRetry(`${trimSlash(baseUrl)}/v1/voices`, { headers: { 'xi-api-key': apiKey } }, { timeout: 20000, retries: 2, label: 'ElevenLabs' });
   if (!res.ok) throw new Error(`ElevenLabs ${await failText(res)}`);
   const j = await res.json();
   return (j.voices || []).map((v) => ({ id: v.voice_id, name: v.name, labels: v.labels || {}, category: v.category }));
@@ -171,14 +172,14 @@ export async function ttsWithTimestamps(settings, text, { signal } = {}) {
   if (!apiKey) throw new Error('ElevenLabs API key is missing (Settings).');
   if (!voiceId) throw new Error('No ElevenLabs voice selected (Settings → load voices).');
   const url = `${trimSlash(baseUrl)}/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps?output_format=mp3_44100_128`;
-  const res = await fetch(url, {
+  const res = await fetchRetry(url, {
     method: 'POST', signal,
     headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ text, model_id: modelId || 'eleven_multilingual_v2', voice_settings: {
       stability: settings.elevenlabs.stability ?? 0.45, similarity_boost: 0.8, style: settings.elevenlabs.style ?? 0.2, use_speaker_boost: true,
       ...(Number(settings.elevenlabs.speed) && Number(settings.elevenlabs.speed) !== 1 ? { speed: Number(settings.elevenlabs.speed) } : {}),
     } }),
-  });
+  }, { timeout: 180000, retries: 2, label: 'ElevenLabs', idempotent: false }); // billed per character: never re-sent once it may have arrived
   if (!res.ok) throw new Error(`ElevenLabs ${await failText(res)}`);
   const j = await res.json();
   const al = j.alignment || j.normalized_alignment;
@@ -193,11 +194,11 @@ export async function transcribeWords(settings, audioBuf, mime, { signal } = {})
   const { baseUrl, apiKey, model, language } = settings.deepgram;
   if (!apiKey) throw new Error('Deepgram API key is missing (Settings).');
   const q = new URLSearchParams({ model: model || 'nova-3', language: language || 'ar', punctuate: 'true' });
-  const res = await fetch(`${trimSlash(baseUrl)}/v1/listen?${q}`, {
+  const res = await fetchRetry(`${trimSlash(baseUrl)}/v1/listen?${q}`, {
     method: 'POST', signal,
     headers: { Authorization: `Token ${apiKey}`, 'Content-Type': mime || 'audio/mpeg' },
     body: audioBuf,
-  });
+  }, { timeout: 300000, retries: 2, label: 'Deepgram', idempotent: false }); // billed per minute
   if (!res.ok) throw new Error(`Deepgram ${await failText(res)}`);
   const j = await res.json();
   const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];

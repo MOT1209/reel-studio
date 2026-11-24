@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { DATA_DIR, ROOT } from '../settings.mjs';
+import { trackBrowser, untrackBrowser, trackChild } from '../proc.mjs';
 
 const require = createRequire(import.meta.url);
 const SRC_DIR = path.join(ROOT, 'remotion');
@@ -39,7 +40,7 @@ export async function ensureBundle(log = () => {}) {
     const t0 = Date.now();
     log('remotion: building the composition bundle (first time after an update, ~15 s)');
     await new Promise((res, rej) => {
-      const child = spawn(process.execPath, [path.join(ROOT, 'server', 'engines', 'remotion-bundle.mjs'), ENTRY, tmp, PUBLIC_PATH], { cwd: ROOT, windowsHide: true });
+      const child = trackChild(spawn(process.execPath, [path.join(ROOT, 'server', 'engines', 'remotion-bundle.mjs'), ENTRY, tmp, PUBLIC_PATH], { cwd: ROOT, windowsHide: true }));
       let err = '';
       child.stdout.on('data', (d) => { for (const l of String(d).split('\n')) { const m = /^progress (\d+)/.exec(l); if (m) log(`remotion: bundling ${m[1]}%`); } });
       child.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
@@ -115,7 +116,7 @@ export const remotionEngine = {
     ctx.browserExecutable = findBrowser();
     ctx.browserErrors = [];
     ctx.chromiumOptions = chromiumOptions();
-    ctx.rBrowser = await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, logLevel: 'error' });
+    ctx.rBrowser = trackBrowser(await R.openBrowser('chrome', { browserExecutable: ctx.browserExecutable, chromiumOptions: ctx.chromiumOptions, logLevel: 'error' })); // closed on shutdown
     ctx.composition = await R.selectComposition({
       serveUrl: ctx.serveUrl, id: 'Reel', inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser, browserExecutable: ctx.browserExecutable, logLevel: 'error',
     });
@@ -156,7 +157,7 @@ export const remotionEngine = {
     if (emitErr) throw emitErr;
   },
   async cleanup(ctx) {
-    if (ctx.rBrowser) await Promise.race([ctx.rBrowser.close({ silent: true }).catch(() => {}), new Promise((r) => setTimeout(r, 5000))]);
+    if (ctx.rBrowser) { untrackBrowser(ctx.rBrowser); await Promise.race([ctx.rBrowser.close({ silent: true }).catch(() => {}), new Promise((r) => setTimeout(r, 5000))]); }
     ctx.rBrowser = null;
   },
 };

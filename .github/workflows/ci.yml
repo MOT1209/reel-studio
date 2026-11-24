@@ -1,0 +1,29 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: System packages (ffmpeg, Arabic-capable fonts for the system browser fallback)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: node tools/install-browser.mjs   # Remotion: headless shell + composition bundle
+      - run: npm test
+      - run: npm run test:xss
+      - run: npm run test:arabic-video
+      - run: npm run e2e
+      - run: npm run test:export
+      - run: npm run test:remotion
+      - run: npm run test:ui
+      - run: npm run templates
+      - run: npm audit --omit=dev

@@ -14,7 +14,7 @@ import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
 import { run, probeDuration, writeSfx, mixAudio, muxFinal, contactSheet, validateOutput } from './render.mjs';
 import { renderVideo } from './engines/manager.mjs';
-import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
+import { effectiveEdit, cleanEdit, layoutFor, prepareClip, checkRenderInputs } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
@@ -24,6 +24,7 @@ import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
+
 
 const cache = new Map(); // id → project
 const buses = new Map(); // id → EventEmitter
@@ -140,6 +141,7 @@ export function runPipeline(id) {
         log(p, stage, `▶ ${stage} started`);
         save(p);
         try {
+          // the render stage queues inside the engine manager (render.maxJobs), where the heavy part runs
           await STAGE_FN[stage](p, entry.controller.signal);
           if (entry.controller.signal.aborted) throw new Error('cancelled');
           st.endedAt = new Date().toISOString();
@@ -166,6 +168,16 @@ export function runPipeline(id) {
     }
   })();
   return true;
+}
+
+/** Stops every running pipeline and publish and waits for them (used by the graceful shutdown). */
+export async function shutdown() {
+  // running stages AND uploads (auto-publish starts after the stage loop, manual ones are not in `running` at all)
+  const ids = [...new Set([...running.keys(), ...publishing.keys()])];
+  for (const id of publishing.keys()) cancelPublish(id);
+  await Promise.all([...ids.map((id) => stopRun(id)), ...[...publishDone.values()]]);
+  for (const id of ids) { const p = cache.get(id); if (p) { try { save(p); } catch {} } }
+  return ids.length;
 }
 
 export async function cancel(id) {
@@ -266,19 +278,35 @@ function validateEdit(p, stage, body) {
 }
 
 export async function saveUpload(id, buf, filename, mime) {
-  const p = getProject(id);
-  if (!p) throw httpError(404, 'project not found');
   if (!buf?.length) throw httpError(400, 'empty upload');
-  if (!looksLikeMedia(buf)) throw httpError(415, 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)');
-  await stopForEdit(p, 'new voice-over uploaded');
-  const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
-  for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
-  fs.writeFileSync(path.join(projectDir(id), `upload.${ext}`), buf);
-  p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size: buf.length };
-  p.voiceMode = 'upload';
-  if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
-  log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(buf.length / 1024).toFixed(0)} KB)`);
-  save(p);
+  if (!looksLikeMedia(buf)) throw httpError(415, UPLOAD_BAD);
+  const tmp = path.join(projectDir(id), `.upload-${crypto.randomBytes(6).toString('hex')}`);
+  if (!getProject(id)) throw httpError(404, 'project not found');
+  fs.writeFileSync(tmp, buf);
+  return saveUploadFile(id, tmp, filename, mime);
+}
+const UPLOAD_BAD = 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)';
+
+/** Takes ownership of an already-written temp file (streamed from the request — never held in RAM). Always removes it on failure. */
+export async function saveUploadFile(id, tmp, filename, mime) {
+  try {
+    const p = getProject(id);
+    if (!p) throw httpError(404, 'project not found');
+    const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(64); const got = fs.readSync(fd, head, 0, 64, 0); fs.closeSync(fd);
+    if (!got) throw httpError(400, 'empty upload');
+    if (!looksLikeMedia(head.subarray(0, got))) throw httpError(415, UPLOAD_BAD);
+    await stopForEdit(p, 'new voice-over uploaded');
+    const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
+    for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
+    const dest = path.join(projectDir(id), `upload.${ext}`);
+    try { fs.renameSync(tmp, dest); } catch { fs.copyFileSync(tmp, dest); fs.rmSync(tmp, { force: true }); }
+    const size = fs.statSync(dest).size;
+    p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size };
+    p.voiceMode = 'upload';
+    if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
+    log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(size / 1024).toFixed(0)} KB)`);
+    save(p);
+  } finally { fs.rmSync(tmp, { force: true }); }
 }
 
 /** Magic-byte check: the bytes must be a container ffmpeg can read as audio, whatever the file name says. */
@@ -438,6 +466,11 @@ const STAGE_FN = {
     assertStoryboard(p.storyboard, { words: p.words });
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
+    { // validation gate: never start a long render on input the renderer cannot use
+      const rd = renderData(p);
+      const problems = checkRenderInputs({ words: p.words, storyboard: p.storyboard, edit: E, voiceExists: fs.existsSync(path.join(dir, 'voice.mp3')), hasAsset: (id) => !!getAsset(id), duration: rd.duration });
+      if (problems.length) throw new Error(`render input check failed: ${problems.join('; ')}`);
+    }
     const FPS = E.export.fps;
     // video clips (scene media and overlays) → frames on disk at the output fps and size
     p.clips = {};
@@ -481,23 +514,25 @@ const STAGE_FN = {
     const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
-    writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
+    // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
+    const vdur = Math.ceil(duration * FPS - 1e-9) / FPS;
+    writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, segments, voiceVolume: E.audio.voiceVolume,
-      clips: await clipSounds(E.overlays),
+      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
+      clips: await clipSounds(E.overlays, E.audio.tracks || []),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
-    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
-    // a zero exit code proves nothing: size, fps, codec, audio and duration are checked on the file itself
-    const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
-    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
+    // mux into a temp file, prove it with ffprobe (size, fps, codec, EXACT frame count, audio, durations), then rename
+    const probe = await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal,
+      expect: { width: L.width, height: L.height, fps: FPS, frames: total, duration: vdur, codec: job.codec } });
+    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.frames} frames · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
     fs.rmSync(path.join(dir, 'segments'), { recursive: true, force: true });
-    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), musicAsset?.id].filter(Boolean);
+    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), ...(E.audio.tracks || []).map((x) => x.asset), musicAsset?.id].filter(Boolean);
     p.render = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
@@ -626,6 +661,7 @@ export async function regenerateScene(id, k, { hint = '' } = {}) {
 
 // ---- publish (YouTube) ------------------------------------------------------------
 const publishing = new Map(); // id → AbortController
+const publishDone = new Map(); // id → promise of the running upload (the shutdown waits for it)
 function plog(p, line) {
   p.publish = p.publish || { status: 'idle', log: [] };
   const entry = `[${new Date().toISOString().slice(11, 19)}] ${redact(line)}`;
@@ -643,6 +679,7 @@ export async function publishProject(id, { privacy } = {}) {
   const priv = ['private', 'unlisted', 'public'].includes(privacy) ? privacy : getSettings().youtube.privacy || 'private';
   const ctl = new AbortController();
   publishing.set(id, ctl);
+  let finish; publishDone.set(id, new Promise((r) => { finish = r; }));
   p.publish = { ...(p.publish || {}), status: 'running', error: null, progress: 0, log: p.publish?.log || [] };
   const meta = videoMetadata(p);
   plog(p, `▶ رفع على قناة «${st.channel?.title || '?'}» (${priv}) — "${meta.title}"`);
@@ -664,7 +701,9 @@ export async function publishProject(id, { privacy } = {}) {
     plog(p, cancelled ? '■ النشر اتلغى' : `✖ ${e.message}`);
   } finally {
     publishing.delete(id);
+    publishDone.delete(id);
     save(p);
+    finish();
   }
   return p.publish;
 }
@@ -725,8 +764,14 @@ export function renderData(p) {
   };
 }
 /** Video overlays whose sound is turned up → mix inputs (source time). Files without an audio stream are skipped. */
-async function clipSounds(overlays) {
+async function clipSounds(overlays, tracks = []) {
   const out = [];
+  // independent audio tracks (sound effects, a second voice, extra music): same source-time mix as clip sounds, so cuts apply
+  for (const x of tracks) {
+    const a = getAsset(x.asset);
+    if (!a || a.kind !== 'audio' || !(x.volume > 0)) continue;
+    out.push({ file: assetFile(a), at: x.start, offset: x.offset || 0, length: Math.min(x.end - x.start, Math.max(0.1, (a.duration || 1e9) - (x.offset || 0))), volume: x.volume, fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 });
+  }
   for (const o of overlays) {
     if (o.kind !== 'video' || !(o.volume > 0)) continue;
     const a = getAsset(o.asset);

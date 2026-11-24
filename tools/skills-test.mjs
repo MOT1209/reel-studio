@@ -67,7 +67,7 @@ await test('custom skill: create → run → export → import (renamed on colli
 
 let sid;
 await test('MCP: add server (secret header masked), sync tools — every tool starts disallowed', async () => {
-  const r = await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: 'Mock MCP', url: `${MOCK}/mcp`, headers: { Authorization: 'Bearer mcp-secret-token' } }) });
+  const r = await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: 'Mock MCP', url: `${MOCK}/mcp`, allowPrivate: true, headers: { Authorization: 'Bearer mcp-secret-token' } }) });
   assert.equal(r.status, 201);
   assert.ok(!JSON.stringify(r.body).includes('mcp-secret-token'));
   sid = r.body.id;
@@ -100,6 +100,18 @@ await test('MCP: allowed tool runs (SSE reply); arguments are checked against it
   assert.deepEqual(body.servers[0].allowedTools, ['lookup_fact'], 'unknown tool names are dropped');
   assert.ok(body.calls.some((c) => c.tool === 'lookup_fact' && c.ok));
 });
+await test('MCP: an expired server session (HTTP 404) is re-opened and the call retried once', async () => {
+  const before = (await (await fetch(`${MOCK}/mcp/_stats`)).json()).initializes;
+  await fetch(`${MOCK}/mcp/_expire`);
+  const r = await api(`/api/mcp/${sid}/call`, { method: 'POST', body: JSON.stringify({ tool: 'lookup_fact', arguments: { query: 'again' } }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body)); assert.match(r.body.text, /again/);
+  assert.equal((await (await fetch(`${MOCK}/mcp/_stats`)).json()).initializes, before + 1, 'exactly one new session was opened');
+});
+await test('MCP: a redirect is not followed (headers never leave for another host)', async () => {
+  const r = await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: 'redir', url: `${MOCK}/mcp-redirect`, allowPrivate: true, headers: { Authorization: 'Bearer x' } }) });
+  const sy = await api(`/api/mcp/${r.body.id}/sync`, { method: 'POST' });
+  assert.equal(sy.status, 502); assert.match(sy.body.error, /بيحوّل|HTTP 302/);
+});
 await test('MCP skill: needs an allowed tool; runs through the same permission check', async () => {
   assert.equal((await api('/api/skills', { method: 'POST', body: JSON.stringify({ id: 'danger', name: 'x', kind: 'mcp', mcp: { server: sid, tool: 'delete_everything' } }) })).status, 400);
   const c = await api('/api/skills', { method: 'POST', body: JSON.stringify({ id: 'fact', name: 'حقيقة علمية', kind: 'mcp', mcp: { server: sid, tool: 'lookup_fact', args: { query: '{{input}}' } } }) });
@@ -113,6 +125,11 @@ await test('MCP skill: needs an allowed tool; runs through the same permission c
 });
 await test('MCP: only http(s) servers can be added', async () => {
   for (const url of ['file:///etc/passwd', 'stdio://python server.py', 'javascript:alert(1)']) assert.equal((await api('/api/mcp', { method: 'POST', body: JSON.stringify({ url }) })).status, 400, url);
+});
+await test('MCP: loopback / private addresses need an explicit allowPrivate; public ones do not', async () => {
+  for (const url of ['http://127.0.0.1:9/mcp', 'http://localhost/mcp', 'http://10.1.2.3/mcp', 'http://192.168.1.5/mcp', 'http://172.20.0.1/mcp', 'http://169.254.169.254/latest', 'http://[::1]/mcp']) assert.equal((await api('/api/mcp', { method: 'POST', body: JSON.stringify({ url }) })).status, 400, url);
+  assert.equal((await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: 'pub', url: 'https://example.com/mcp' }) })).status, 201);
+  assert.equal((await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: 'loc', url: 'http://127.0.0.1:9/mcp', allowPrivate: true }) })).status, 201);
 });
 
 console.log(`\n${n} skills/MCP tests passed${failed ? `, ${failed} FAILED` : ''}`);

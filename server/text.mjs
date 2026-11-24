@@ -6,7 +6,7 @@ import { ROOT } from './settings.mjs';
 export const WORDS_PER_SECOND = 2.6;
 export const LENGTHS = [10, 20, 30, 45, 60, 'auto'];
 export const STYLE_FILE = path.join(ROOT, 'references', 'script-style.md');
-export const EXAMPLES_DIR = path.join(ROOT, 'references', 'examples');
+export const EXAMPLES_DIR = process.env.RS_EXAMPLES_DIR ? path.resolve(process.env.RS_EXAMPLES_DIR) : path.join(ROOT, 'references', 'examples');
 
 /** Reference scripts the user dropped in references/examples (*.md / *.txt), newest style first. */
 export function readExamples(maxChars = 12000) {

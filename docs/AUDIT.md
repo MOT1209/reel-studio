@@ -152,8 +152,28 @@ Known limits of v3.0: Remotion renders at about half the legacy speed on CPU-onl
 switch); React-only scene layers are prepared for (`remotion/Reel.jsx`) but no template uses one yet; HyperFrames is
 evaluated only.
 
+## 6d. v3.1 — the audit branch (PR #4) brought onto v3.0
+
+PR #4 (a parallel audit + repair session, built on v2.2) was merged onto v3.0 instead of being merged as is. Kept and
+ported into the engine architecture, then fixed where its own review or this integration found problems:
+
+| From #4 | Where it lives now | Fixed during the integration |
+|---|---|---|
+| **`-shortest` dropped 1–2 frames per render** (confirmed on v3.0: 324 of 326 frames) | audio built to frames/fps; `muxFinal` without `-shortest`, into `.part.mp4`, ffprobe-checked (exact frame count, per-stream durations, AAC), then renamed | `validateOutput` (v3.0) had a 0.15 s tolerance and no frame count — it now counts frames |
+| Segment frame counts, damaged-segment recovery, atomic manifest | `engines/ffmpeg.mjs` `encodeSegmented` (every engine) | — |
+| Child/browser registry, ffmpeg timeouts, graceful SIGINT/SIGTERM | `proc.mjs` (+ Remotion browser and bundle child registered) | an engine whose `prepare` failed half-way never ran `cleanup` (browser left open) — found by the registry |
+| `RS_RENDER_WORKERS` validation | `engines/legacy.mjs` `parseWorkers` | — |
+| Render queue (`queue.mjs`, `RS_MAX_RENDERS`) | **dropped** — the engine manager already queues (`render.maxJobs`); `RS_MAX_RENDERS` overrides that setting; `GET /api/queue` reads the manager | two queues would have fought over the limit |
+| `fetchRetry` (timeouts + retry) | `net.mjs` | paid POSTs (TTS, STT) are no longer re-sent after they may have reached the provider; a missing `Retry-After` no longer means "retry at once"; the timeout now covers the body |
+| MCP: private-host guard, no redirects, session re-open | `mcp.mjs` | IPv4-mapped IPv6 (`[::ffff:127.0.0.1]`) and 100.64/10 were not treated as private; a 404 is matched to the session the request carried |
+| Streamed voice upload (413/415) | `index.mjs`, `pipeline.mjs` | a malformed file name left a temp file behind (decoded before streaming now) |
+| Graceful shutdown | `pipeline.shutdown` | uploads to YouTube were neither cancelled nor awaited |
+| Editor: keyframes, layer order, snapping/grid, audio tracks | `editor.js`, `anim.js`, `edit.mjs`, `render.js` | adding past 24 keyframes / 12 tracks was silently dropped on save (refused in the UI now); an exact edge snap was overridden by the grid; **the Remotion composition did not load `anim.js`** — every Remotion render fell back to legacy (unit test now compares the two script lists) |
+| Tests: phase1, Arabic final-video, stored XSS, CI | `tools/`, `.github/workflows/ci.yml` | the XSS test wrote its payload into `references/examples/` — the scripts sent to the LLM as style examples — and the file had been committed; it now uses `RS_EXAMPLES_DIR` in a temp folder and asserts the repo folder is untouched. Its project/settings checks really open the project and every tab. Unit tests added after the runner never ran (5 tests). CI also runs the Remotion test. |
+| `bench/` (Remotion PoC, 2 × 600 KB font, 2,800-line lockfile), `REMOTION-EVALUATION.md` | **removed** — superseded by the integrated engine and `RENDERING.md` (legacy scaling table kept there) | — |
+
 ## 7. Release checklist
-- [x] `npm test` (unit · Arabic · library · skills · vault · voice · engines · robustness), `npm run e2e`, `npm run test:export`, `npm run test:remotion`, `npm run test:ui`, `npm run templates` green
+- [x] `npm test` (unit · Arabic · library · skills · vault · voice · engines · robustness · phase1), `npm run e2e`, `npm run test:export`, `npm run test:remotion`, `npm run test:ui`, `npm run test:xss`, `npm run test:arabic-video`, `npm run templates` green
 - [x] `npm audit --omit=dev` → 0 vulnerabilities
 - [x] Fonts bundled only with their OFL licence files; icon licences in `assets/icons/LICENSES.md`
 - [x] No secret reaches the browser (settings, MCP, providers tested) or the logs (redaction tested)
