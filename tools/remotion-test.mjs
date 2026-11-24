@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-remotion-'));
 const DATA = path.join(TMP, 'data');
-const MOCK_PORT = 4393, PORT = 4307, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
+const MOCK_PORT = 4397, PORT = 4317, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg', FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const OUT = path.join(ROOT, 'output', 'remotion-test'); fs.mkdirSync(OUT, { recursive: true });
 const procs = [];

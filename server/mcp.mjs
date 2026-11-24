@@ -86,24 +86,31 @@ const sessions = new Map(); // server id → Mcp-Session-Id
  * server was registered as local (allowPrivate). Catches a public-looking name that points into the machine or the
  * network. Not a full guard against DNS rebinding — fetch() resolves again — see docs/AUDIT.md (open decision).
  */
-async function assertPublicDestination(s) {
+async function assertPublicDestination(s, deadline = Date.now() + 30000) {
   if (s.allowPrivate) return;
   const host = new URL(s.url).hostname.replace(/^\[|\]$/g, '');
   if (isPrivateHost(host)) throw err(400, `MCP ${s.name}: العنوان ده جوّه جهازك/شبكتك الداخلية — فعّل «خادم محلي» لو متأكد`);
   let addrs = [];
-  try { addrs = await dns.lookup(host, { all: true, verbatim: true }); } catch { return; } // unresolvable: fetch reports it
+  // the lookup counts against the request's deadline (dns.lookup has no timeout of its own)
+  const left = deadline - Date.now();
+  if (left <= 0) throw err(504, `MCP ${s.name}: انتهت المهلة`);
+  let timer;
+  const timedOut = new Promise((_, rej) => { timer = setTimeout(() => rej(err(504, `MCP ${s.name}: انتهت المهلة وهو بيدوّر على عنوان ${host}`)), left); });
+  try { addrs = await Promise.race([dns.lookup(host, { all: true, verbatim: true }).catch(() => []), timedOut]); } // unresolvable: fetch reports it
+  finally { clearTimeout(timer); }
   const priv = addrs.find((a) => isPrivateHost(a.address));
   if (priv) throw err(400, `MCP ${s.name}: الاسم ${host} بيشاور على عنوان داخلي (${priv.address}) — فعّل «خادم محلي» لو متأكد`);
 }
 
 async function rpc(s, method, params, { notify = false, timeout = 30000 } = {}) {
-  await assertPublicDestination(s);
+  const deadline = Date.now() + timeout; // one deadline for the destination check AND the request
+  await assertPublicDestination(s, deadline);
   const id = notify ? undefined : crypto.randomBytes(6).toString('hex');
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL, ...s.headers };
   // the session THIS request carries — never on initialize, which always opens a new one (MCP transport spec)
   const sent = method === 'initialize' ? null : (sessions.get(s.id) || null);
   if (sent) headers['Mcp-Session-Id'] = sent;
-  const res = await fetch(s.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', ...(notify ? {} : { id }), method, ...(params ? { params } : {}) }), signal: AbortSignal.timeout(timeout), redirect: 'manual' })
+  const res = await fetch(s.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', ...(notify ? {} : { id }), method, ...(params ? { params } : {}) }), signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())), redirect: 'manual' })
     .catch((e) => { throw err(502, `MCP ${s.name}: ${e.message}`); });
   if (res.status >= 300 && res.status < 400) throw err(502, `MCP ${s.name}: الخادم بيحوّل لعنوان تاني (HTTP ${res.status}) — حدّث الرابط`);
   // 404 on a request that carried a session = that session expired; only forget it if no newer one replaced it meanwhile

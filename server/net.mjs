@@ -41,7 +41,7 @@ export function retryDelay(res, attempt, base = Number(process.env.RS_RETRY_BASE
 export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2, label = 'request', onRetry, retryStatus = RETRY_STATUS, idempotent } = {}) {
   const user = init.signal;
   const safe = idempotent ?? ['GET', 'HEAD', undefined].includes(init.method?.toUpperCase?.() ?? init.method);
-  let lastErr;
+  let lastErr, noRetry = false;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (user?.aborted) throw new Error('cancelled');
     const ctl = new AbortController();
@@ -61,6 +61,8 @@ export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2,
         await sleep(d, user);
         continue;
       }
+      // the provider asked for a longer wait than the app accepts: whatever happens while reading this answer, no retry
+      if (wait !== null) noRetry = true;
       // read the body under the same timeout / cancel, then hand back a buffered Response
       const body = await res.arrayBuffer();
       done();
@@ -71,7 +73,7 @@ export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2,
       lastErr = ctl.signal.aborted && ctl.signal.reason instanceof Error ? ctl.signal.reason : e;
       const code = e?.cause?.code || e?.code;
       // a paid request that may have reached the provider (timeout, reset mid-way) is reported, never sent again
-      if (attempt >= retries || (!safe && !PRE_SEND_CODES.has(code))) break;
+      if (noRetry || attempt >= retries || (!safe && !PRE_SEND_CODES.has(code))) break;
       const d = retryDelay(null, attempt);
       onRetry?.(attempt + 1, lastErr.message, d);
       await sleep(d, user);

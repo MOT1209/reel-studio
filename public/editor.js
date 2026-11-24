@@ -580,7 +580,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     else if (g.type === 'trimEnd') E().trim = { ...E().trim, end: +Math.min(full, Math.max((E().trim.start || 0) + 1, tts)).toFixed(2) };
     else if (g.trk) {
       const x = E().audio.tracks.find((y) => y.id === g.trk), len = g.o0.end - g.o0.start;
-      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full + 30 - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); } // same bound as trkEnd
+      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full, full + 30 - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); } // start ≤ full (server), end ≤ full + 30 (as trkEnd)
       if (g.type === 'trkStart') { const v = g.o0.start + dx; x.start = +Math.max(0, Math.min(x.end - 0.1, v + snapBy(v, v, pts))).toFixed(2); }
       if (g.type === 'trkEnd') { const v = g.o0.end + dx; x.end = +Math.min(full + 30, Math.max(x.start + 0.1, v + snapBy(v, v, pts))).toFixed(2); }
     }
