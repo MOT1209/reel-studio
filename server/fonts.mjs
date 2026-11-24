@@ -102,7 +102,7 @@ export function cleanTypography(t = {}, ids = allFamilies().map((f) => f.id)) {
   for (const k of ['captionWeight', 'titleWeight']) if (num(t[k], 100, 1000) !== undefined) o[k] = Math.round(num(t[k], 100, 1000) / 100) * 100;
   if (num(t.letterSpacing, -2, 12) !== undefined) o.letterSpacing = num(t.letterSpacing, -2, 12);
   if (CAPTION_STYLES.includes(t.captionStyle)) o.captionStyle = t.captionStyle;
-  if (['center', 'right', 'left'].includes(t.align)) o.align = t.align;
+  if (['center', 'right', 'left', 'justify'].includes(t.align)) o.align = t.align;
   if (['auto', 'rtl', 'ltr'].includes(t.direction)) o.direction = t.direction;
   if (['latin', 'arabic'].includes(t.digits)) o.digits = t.digits;
   if (typeof t.captions === 'boolean') o.captions = t.captions;

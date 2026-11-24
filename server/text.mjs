@@ -23,6 +23,8 @@ export function readExamples(maxChars = 12000) {
 
 const DIALECT_RULE = {
   egyptian: '',
+  levantine: '\n\n## Language override\nWrite the SCRIPT in natural Levantine Arabic (الشامي), not Egyptian. Keep the structure and rhythm; the series question becomes «بتعرف ليش؟».',
+  gulf: '\n\n## Language override\nWrite the SCRIPT in natural Gulf Arabic (الخليجي), not Egyptian. Keep the structure and rhythm; the series question becomes «تدري ليش؟».',
   msa: '\n\n## Language override\nWrite the SCRIPT in clear Modern Standard Arabic (الفصحى المبسطة), not Egyptian colloquial. Everything else in the style guide (structure, rhythm, line length, the series question — as «هل تعرف لماذا؟») still applies.',
 };
 

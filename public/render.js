@@ -715,19 +715,31 @@
     const sp = size * 0.3, lh = size * 1.42;
     const placed = [];
     const y0 = CAP.cy - ((lines.length - 1) * lh) / 2;
+    // justified Arabic: every line but the last is stretched to the widest line with kashida (tatweel),
+    // the way Arabic is justified — word gaps stay the same
+    if (TYPO.align === 'justify' && lines.length > 1 && window.ReelKashida) {
+      font(size, TYPO.captionWeight, CAPFONT);
+      const lw = (ln) => ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
+      const target = Math.max(...lines.map(lw));
+      lines.slice(0, -1).forEach((ln) => {
+        if (lw(ln) >= target - 1 || !ln.some((x) => isArabic(D.words[x.i].text))) return;
+        const out = window.ReelKashida.justifyWords(ln.map((x) => dg(D.words[x.i].text)), target, (str) => ctx.measureText(str).width, { space: sp });
+        ln.forEach((x, k) => { x.str = out[k]; x.w = ctx.measureText(out[k]).width; });
+      });
+    }
     // line breaks are found in logical order; then each line is reordered for display (UAX #9 at word level),
     // so an English term or a number inside an Arabic line keeps its reading order
     const base = TYPO.direction === 'rtl' || TYPO.direction === 'ltr' ? TYPO.direction : window.ReelBidi.baseDir(c.idx.map((i) => D.words[i].text));
     lines.forEach((ln, li) => {
       const total = ln.reduce((a, x) => a + x.w, 0) + sp * (ln.length - 1);
       const order = window.ReelBidi.visualOrder(ln.map((x) => D.words[x.i].text), base);
-      const left = TYPO.align === 'right' ? CAP.cx + maxW / 2 - total : TYPO.align === 'left' ? CAP.cx - maxW / 2 : CAP.cx - total / 2;
+      const left = TYPO.align === 'right' ? CAP.cx + maxW / 2 - total : TYPO.align === 'left' ? CAP.cx - maxW / 2 : CAP.cx - total / 2; // center + justify
       if (base === 'rtl') {
         let x = left + total; // start at the right edge
-        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, str: it.str, x: x - it.w, w: it.w, y: y0 + li * lh }); x -= it.w + sp; }
       } else {
         let x = left;
-        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
+        for (const k of order) { const it = ln[k]; placed.push({ i: it.i, str: it.str, x, w: it.w, y: y0 + li * lh }); x += it.w + sp; }
       }
     });
     c.layout = { size, placed };
@@ -752,7 +764,7 @@
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     for (const p of placed) {
       const w = D.words[p.i];
-      const str = dg(w.text);
+      const str = p.str || dg(w.text);
       const lit = t >= w.start; // lights exactly at its spoken onset
       const next = D.words[p.i + 1];
       const active = lit && t < (next ? next.start : w.end + 0.3);

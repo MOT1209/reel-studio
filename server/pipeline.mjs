@@ -79,7 +79,7 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     approvals: Object.fromEntries(STAGES.map((s) => [s, (approvals[s] || getSettings().approvals?.[s]) === 'wait' ? 'wait' : 'auto'])),
     options: {
       forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish,
-      dialect: options.dialect === 'msa' ? 'msa' : 'egyptian', research: options.research !== false,
+      dialect: ['msa', 'levantine', 'gulf'].includes(options.dialect) ? options.dialect : 'egyptian', research: options.research !== false,
     },
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
@@ -298,7 +298,7 @@ const STAGE_FN = {
     const s = getSettings();
     const auto = p.seconds === 'auto';
     const target = auto ? null : Math.round(p.seconds * WORDS_PER_SECOND);
-    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`} · ${p.options?.dialect === 'msa' ? 'فصحى' : 'عامية مصرية'}`);
+    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`} · ${{ msa: 'فصحى', levantine: 'شامي', gulf: 'خليجي' }[p.options?.dialect] || 'عامية مصرية'}`);
     bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', reset: true } });
     p.research = null;
     if (p.options?.research !== false) {
@@ -325,7 +325,7 @@ const STAGE_FN = {
     p.script = { ...parsed, words: n, model: model || s.llm.model };
     log(p, 'script', `"${parsed.title}" — ${n} words ≈ ${(n / WORDS_PER_SECOND).toFixed(0)} s${target ? ` (target ${target})` : ''}${model ? ' · ' + model : ''}`);
     if (target && Math.abs(n - target) > target * 0.25) log(p, 'script', `⚠ word count is ${n > target ? 'above' : 'below'} target by ${Math.abs(n - target)} — the video will be ~${(n / WORDS_PER_SECOND).toFixed(0)} s`);
-    if (p.options?.dialect !== 'msa' && !/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
+    if ((p.options?.dialect || 'egyptian') === 'egyptian' && !/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
   },
 
   async voice(p, signal) {

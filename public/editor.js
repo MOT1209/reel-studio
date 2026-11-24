@@ -190,6 +190,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
         <label>حجم الكابشن <input type="number" min="28" max="90" step="2" data-f="typography.captionSize" value="${ty.captionSize || ''}" placeholder="52"></label></div>
         <div class="two"><label>الأرقام <select data-f="typography.digits"><option value="">الافتراضي</option>${opt(['latin', 'arabic'], ty.digits, { latin: '123', arabic: '١٢٣' })}</select></label>
         <label>اتجاه الكابشن <select data-f="typography.direction"><option value="">الافتراضي</option>${opt(['auto', 'rtl', 'ltr'], ty.direction, { auto: 'تلقائي', rtl: 'يمين←شمال', ltr: 'شمال←يمين' })}</select></label></div>
+        <label>محاذاة الكابشن <select data-f="typography.align"><option value="">الافتراضي</option>${opt(['center', 'right', 'left', 'justify'], ty.align, { center: 'وسط', right: 'يمين', left: 'شمال', justify: 'ضبط بالكشيدة' })}</select></label>
         <label class="row"><input type="checkbox" data-f="typography.captions" ${ty.captions === false ? '' : 'checked'}> كابشن في الفيديو</label>
         <h4>الصوت</h4>
         <label>صوت الراوي <span class="hint">${Math.round((E().audio.voiceVolume ?? 1) * 100)}%</span><input type="range" min="0" max="2" step="0.05" data-f="audio.voiceVolume" value="${E().audio.voiceVolume ?? 1}"></label>

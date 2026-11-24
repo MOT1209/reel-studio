@@ -136,7 +136,7 @@ await test('subtitles follow the trim (start at 0, nothing after the clip end) a
 });
 
 await test('1:1 1080p export (draft) renders at 1080×1080', async () => {
-  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { aspect: '1:1', resolution: 1080, quality: 'draft', fps: 30 }, trim: { start: 0, end: 3 }, overlays: [], audio: { music: null } } }) });
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { aspect: '1:1', resolution: 1080, quality: 'draft', fps: 30 }, trim: { start: 0, end: 3 }, overlays: [], audio: { music: null }, typography: { align: 'justify', captionSize: 64, captionFont: 'amiri', digits: 'arabic' } } }) });
   await api(`/api/projects/${id}/run`, { method: 'POST' });
   await waitStage(id, 'render', 'done');
   const v = probe(path.join(DATA, 'projects', id, 'video.mp4')).streams.find((s) => s.codec_type === 'video');
