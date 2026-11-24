@@ -317,7 +317,7 @@ export async function muxFinal({ video, audio, out, signal }) {
 }
 
 export async function contactSheet({ video, out, duration, aspect = '9:16' }) {
-  const [tw, th, cols] = { '9:16': [270, 480, 6], '1:1': [320, 320, 6], '16:9': [384, 216, 4] }[aspect] || [270, 480, 6];
+  const [tw, th, cols] = { '9:16': [270, 480, 6], '1:1': [320, 320, 6], '16:9': [384, 216, 4], '4:5': [288, 360, 5] }[aspect] || [270, 480, 6];
   const count = Math.min(36, Math.max(cols, Math.round(duration * 2)));
   const rows = Math.ceil(count / cols);
   const fps = (count / duration).toFixed(4);

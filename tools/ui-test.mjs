@@ -190,6 +190,17 @@ try {
     await until('order reset', async () => (await saved()).edit.sequence === null);
   });
 
+  await test('editor: choosing TikTok applies its format and shows the duration advice; safe-zone guides toggle', async () => {
+    await page.waitForFunction(() => document.querySelectorAll('#edPlatform option').length > 3);
+    await page.selectOption('#edPlatform', 'tiktok');
+    await until('platform saved', async () => { const e = (await saved()).edit.export; return e.platform === 'tiktok' && e.aspect === '9:16'; });
+    assert.equal(await page.inputValue('#edAspect'), '9:16');
+    assert.match(await page.textContent('#edDur'), /TikTok/);
+    await page.check('#edGuides');
+    await sleep(500);
+    await shot('editor-platform');
+  });
+
   await test('editor: shift-click selects several overlays; Delete removes them together', async () => {
     const n0 = (await saved()).edit.overlays.length;
     const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();

@@ -55,7 +55,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (voiceMode === 'upload' && !file) { $('#newErr').textContent = 'اختار ملف الصوت الأول.'; return; }
   const approvals = Object.fromEntries([...document.querySelectorAll('[data-appr]')].map((c) => [c.dataset.appr, c.checked ? 'wait' : 'auto']));
   try {
-    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked, dialect: $('#dialect').value, research: $('#research').checked, aspect: $('#newAspect').value } }) });
+    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked, dialect: $('#dialect').value, research: $('#research').checked, platform: $('#newPlatform').value } }) });
     if (voiceMode === 'upload') {
       await api(`/api/projects/${p.id}/upload`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(file.name) } });
       await api(`/api/projects/${p.id}/run`, { method: 'POST' });

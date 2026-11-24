@@ -46,8 +46,8 @@
         <label>اللغة
           <select id="dialect"><option value="egyptian">عامية مصرية</option><option value="msa">فصحى مبسطة</option><option value="levantine">شامي</option><option value="gulf">خليجي</option></select>
         </label>
-        <label>المقاس
-          <select id="newAspect"><option value="9:16">9:16 ريلز/شورتس</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 يوتيوب</option></select>
+        <label>المنصة
+          <select id="newPlatform"><option value="youtube-shorts">YouTube Shorts</option><option value="tiktok">TikTok</option><option value="instagram-reels">Instagram Reels</option><option value="facebook-reels">Facebook Reels</option><option value="instagram-feed">Instagram منشور 4:5</option><option value="youtube">YouTube عرضي 16:9</option><option value="square">مربع X / LinkedIn</option></select>
         </label>
       </div>
       <label class="row"><input type="checkbox" id="research" checked> بحث مبدئي قبل الكتابة (ملاحظات غير متحقق منها)</label>
@@ -216,7 +216,7 @@
         <a class="btnlink" href="https://unsplash.com/developers" target="_blank" rel="noopener">↗ سجّل تطبيق</a></section>
       <section><h4>اختيار الصور تلقائيًا</h4><p class="hint">المشاهد اللي قالبها «صورة/فيديو» بتاخد أول نتيجة مناسبة من أول مكتبة متوصلة (Pexels ← Pixabay ← Unsplash). من غير مكتبة، المشهد بيتحوّل لقالب مرسوم.</p></section>
       <section><h4>الرندر الافتراضي</h4>
-        <div class="two"><label>المقاس <select name="render.aspect"><option value="9:16">9:16</option><option value="1:1">1:1</option><option value="16:9">16:9</option></select></label>
+        <div class="two"><label>المقاس <select name="render.aspect"><option value="9:16">9:16</option><option value="4:5">4:5</option><option value="1:1">1:1</option><option value="16:9">16:9</option></select></label>
         <label>الدقة <select name="render.resolution"><option value="1080">1080p</option><option value="720">720p</option></select></label></div>
         <label>الجودة <select name="render.quality"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select></label>
         <label>مستوى الموسيقى الافتراضي <input type="range" name="audio.musicVolume" min="0" max="1" step="0.05"></label>

@@ -41,7 +41,9 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       <button class="small danger" id="cutRange" title="احذف المقطع المحدد من الفيديو والصوت والكابشن (X)" disabled>✂ احذف المقطع</button>
       <span class="hint" id="edDur"></span>
       <span class="sep"></span>
-      <select id="edAspect" title="مقاس الفيديو"><option value="9:16">9:16 طولي</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 عرضي</option></select>
+      <select id="edPlatform" title="المنصة: المقاس والفريمات ومنطقة الأمان والمدة"><option value="">منصة: بدون</option></select>
+      <label class="inl small" title="ارسم المناطق اللي أزرار المنصة بتغطيها (في المعاينة بس)"><input type="checkbox" id="edGuides"> منطقة الأمان</label>
+      <select id="edAspect" title="مقاس الفيديو"><option value="9:16">9:16 طولي</option><option value="4:5">4:5 منشور</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 عرضي</option></select>
       <select id="edRes" title="الدقة"><option value="1080">1080p</option><option value="720">720p</option></select>
       <select id="edFps" title="فريم/ث"><option>24</option><option>25</option><option selected>30</option><option>60</option></select>
       <select id="edQ" title="الجودة"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select>
@@ -519,7 +521,22 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   $('#edFps', el).value = String(ex.fps || 30);
   $('#edQ', el).value = ex.quality || 'standard';
   $('#edTr', el).value = E().transition || 'push';
-  const setAspectCss = () => { frame.parentElement.style.aspectRatio = { '9:16': '9/16', '1:1': '1/1', '16:9': '16/9' }[$('#edAspect', el).value]; };
+  const setAspectCss = () => { frame.parentElement.style.aspectRatio = { '9:16': '9/16', '1:1': '1/1', '16:9': '16/9', '4:5': '4/5' }[$('#edAspect', el).value]; };
+  // platforms: format + fps from the preset; safe-zone guides in the preview; duration warning in the toolbar
+  let PLATS = {};
+  api('/api/platforms').then((r) => {
+    PLATS = r.platforms;
+    $('#edPlatform', el).innerHTML = '<option value="">منصة: بدون</option>' + Object.entries(PLATS).map(([k, v]) => `<option value="${k}">${esc(v.name)}</option>`).join('');
+    $('#edPlatform', el).value = E().export.platform || '';
+    renderAll();
+  }).catch(() => {});
+  $('#edPlatform', el).addEventListener('change', (e) => {
+    const id = e.target.value, pf = PLATS[id];
+    change(() => { E().export = pf ? { ...E().export, platform: id, aspect: pf.aspect, resolution: pf.resolution, fps: pf.fps } : { ...E().export, platform: null }; });
+    if (pf) { $('#edAspect', el).value = pf.aspect; $('#edRes', el).value = String(pf.resolution); $('#edFps', el).value = String(pf.fps); setAspectCss(); }
+  });
+  $('#edGuides', el).addEventListener('change', (e) => post({ type: 'reel:guides', on: e.target.checked }));
+  frame.addEventListener('load', () => setTimeout(() => post({ type: 'reel:guides', on: $('#edGuides', el).checked }), 300));
   setAspectCss();
   for (const [sel_, key, num] of [['#edAspect', 'aspect'], ['#edRes', 'resolution', 1], ['#edFps', 'fps', 1], ['#edQ', 'quality']]) {
     $(sel_, el).addEventListener('change', (e) => { change(() => { E().export = { ...E().export, [key]: num ? Number(e.target.value) : e.target.value }; }); setAspectCss(); });
@@ -562,6 +579,12 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     $('#cutRange', el).disabled = !(mark.in != null && mark.out != null && mark.out - mark.in >= 0.1);
     $('#edDur', el).textContent = `الفيديو: ${outLen().toFixed(1)} ث${E().sequence?.length ? ' · ترتيب مخصص' : E().cuts.length ? ` · ${E().cuts.length} مقطع محذوف` : ''}`;
     $('#seqReset', el).hidden = !E().sequence?.length;
+    const pf = PLATS[E().export?.platform];
+    if (pf) {
+      const len = outLen();
+      const over = pf.maxSec && len > pf.maxSec, odd = pf.idealSec && (len < pf.idealSec[0] || len > pf.idealSec[1]);
+      $('#edDur', el).innerHTML = `${esc($('#edDur', el).textContent)} · <span class="${over ? 'bad' : odd ? 'warnc' : 'ok'}">${esc(pf.name)}: ${over ? `أطول من الحد (${pf.maxSec} ث)` : odd ? `المعتاد ${pf.idealSec[0]}–${pf.idealSec[1]} ث` : '✓ المدة مناسبة'}</span>`;
+    }
     renderTimeline(); renderInspector(); updateHead();
   }
   renderAll();

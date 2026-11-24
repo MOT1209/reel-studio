@@ -217,6 +217,34 @@ await test('custom order: the second half plays first, then a 1.5 s pause, then 
   await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { sequence: null } }) });
 });
 
+await test('platform presets: TikTok keeps captions out of its button zones; Instagram feed renders 4:5 at 1080×1350', async () => {
+  const { platforms } = await api('/api/platforms');
+  assert.ok(platforms.tiktok && platforms['youtube-shorts'] && platforms['instagram-reels'] && platforms['instagram-feed']);
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { platform: 'tiktok' }, trim: { start: 0, end: null }, cuts: [], sequence: null, typography: {} } }) });
+  let d = await api(`/api/projects/${id}/render-data`);
+  assert.equal(d.platform.id, 'tiktok'); assert.equal(d.layout.aspect, '9:16'); assert.equal(d.platform.check.level, 'hint', 'a ~11 s reel is shorter than TikTok\'s usual 15–60 s');
+  const { launchBrowser } = await import('../server/render.mjs');
+  const b = await launchBrowser();
+  try {
+    const pg = await b.newPage();
+    await pg.goto(`${BASE}/render.html?project=${id}`);
+    await pg.waitForFunction(() => window.__ready || window.__error);
+    const L = await pg.evaluate(() => window.__layout());
+    const z = platforms.tiktok.safe;
+    const capBottom = L.cap.cy + (52 * 1.42 * L.cap.lines) / 2;
+    assert.ok(capBottom <= L.DH * (1 - z.bottom) + 1, `captions end at ${capBottom.toFixed(0)} > safe ${(L.DH * (1 - z.bottom)).toFixed(0)}`);
+    assert.ok(L.cap.cx + L.cap.maxW / 2 <= L.DW * (1 - z.right) + 1, 'captions clear the right-side buttons');
+  } finally { await b.close(); }
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { platform: 'instagram-feed', quality: 'draft' }, trim: { start: 0, end: 3 } } }) });
+  d = await api(`/api/projects/${id}/render-data`);
+  assert.equal(d.layout.aspect, '4:5');
+  await api(`/api/projects/${id}/run`, { method: 'POST' });
+  await waitStage(id, 'render', 'done');
+  const v = probe(path.join(DATA, 'projects', id, 'video.mp4')).streams.find((s) => s.codec_type === 'video');
+  assert.equal(`${v.width}x${v.height}`, '1080x1350');
+  execFileSync(FFMPEG, ['-v', 'error', '-y', '-ss', '1.5', '-i', path.join(DATA, 'projects', id, 'video.mp4'), '-frames:v', '1', path.join(OUT, 'frame-4x5.jpg')]);
+});
+
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

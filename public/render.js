@@ -971,6 +971,17 @@
     ctx.restore();
   }
 
+  let GUIDES = false; // preview only: show the platform's unsafe zones (never in a render)
+  function drawGuides() {
+    const z = D.platform.safe;
+    ctx.save(); ctx.fillStyle = 'rgba(242,80,60,0.22)'; ctx.strokeStyle = 'rgba(242,80,60,0.8)'; ctx.setLineDash([8, 6]); ctx.lineWidth = 2;
+    const rect = (x, y, w, h) => { if (w > 0 && h > 0) { ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); } };
+    rect(0, 0, DW, DH * z.top); rect(0, DH * (1 - z.bottom), DW, DH * z.bottom);
+    rect(DW * (1 - z.right), DH * z.top, DW * z.right, DH * (1 - z.top - z.bottom)); rect(0, DH * z.top, DW * z.left, DH * (1 - z.top - z.bottom));
+    ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = `700 ${Math.round(DW / 30)}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.direction = 'rtl';
+    if (z.bottom) ctx.fillText(`منطقة أزرار ${D.platform.name}`, DW / 2, DH * (1 - z.bottom / 2));
+    ctx.restore();
+  }
   let TAU = null; // output time of the frame being drawn (progress bar, end fade); null → derived from t
   function drawFrame(t, tau) {
     t = Math.max(0, Number(t) || 0);
@@ -984,6 +995,7 @@
     step('card', drawCard);
     step('captions', drawCaptions);
     step('overlays', drawOverlays);
+    if (GUIDES && D.platform?.safe) drawGuides();
     // end fade (at the end of the exported clip)
     const fo = prog(TAU, D.duration - 0.35, 0.35);
     if (fo > 0) { ctx.fillStyle = hexA(C.bg, fo * 0.6); ctx.fillRect(0, 0, DW, DH); }
@@ -994,6 +1006,28 @@
     const L = D.layout || {};
     if (L.DW) { DW = L.DW; DH = L.DH; S = L.S; PLACE = L.place; TITLE = L.title; CAP = { scale: 1, ...L.caption }; }
     TYPO = { ...TYPO, ...(D.typography || {}) };
+    // platform safe zone: captions stay above the app's bottom UI and clear of its side buttons
+    const sz = D.platform?.safe;
+    if (sz && L.DW) {
+      const centered = Math.abs(CAP.cx - DW / 2) < 1;
+      const lh = (TYPO.captionSize || 52) * (CAP.scale || 1) * 1.42;
+      const maxCy = DH * (1 - sz.bottom) - (lh * CAP.lines) / 2 - 8;
+      if (CAP.cy > maxCy) {
+        CAP.cy = maxCy;
+        // the card makes room: shrink it (kept centred) so it ends above the captions
+        const capTop = CAP.cy - (lh * CAP.lines) / 2 - 14;
+        const centeredCard = Math.abs(PLACE.x + (CARD.w * PLACE.k) / 2 - DW / 2) < 2;
+        if (centeredCard && PLACE.y + CARD.h * PLACE.k > capTop) {
+          const k = Math.max(0.5, (capTop - PLACE.y) / CARD.h);
+          PLACE = { x: (DW - CARD.w * k) / 2, y: PLACE.y, k };
+        }
+      }
+      if (centered && (sz.left || sz.right)) {
+        const l = DW * sz.left, r = DW * (1 - sz.right);
+        CAP.maxW = Math.min(CAP.maxW, r - l - 24);
+        CAP.cx = (l + r) / 2;
+      }
+    }
     canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
     if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
   }
@@ -1031,6 +1065,7 @@
     buildChunks();
     buildLayers();
     window.renderData = D;
+    window.__layout = () => ({ cap: { ...CAP }, DW, DH }); // for tests: where the captions ended up
   }
   let PLAYING = false;
   async function boot() {
@@ -1109,6 +1144,7 @@
       const m = e.data;
       if (m.type === 'reel:seek') goTo(outT(Math.max(0, Number(m.t) || 0)));
       if (m.type === 'reel:seekOut') goTo(Number(m.tau) || 0);
+      if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
       if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }

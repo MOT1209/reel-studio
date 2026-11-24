@@ -17,6 +17,7 @@ import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
 import { keptSegments, outDuration, srcToOut, sequenceToSegments, isHold } from './timeline.mjs';
+import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -85,7 +86,8 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
-    edit: ['9:16', '1:1', '16:9'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
+    edit: PLATFORMS[options.platform] ? { export: { platform: options.platform, aspect: PLATFORMS[options.platform].aspect, resolution: PLATFORMS[options.platform].resolution, fps: PLATFORMS[options.platform].fps } }
+      : ['9:16', '1:1', '16:9', '4:5'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
     publish: { status: 'idle', log: [] },
   };
   fs.mkdirSync(projectDir(id), { recursive: true });
@@ -446,6 +448,7 @@ const STAGE_FN = {
     const { duration, start, segments } = data;
     const audioCfg = getSettings().audio;
     log(p, 'render', `${duration.toFixed(2)} s${E.sequence ? ` · custom order: ${segments.filter((x) => !isHold(x)).length} parts, ${segments.filter(isHold).length} pause(s)` : `${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''}`} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    if (data.platform?.check.level === 'over') log(p, 'render', `⚠ ${data.platform.check.message}`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
@@ -646,6 +649,7 @@ export function renderData(p) {
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
+    platform: E.export.platform ? { id: E.export.platform, ...PLATFORMS[E.export.platform], check: durationCheck(E.export.platform, outDuration(segments)) } : null,
     words: p.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
     accents: p.storyboard.accents, scenes, icons: p.icons || {}, media,
     overlays: E.overlays.map((o) => ({ ...o, clip: p.clips?.[`ov-${o.id}`] ? clipRef(p, `ov-${o.id}`) : null })),

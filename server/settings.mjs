@@ -59,7 +59,7 @@ export function resolvePalette(look = getSettings().look) {
   for (const k of COLOR_KEYS) if (HEX.test(look.colors?.[k] || '')) out[k] = look.colors[k];
   return out;
 }
-export const ASPECTS = ['9:16', '1:1', '16:9'];
+export const ASPECTS = ['9:16', '1:1', '16:9', '4:5'];
 export const QUALITIES = ['draft', 'standard', 'high'];
 export const STAGE_NAMES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 

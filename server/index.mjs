@@ -19,6 +19,7 @@ import * as A from './assets.mjs';
 import * as PV from './providers.mjs';
 import * as SK from './skills.mjs';
 import * as MCP from './mcp.mjs';
+import { PLATFORMS } from './platforms.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
@@ -205,6 +206,7 @@ async function route(req, res) {
       if (id && b === 'permissions' && m === 'PUT') return json(res, 200, MCP.setPermissions(id, await readJson(req)));
       if (id && b === 'call' && m === 'POST') { const body = await readJson(req); return json(res, 200, await MCP.callTool(id, body.tool, body.arguments || {})); }
     }
+    if (a === 'platforms' && m === 'GET') return json(res, 200, { platforms: PLATFORMS });
     if (a === 'logs' && m === 'GET') {
       let lines = [];
       try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
