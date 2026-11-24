@@ -7,16 +7,18 @@ import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } 
 import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
 import { estimateWords } from './estimate.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
-import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { storyboardMessages, reviewMessages, sceneMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { assertStoryboard } from './scene-schema.mjs';
 import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
-import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
+import { run, probeDuration, writeSfx, mixAudio, muxFinal, contactSheet, validateOutput } from './render.mjs';
+import { renderVideo } from './engines/manager.mjs';
 import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
-import { keptSegments, outDuration, srcToOut, sequenceToSegments, isHold } from './timeline.mjs';
+import { keptSegments, outDuration, srcToOut, outToSrc, sequenceToSegments, isHold } from './timeline.mjs';
 import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
@@ -239,6 +241,7 @@ export async function editStage(id, stage, body) {
     });
   } else {
     const { storyboard, fixes } = repairStoryboard(body._parsed, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(storyboard, { words: p.words });
     p.storyboard = storyboard; p.storyboardFixes = fixes;
     p.icons = iconsFor(storyboardNouns(storyboard));
   }
@@ -419,6 +422,8 @@ const STAGE_FN = {
       if (signal.aborted) throw e;
       log(p, 'storyboard', `⚠ self-review failed (${e.message}) — keeping the draft`);
     }
+    assertStoryboard(final.storyboard, { words: p.words });
+    log(p, 'storyboard', `scene JSON valid (schema ${final.storyboard.scenes.length} scenes)`);
     p.storyboard = final.storyboard;
     p.storyboardFixes = final.fixes;
     await autoVisuals(p, signal);
@@ -429,6 +434,8 @@ const STAGE_FN = {
 
   async render(p, signal) {
     const dir = projectDir(p.id);
+    // every engine receives validated scene JSON — an invalid storyboard stops here with the exact problems
+    assertStoryboard(p.storyboard, { words: p.words });
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
     const FPS = E.export.fps;
@@ -452,10 +459,16 @@ const STAGE_FN = {
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
-    await renderFrames({
-      url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-      out: tmpVideo, duration, start, segments, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
+    const total = Math.ceil(duration * FPS - 1e-9);
+    const job = await renderVideo({
+      project: p.id, engine: E.export.engine, fallback: getSettings().render.fallback !== false,
+      source: {
+        projectId: p.id, port: serverPort, data, url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
+        timeOf: (i) => outToSrc(i / FPS, segments),
+      },
+      total, out: tmpVideo, fps: FPS, width: L.width, height: L.height, quality: E.export.quality, codec: E.export.codec, bitrate: E.export.bitrate,
       segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
+      onJob: (j) => bus(p.id).emit('event', { type: 'job', data: j }),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
@@ -477,6 +490,9 @@ const STAGE_FN = {
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
     await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
+    // a zero exit code proves nothing: size, fps, codec, audio and duration are checked on the file itself
+    const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
+    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
@@ -485,7 +501,18 @@ const STAGE_FN = {
     p.render = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
+      engine: job.engine, fallbackFrom: job.fallbackFrom, codec: job.codec, bitrate: E.export.bitrate, renderSeconds: job.seconds, job: job.id,
     };
+    const outDir = getSettings().render.outputDir;
+    if (outDir) {
+      try {
+        fs.mkdirSync(outDir, { recursive: true });
+        const name = `${(p.topic || p.id).replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').trim().slice(0, 60) || p.id} - ${p.id}.mp4`;
+        fs.copyFileSync(path.join(dir, 'video.mp4'), path.join(outDir, name));
+        p.render.exported = path.join(outDir, name);
+        log(p, 'render', `copied to ${p.render.exported}`);
+      } catch (e) { log(p, 'render', `⚠ output folder: ${e.message}`); }
+    }
     log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved${p.render.credits.length ? ` · ${p.render.credits.length} credits` : ''}`);
   },
 };
@@ -543,6 +570,7 @@ export async function saveEdit(id, body) {
     if (typeof body.storyboard !== 'object') throw httpError(400, 'storyboard must be an object');
     const r = repairStoryboard(body.storyboard, words || p.words, { forceTemplate: p.options.forceTemplate });
     for (const sc of r.storyboard.scenes) if (sc.image && !getAsset(sc.image)) throw httpError(400, `scene image ${sc.image} is not in the library`);
+    assertStoryboard(r.storyboard, { words: words || p.words });
     sb = r.storyboard; fixes = r.fixes;
   }
   const edit = body?.edit ? cleanEdit(body.edit, { duration }) : null;
@@ -555,6 +583,45 @@ export async function saveEdit(id, body) {
   log(p, 'render', `✎ editor: ${[words && 'timing', sb && 'scenes', edit && Object.keys(edit).join('/')].filter(Boolean).join(' + ')} changed${fixes.length ? ` (${fixes.length} auto-fixes)` : ''}`);
   save(p);
   return { project: publicProject(p), fixes };
+}
+
+/**
+ * Regenerates one scene with the LLM (optionally steered by a hint), keeps its start word and media, repairs and
+ * validates the whole storyboard, and resets the render. The other scenes are untouched.
+ */
+const regenerating = new Set();
+export async function regenerateScene(id, k, { hint = '' } = {}) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  if (!p.words || !p.storyboard) throw httpError(409, 'storyboard is not ready');
+  const scenes = p.storyboard.scenes;
+  k = Number(k);
+  if (!Number.isInteger(k) || k < 0 || k >= scenes.length) throw httpError(400, `scene ${k} does not exist`);
+  if (regenerating.has(id)) throw httpError(409, 'a scene is already being regenerated');
+  regenerating.add(id);
+  try {
+    const sc = scenes[k];
+    const to = k + 1 < scenes.length ? scenes[k + 1].at : p.words.length;
+    const msgs = sceneMessages({ title: p.script?.title || p.topic, words: p.words.slice(sc.at, to), scene: sc, prev: scenes[k - 1], next: scenes[k + 1], hint: String(hint || '').slice(0, 300) });
+    const r = await chatStream(getSettings(), msgs, { temperature: 0.8, maxTokens: 900 });
+    let raw = extractJson(r.text);
+    if (Array.isArray(raw?.scenes)) raw = raw.scenes[0];
+    if (!raw || typeof raw !== 'object') throw httpError(502, 'the model did not return a scene');
+    // the scene keeps its place in time and the media the user picked for it
+    const next = { ...raw, at: sc.at, image: raw.template === 'photo' || sc.bg === 'full' ? sc.image : null, bg: sc.bg, imageOffset: sc.imageOffset };
+    if (k === 0) next.type = 'intro';
+    const rep = repairStoryboard({ ...p.storyboard, scenes: scenes.map((s, i) => (i === k ? next : s)) }, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(rep.storyboard, { words: p.words });
+    if (rep.storyboard.scenes.length !== scenes.length) throw httpError(422, 'the new scene would merge with a neighbour — try again');
+    await stopForEdit(p, 'scene regeneration');
+    p.storyboard = rep.storyboard;
+    p.icons = iconsFor(storyboardNouns(rep.storyboard));
+    resetFrom(p, 'render');
+    const ns = rep.storyboard.scenes[k];
+    log(p, 'storyboard', `↻ scene ${k + 1} regenerated: ${sc.template} → ${ns.template}${hint ? ` (hint: ${String(hint).slice(0, 60)})` : ''}${rep.fixes.length ? ` · ${rep.fixes.length} auto-fixes` : ''}`);
+    save(p);
+    return { project: publicProject(p), scene: ns, fixes: rep.fixes };
+  } finally { regenerating.delete(id); }
 }
 
 // ---- publish (YouTube) ------------------------------------------------------------

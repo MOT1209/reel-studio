@@ -221,6 +221,14 @@
         <label>الجودة <select name="render.quality"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select></label>
         <label>مستوى الموسيقى الافتراضي <input type="range" name="audio.musicVolume" min="0" max="1" step="0.05"></label>
         <label class="row"><input type="checkbox" name="audio.duck"> وطّي الموسيقى تحت صوت الراوي</label></section>
+      <section><h4>محرك الرندر</h4>
+        <p class="hint" id="engineStatus">…</p>
+        <div class="two"><label>المحرك <select name="render.engine"><option value="auto">تلقائي (Remotion لو متاح)</option><option value="remotion">Remotion</option><option value="legacy">كلاسيكي (Canvas + Playwright)</option></select></label>
+        <label>فيديوهات في نفس الوقت <select name="render.maxJobs"><option value="1">1 (مقترح لـ 8 GB رام)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label></div>
+        <label class="row"><input type="checkbox" name="render.fallback"> لو المحرك المختار فشل، كمّل بالمحرك الكلاسيكي</label>
+        <div class="two"><label>الترميز <select name="render.codec"><option value="h264">H.264 (كل المنصات)</option><option value="h265">H.265 (حجم أصغر)</option></select></label>
+        <label>معدل البت <select name="render.bitrate"><option value="">جودة ثابتة (حسب «الجودة»)</option><option value="4000">4 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option></select></label></div>
+        <label>فولدر التصدير (اختياري) <input name="render.outputDir" dir="ltr" placeholder="مثلاً D:\Videos\Reels — نسخة من كل فيديو بتتحط هنا"></label></section>
     </div>
 
     <p class="err" id="settingsErr"></p>

@@ -9,7 +9,11 @@ const TPL_AR = { zoom: 'تكبير', flow: 'تسلسل', cycle: 'دورة', time
 const TYPES = ['intro', 'question', 'concept', 'process', 'compare', 'stat', 'recap'];
 const TYPE_AR = { intro: 'بداية', question: 'سؤال', concept: 'فكرة', process: 'خطوات', compare: 'مقارنة', stat: 'أرقام', recap: 'خلاصة' };
 const STYLE_AR = { boxed: 'مربع', karaoke: 'كاريوكي', minimal: 'بسيط', outline: 'إطار' };
-const VISUAL_KEYS = ['type', 'template', 'title', 'items', 'organ', 'value', 'max', 'unit', 'query', 'image', 'bg', 'imageOffset'];
+const VISUAL_KEYS = ['type', 'template', 'title', 'items', 'organ', 'value', 'max', 'unit', 'query', 'image', 'bg', 'imageOffset', 'transition', 'titleAnim'];
+const SCENE_TR = ['push', 'fade', 'zoom', 'slide', 'wipe', 'rise', 'none'];
+const TR_AR = { push: 'دفع', fade: 'تلاشي', zoom: 'زووم', slide: 'انزلاق', wipe: 'مسح', rise: 'طلوع', none: 'قطع مباشر' };
+const TITLE_ANIMS = ['rise', 'fade', 'pop', 'words', 'none'];
+const TA_AR = { rise: 'طلوع', fade: 'تلاشي', pop: 'نطّة', words: 'كلمة كلمة', none: 'ثابت' };
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -47,7 +51,10 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       <select id="edRes" title="الدقة"><option value="1080">1080p</option><option value="720">720p</option></select>
       <select id="edFps" title="فريم/ث"><option>24</option><option>25</option><option selected>30</option><option>60</option></select>
       <select id="edQ" title="الجودة"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select>
-      <select id="edTr" title="الانتقالات"><option value="push">انتقال: دفع</option><option value="fade">تلاشي</option><option value="zoom">زووم</option><option value="slide">انزلاق</option><option value="none">قطع مباشر</option></select>
+      <select id="edTr" title="الانتقالات"><option value="push">انتقال: دفع</option><option value="fade">تلاشي</option><option value="zoom">زووم</option><option value="slide">انزلاق</option><option value="wipe">مسح</option><option value="rise">طلوع</option><option value="none">قطع مباشر</option></select>
+      <select id="edEngine" title="محرك الرندر — تلقائي = Remotion لو متاح، وإلا المحرك الكلاسيكي"><option value="auto">محرك: تلقائي</option><option value="remotion">Remotion</option><option value="legacy">كلاسيكي (Canvas)</option></select>
+      <select id="edCodec" title="ترميز الفيديو"><option value="h264">H.264</option><option value="h265">H.265 (أصغر)</option></select>
+      <select id="edBitrate" title="معدل البت — «جودة ثابتة» بيستخدم الجودة المختارة"><option value="">جودة ثابتة</option><option value="4000">4 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option></select>
       <span class="sep"></span>
       <span class="hint" id="edStatus">✓ محفوظ</span>
       <a class="btnlink small" href="/api/projects/${esc(id)}/subtitles.srt" download>SRT</a><a class="btnlink small" href="/api/projects/${esc(id)}/subtitles.vtt" download>VTT</a>
@@ -238,6 +245,12 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
         <label>كلمات البحث (إنجليزي) <input data-s="query" dir="ltr" value="${esc(sc.query || '')}"></label>
         <div class="tools"><button class="small" id="imgPick">من المكتبة</button><button class="small" id="imgStock">✦ اقترح من مكتبات الصور</button></div>
         <label>الخلفية <select data-s="bg">${opt(['card', 'full'], sc.bg || 'card', { card: 'داخل الكارت', full: 'الشاشة كلها (ورا الكارت)' })}</select></label>
+        <h5>الحركة</h5>
+        <div class="two"><label>دخول المشهد <select data-s="transition" data-null>${opt(['', ...SCENE_TR], sc.transition || '', { '': 'زي المشروع', ...TR_AR })}</select></label>
+        <label>حركة العنوان <select data-s="titleAnim" data-null>${opt(['', ...TITLE_ANIMS], sc.titleAnim || '', { '': 'افتراضي (طلوع)', ...TA_AR })}</select></label></div>
+        <h5>إعادة توليد بالذكاء الاصطناعي</h5>
+        <label>توجيه (اختياري) <input id="scHint" maxlength="300" placeholder="مثلاً: اعرضها كأرقام / خليها أبسط"></label>
+        <div class="tools"><button class="small" id="scRegen">↻ ولّد المشهد ده من جديد</button></div>
         <div class="tools"><button class="small" id="scSplit">✂ قسّم عند المؤشر</button>${sel.i > 0 ? '<button class="small danger" id="scDel">دمج مع اللي قبله</button>' : ''}</div>`;
     } else if (sel.kind === 'overlay') {
       const o = E().overlays.find((x) => x.id === sel.id);
@@ -296,7 +309,19 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     })));
     if (sel?.kind === 'scene') {
       const sc = S.storyboard.scenes[sel.i];
-      $$('[data-s]', box).forEach((i) => i.addEventListener('change', () => change(() => { sc[i.dataset.s] = val(i); })));
+      $$('[data-s]', box).forEach((i) => i.addEventListener('change', () => change(() => { sc[i.dataset.s] = 'null' in i.dataset && i.value === '' ? null : val(i); })));
+      $('#scRegen', box).addEventListener('click', async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.textContent = '… بيولّد';
+        try {
+          clearTimeout(saveTimer); dirty = true; await save(); // the server regenerates from the saved storyboard
+          const k = sel.i;
+          const r = await api(`/api/projects/${id}/scenes/${k}/regenerate`, { method: 'POST', body: JSON.stringify({ hint: $('#scHint', box).value }) });
+          hist.undo.push(snap()); hist.redo = []; // undo brings the previous scene back (and saves it)
+          S.storyboard = r.project.storyboard; sel = { kind: 'scene', i: k };
+          renderAll(); post({ type: 'reel:reload' });
+          toast(`مشهد ${k + 1}: ${TPL_AR[r.scene.template] || r.scene.template}${r.fixes?.length ? ` · ${r.fixes.length} تصليح تلقائي` : ''}`);
+        } catch (err) { toast(err.message, 'bad'); b.disabled = false; b.textContent = '↻ ولّد المشهد ده من جديد'; }
+      });
       $$('[data-item]', box).forEach((i) => i.addEventListener('change', () => change(() => { sc.items[i.dataset.item][i.dataset.k] = i.value; })));
       $('#itAdd', box)?.addEventListener('click', () => change(() => sc.items.push({ label: 'عنصر', icon: 'cell', value: null, at: null })));
       $('#itDel', box)?.addEventListener('click', () => change(() => sc.items.pop()));
@@ -530,6 +555,14 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   $('#edFps', el).value = String(ex.fps || 30);
   $('#edQ', el).value = ex.quality || 'standard';
   $('#edTr', el).value = E().transition || 'push';
+  $('#edEngine', el).value = ex.engine || 'auto';
+  $('#edCodec', el).value = ex.codec || 'h264';
+  $('#edBitrate', el).value = ex.bitrate ? String(ex.bitrate) : '';
+  // engines the server can actually use: an unavailable one is marked (renders would fall back to the classic engine)
+  api('/api/engines').then((r) => {
+    for (const e of r.engines) { const o = $(`#edEngine option[value="${e.id}"]`, el); if (o && !e.available) { o.textContent += ' (مش متاح)'; o.title = e.reason || ''; } }
+    if (!r.codecs?.h265) { const o = $('#edCodec option[value="h265"]', el); o.disabled = true; o.textContent += ' (مش في ffmpeg)'; }
+  }).catch(() => {});
   const setAspectCss = () => { frame.parentElement.style.aspectRatio = { '9:16': '9/16', '1:1': '1/1', '16:9': '16/9', '4:5': '4/5' }[$('#edAspect', el).value]; };
   // platforms: format + fps from the preset; safe-zone guides in the preview; duration warning in the toolbar
   let PLATS = {};
@@ -551,6 +584,9 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     $(sel_, el).addEventListener('change', (e) => { change(() => { E().export = { ...E().export, [key]: num ? Number(e.target.value) : e.target.value }; }); setAspectCss(); });
   }
   $('#edTr', el).addEventListener('change', (e) => change(() => { E().transition = e.target.value; }));
+  $('#edEngine', el).addEventListener('change', (e) => change(() => { E().export = { ...E().export, engine: e.target.value }; }));
+  $('#edCodec', el).addEventListener('change', (e) => change(() => { E().export = { ...E().export, codec: e.target.value }; }));
+  $('#edBitrate', el).addEventListener('change', (e) => change(() => { E().export = { ...E().export, bitrate: e.target.value ? Number(e.target.value) : null }; }));
   $('#edUndo', el).addEventListener('click', undo);
   $('#edRedo', el).addEventListener('click', redo);
   $('#edZoom', el).addEventListener('input', (e) => { pps = Number(e.target.value); renderTimeline(); });

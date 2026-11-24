@@ -105,8 +105,10 @@ try {
     await page.waitForSelector('.stage[data-stage="editor"]:not(.off)');
     await page.click('.stage[data-stage="editor"]');
     await page.waitForSelector('#tlInner .blk.scene');
-    const fr = page.frame({ url: /render\.html/ });
-    await until('preview ready', async () => fr && (await fr.evaluate(() => window.__ready === true)));
+    // the iframe may not have started loading yet: look the frame up on every try
+    const preview = () => page.frame({ url: /render\.html/ });
+    await until('preview ready', async () => preview() && (await preview().evaluate(() => window.__ready === true)));
+    const fr = preview();
     assert.ok((await page.$$('#tlInner .blk.word')).length > 10);
     await shot('editor');
   });
@@ -148,6 +150,35 @@ try {
     const p = await saved();
     assert.equal(p.stages.render.status, 'idle');
     await shot('editor-edited');
+  });
+
+  await test('editor: scene 2 animation presets (wipe in, word-by-word title) saved; "project default" clears them', async () => {
+    await page.selectOption('[data-s="transition"]', 'wipe');
+    await page.selectOption('[data-s="titleAnim"]', 'words');
+    await until('animation saved', async () => { const sc = (await saved()).storyboard.scenes[1]; return sc.transition === 'wipe' && sc.titleAnim === 'words'; });
+    await page.selectOption('[data-s="transition"]', '');
+    await until('default restored', async () => (await saved()).storyboard.scenes[1].transition === null);
+  });
+
+  await test('editor: regenerate scene 2 with the AI (hint) → new scene in the inspector, others untouched', async () => {
+    const before = (await saved()).storyboard.scenes;
+    await page.fill('#scHint', 'chart please');
+    await page.click('#scRegen');
+    await until('regenerated', async () => (await saved()).storyboard.scenes[1].template === 'chart', 30000);
+    await until('inspector shows it', async () => (await page.$eval('[data-s="template"]', (e) => e.value)) === 'chart');
+    const after = (await saved()).storyboard.scenes;
+    assert.deepEqual(after[0], before[0]);
+    await shot('editor-regenerated');
+  });
+
+  await test('editor: render engine / codec / bitrate choices are saved with the project', async () => {
+    assert.deepEqual(await page.$$eval('#edEngine option', (o) => o.map((x) => x.value)), ['auto', 'remotion', 'legacy']);
+    await page.selectOption('#edEngine', 'legacy');
+    await page.selectOption('#edBitrate', '8000');
+    await until('export saved', async () => { const e = (await saved()).edit.export; return e.engine === 'legacy' && e.bitrate === 8000; });
+    await page.selectOption('#edEngine', 'auto');
+    await page.selectOption('#edBitrate', '');
+    await until('export reset', async () => { const e = (await saved()).edit.export; return e.engine === 'auto' && e.bitrate === null; });
   });
 
   await test('editor: mark in/out on the ruler and cut the range out (I / O / ✂); undo restores it', async () => {

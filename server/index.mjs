@@ -10,6 +10,9 @@ import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.m
 const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram, openaiTts: testOpenAITts };
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
+import * as EM from './engines/manager.mjs';
+import { SCHEMA } from './scene-schema.mjs';
+import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
 import * as P from './pipeline.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
 import * as AR from './arabic.mjs';
@@ -101,7 +104,22 @@ async function route(req, res) {
     }
     if (a === 'settings') {
       if (m === 'GET') return json(res, 200, getPublicSettings());
-      if (m === 'PUT') return json(res, 200, updateSettings(await readJson(req)));
+      if (m === 'PUT') { const out = updateSettings(await readJson(req)); EM.setMaxJobs(getSettings().render.maxJobs); return json(res, 200, out); }
+    }
+    // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
+    if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
+    if (a === 'projects' && id && b === 'scenes' && stage !== undefined && action === 'regenerate' && m === 'POST') {
+      const body = await readJson(req);
+      return json(res, 200, await P.regenerateScene(id, stage, { hint: body?.hint }));
+    }
+    if (a === 'engines' && !id && m === 'GET') {
+      const fresh = new URL(req.url, 'http://x').searchParams.get('fresh') === '1';
+      return json(res, 200, { ...(await EM.engineStatus({ fresh })), selected: getSettings().render.engine || 'auto', jobs: EM.listJobs() });
+    }
+    if (a === 'render-jobs') {
+      if (!id && m === 'GET') return json(res, 200, { jobs: EM.listJobs() });
+      if (id && !b && m === 'GET') { const j = EM.getJob(id); return j ? json(res, 200, j) : json(res, 404, { error: 'no such job' }); }
+      if (id && b === 'cancel' && m === 'POST') return json(res, 200, { ok: EM.cancelJob(id) });
     }
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
     if (a === 'test' && m === 'POST' && TESTS[id]) {
@@ -317,6 +335,12 @@ async function route(req, res) {
     return sendFile(req, res, f, { cache: 'max-age=3600' });
   }
   if (m !== 'GET' && m !== 'HEAD') return json(res, 405, { error: 'method not allowed' });
+  // the Remotion composition bundle (built by engines/remotion.mjs), same origin as render data and fonts
+  if (parts[0] === 'remotion') {
+    const file = path.resolve(REMOTION_DIR, parts.length > 1 ? parts.slice(1).join('/') : 'index.html');
+    if (!file.startsWith(REMOTION_DIR + path.sep)) return json(res, 403, { error: 'forbidden' });
+    return sendFile(req, res, file);
+  }
   const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   const file = path.resolve(PUBLIC, rel);
   if (!file.startsWith(PUBLIC + path.sep)) return json(res, 403, { error: 'forbidden' });
@@ -335,8 +359,10 @@ const server = http.createServer(async (req, res) => {
     if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
+EM.setJobLog(path.join(path.dirname(logFile), 'render-jobs.jsonl'));
+EM.setMaxJobs(getSettings().render.maxJobs);
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
-  console.log(`Reel Studio v2 → http://${HOST}:${PORT}`);
+  console.log(`Reel Studio v3 → http://${HOST}:${PORT}`);
   if (!ff) console.warn('⚠ ffmpeg not found in PATH (set FFMPEG_PATH) — rendering will fail.');
 });

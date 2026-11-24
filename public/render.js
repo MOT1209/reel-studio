@@ -1,7 +1,10 @@
-/* Reel Studio renderer — window.drawFrame(t) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
- * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random). */
+/* Reel Studio renderer — drawFrame(t, tau) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
+ * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random).
+ * Shared by every engine: render.html boots one renderer on its #c canvas (legacy engine, editor preview);
+ * the Remotion composition creates its own with window.ReelRenderer.create(canvas, { host: 'remotion' }). */
 (() => {
   'use strict';
+  function createRenderer(canvas, opts = {}) {
   const C = {
     bg: '#0C1014', card: '#161C22', elev: '#202830', text: '#F4F3EE', sec: '#9AA5AE',
     accent: '#27B8C7', blue: '#5978FF', success: '#36C98F', warning: '#F28A30',
@@ -27,7 +30,6 @@
     TONE = { accent: C.accent, blue: C.blue, success: C.success, warning: C.warning, underline: C.text };
   }
 
-  const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   let D = null; // render data
 
@@ -906,17 +908,73 @@
   }
   function sceneIndexAt(t) { let k = 0; D.scenes.forEach((s, i) => { if (t >= s.start) k = i; }); return k; }
   /** Scene enter/exit: returns { alpha, scale, dx } for the chosen transition style. */
+  // Animation library (shared by the preview, the legacy engine and Remotion — one code path, identical frames).
+  // A scene's own transition / title animation wins over the project default; the NEXT scene's transition
+  // decides how this one leaves (enter and exit of one cut always match).
   function transitionState(sc, i, t) {
-    const style = D.transition || 'push';
-    if (style === 'none') return { alpha: t <= sc.end ? 1 : 0, scale: 1, dx: 0 };
-    const kin = i === 0 ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
-    const kout = t > sc.end ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
+    const style = sc.transition || D.transition || 'push';
+    const nextStyle = D.scenes[i + 1]?.transition || D.transition || 'push';
+    const out = t > sc.end;
+    // hard cut out: the next scene appears at once, so this one must vanish at once
+    if (out && nextStyle === 'none') return { alpha: 0, scale: 1, dx: 0 };
+    // wipe out: stays put and is cut back to the part the incoming scene has not reached yet (same edge)
+    if (out && nextStyle === 'wipe') return { alpha: 1, scale: 1, dx: 0, keep: 1 - eInOut(prog(t, sc.end, TRANS)) };
+    // wipe in: revealed from the right edge (the reading direction)
+    if (!out && style === 'wipe') return { alpha: 1, scale: 1, dx: 0, reveal: i === 0 ? 1 : eInOut(prog(t, sc.start, TRANS)) };
+    if (!out && style === 'none') return { alpha: 1, scale: 1, dx: 0 };
+    const kin = i === 0 || style === 'none' || style === 'wipe' ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
+    const kout = out ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
     const alpha = kin * (1 - kout);
+    if (style === 'rise') return { alpha, scale: 1, dx: 0, dy: (1 - kin) * SH * 0.35 - kout * SH * 0.2 };
     if (style === 'fade') return { alpha, scale: 1, dx: 0 };
     if (style === 'zoom') return { alpha, scale: lerp(0.82, 1, kin) * lerp(1, 1.18, kout), dx: 0 };
     if (style === 'slide') return { alpha: Math.min(1, alpha * 1.6), scale: 1, dx: (1 - kin) * SW * 0.9 - kout * SW * 0.9 };
     const push = 1 + 0.045 * eInOut(prog(t, sc.start, Math.max(1, sc.end - sc.start)));
     return { alpha, scale: push * lerp(0.94, 1, kin) * lerp(1, 1.08, kout), dx: (1 - kin) * 50 - kout * 50 }; // RTL: enter from the right
+  }
+  /**
+   * Scene title animation presets: rise (default), fade, pop (overshoot scale), words (word by word, in reading
+   * order — whole words only, so Arabic letters always keep their joined forms), none.
+   */
+  function drawSceneTitle(sc, t, color) {
+    const anim = sc.titleAnim || TYPO.titleAnim || 'rise';
+    const t0 = sc.start + 0.05;
+    const ta = anim === 'none' ? 1 : eOut(prog(t, t0, 0.35));
+    const opts = { size: 32, color, weight: TYPO.titleWeight };
+    if (anim === 'pop') {
+      const k = lerp(0.55, 1, eBack(prog(t, t0, 0.45)));
+      ctx.save(); ctx.translate(SW / 2, 40); ctx.scale(k, k);
+      text(sc.title, 0, 0, { ...opts, alpha: Math.min(1, prog(t, t0, 0.15)) });
+      ctx.restore();
+    } else if (anim === 'words') {
+      const words = dg(sc.title).split(/\s+/).filter(Boolean);
+      const per = Math.min(0.22, 0.9 / Math.max(1, words.length));
+      font(32, TYPO.titleWeight);
+      const full = ctx.measureText(words.join(' ')).width;
+      const rtl = isArabic(sc.title);
+      // each prefix is drawn anchored at the line's start edge, so shown words never move
+      let shown = 0;
+      for (let k = 0; k < words.length; k++) if (t >= t0 + k * per) shown = k + 1;
+      if (shown) {
+        const last = eOut(prog(t, t0 + (shown - 1) * per, per));
+        const head = words.slice(0, shown - 1).join(' '), all = words.slice(0, shown).join(' ');
+        const x = rtl ? SW / 2 + full / 2 : SW / 2 - full / 2;
+        const align = rtl ? 'right' : 'left';
+        if (head) text(head, x, 40, { ...opts, align });
+        ctx.save();
+        // only the newest word fades in: clip away the part already drawn by the head
+        const hw = head ? ctx.measureText(head + ' ').width : 0;
+        ctx.beginPath();
+        if (rtl) ctx.rect(0, 0, x - hw + 1, 80); else ctx.rect(x + hw - 1, 0, SW, 80);
+        ctx.clip();
+        text(all, x, 40 + (1 - last) * 6, { ...opts, align, alpha: last });
+        ctx.restore();
+      }
+    } else {
+      const dy = anim === 'fade' || anim === 'none' ? 0 : (1 - ta) * 10;
+      text(sc.title, SW / 2, 40 + dy, { ...opts, alpha: ta });
+    }
+    ctx.save(); ctx.globalAlpha *= ta; ctx.fillStyle = C.accent; rrect(SW / 2 - 24 * ta, 68, 48 * ta, 4, 2); ctx.fill(); ctx.restore();
   }
   function drawCard(t) {
     ctx.save();
@@ -926,22 +984,21 @@
     rrect(CARD.x, CARD.y + BAR, CARD.w, CARD.h - BAR, [0, 0, CARD.r, CARD.r]); ctx.clip();
     D.scenes.forEach((sc, i) => {
       if (t < sc.start || t > sc.end + TRANS) return;
-      const { alpha, scale: scl, dx } = transitionState(sc, i, t);
-      if (alpha <= 0.001) return;
+      const { alpha, scale: scl, dx, dy = 0, reveal = 1, keep = 1 } = transitionState(sc, i, t);
+      if (alpha <= 0.001 || reveal <= 0.001 || keep <= 0.001) return;
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.translate(CARD.x + SW / 2, CARD.y + BAR + SH / 2);
       ctx.scale(scl, scl);
-      ctx.translate(-SW / 2 + dx, -SH / 2);
+      ctx.translate(-SW / 2 + dx, -SH / 2 + dy);
+      if (reveal < 1) { ctx.beginPath(); ctx.rect(SW * (1 - reveal), 0, SW * reveal, SH); ctx.clip(); }
+      if (keep < 1) { ctx.beginPath(); ctx.rect(0, 0, SW * keep, SH); ctx.clip(); }
       const tpl = T[sc.template] || T.cards;
       if (tpl.drawsTitleOver) tpl(sc, t);
       if (sc.type === 'question' && !tpl.drawsTitleOver) text('؟', SW / 2, SH / 2 + 20, { size: 460, color: hexA(C.accent, 0.06) });
-      if (sc.title) {
-        const ta = eOut(prog(t, sc.start + 0.05, 0.35));
-        text(sc.title, SW / 2, 40 + (1 - ta) * 10, { size: 32, color: tpl.drawsTitleOver ? '#FFFFFF' : C.text, alpha: ta, weight: TYPO.titleWeight });
-        ctx.save(); ctx.globalAlpha *= ta; ctx.fillStyle = C.accent; rrect(SW / 2 - 24 * ta, 68, 48 * ta, 4, 2); ctx.fill(); ctx.restore();
-      }
+      if (sc.title) drawSceneTitle(sc, t, tpl.drawsTitleOver ? '#FFFFFF' : C.text);
       if (!tpl.drawsTitleOver) tpl(sc, t);
+      if (reveal < 1) { ctx.globalAlpha = 1; ctx.fillStyle = C.accent; ctx.fillRect(SW * (1 - reveal), 0, 3, SH); } // the wipe edge
       ctx.restore();
     });
     ctx.restore();
@@ -1032,7 +1089,7 @@
       }
     }
     canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
-    if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
+    if (!opts.host && !document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
   }
   async function loadFonts() {
     const faces = [];
@@ -1158,5 +1215,14 @@
     });
     requestAnimationFrame(loop);
   }
-  boot().catch((e) => { window.__error = e.message; console.error(e); });
+  return {
+    setup, drawFrame, prepareFrame, fetchData, boot,
+    get data() { return D; },
+    get size() { return { width: canvas.width, height: canvas.height }; },
+  };
+  }
+  window.ReelRenderer = { create: createRenderer };
+  // render.html: boot the page's own renderer (the Remotion bundle sets __REEL_NO_BOOT and creates its own)
+  const own = !window.__REEL_NO_BOOT && document.getElementById('c');
+  if (own) createRenderer(own).boot().catch((e) => { window.__error = e.message; console.error(e); });
 })();
