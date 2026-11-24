@@ -21,7 +21,27 @@ export function readExamples(maxChars = 12000) {
   return out;
 }
 
-export function scriptMessages(topic, seconds) {
+const DIALECT_RULE = {
+  egyptian: '',
+  msa: '\n\n## Language override\nWrite the SCRIPT in clear Modern Standard Arabic (الفصحى المبسطة), not Egyptian colloquial. Everything else in the style guide (structure, rhythm, line length, the series question — as «هل تعرف لماذا؟») still applies.',
+};
+
+/** Research notes → a block the script writer may use; every claim is labelled with its confidence. */
+export function researchBlock(research) {
+  if (!research?.facts?.length) return '';
+  return `\n\nBACKGROUND NOTES (from a research pass — NOT verified; use only claims you are confident are correct, never invent numbers):\n${research.facts.map((f) => `- [${f.confidence}] ${f.claim}${f.source ? ` (source to check: ${f.source})` : ''}`).join('\n')}${research.misconceptions?.length ? `\nCommon misconceptions to correct: ${research.misconceptions.join(' · ')}` : ''}`;
+}
+
+export function researchMessages(topic) {
+  return [
+    { role: 'system', content: `[[TASK:RESEARCH]]\nYou are a careful science researcher preparing notes for a short educational video. List the key facts needed to explain the topic correctly.
+Return ONLY JSON: {"angle":"<one-line Arabic hook idea>","facts":[{"claim":"<English, one sentence>","confidence":"high|medium|low","source":"<a real, well-known reference you are confident exists, or null>"}],"misconceptions":["<Arabic>"]}
+Rules: 4–8 facts. Never invent sources, studies or numbers — use null when unsure and lower the confidence. These notes will be shown to the user as UNVERIFIED.` },
+    { role: 'user', content: `TOPIC: ${topic}` },
+  ];
+}
+
+export function scriptMessages(topic, seconds, { dialect = 'egyptian', research = null } = {}) {
   const style = fs.readFileSync(STYLE_FILE, 'utf8');
   const examples = readExamples();
   const ex = examples.length
@@ -31,8 +51,8 @@ export function scriptMessages(topic, seconds) {
     ? `LENGTH_SECONDS: auto — choose what the topic needs, between 20 and 60 s\nTARGET_WORDS: auto (≈ 2.6 words per second of your chosen length; usually 50–130)`
     : `LENGTH_SECONDS: ${seconds}\nTARGET_WORDS: ${Math.round(seconds * WORDS_PER_SECOND)} (stay within ±10%; count only the SCRIPT words)`;
   return [
-    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}` },
-    { role: 'user', content: `TOPIC: ${topic}\n${length}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
+    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}${DIALECT_RULE[dialect] || ''}` },
+    { role: 'user', content: `TOPIC: ${topic}\n${length}${researchBlock(research)}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
   ];
 }
 

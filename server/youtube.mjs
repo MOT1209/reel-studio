@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR, getSettings } from './settings.mjs';
+import { DATA_DIR, getSettings, writeFileAtomic } from './settings.mjs';
+import { addSecret } from './logger.mjs';
 
 const URLS = () => ({
   auth: process.env.YT_AUTH_URL || 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -17,8 +18,11 @@ const TOKEN_FILE = path.join(DATA_DIR, 'youtube-token.json');
 const pending = new Map(); // state → { verifier, redirectUri, at }
 
 const b64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const readToken = () => { try { return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); } catch { return null; } };
-const writeToken = (t) => { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(TOKEN_FILE, JSON.stringify(t, null, 1)); };
+const readToken = () => { try { const t = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); addSecret(t.refresh_token); addSecret(t.access_token); return t; } catch { return null; } };
+function writeToken(t) {
+  addSecret(t.refresh_token); addSecret(t.access_token); // never logged
+  writeFileAtomic(TOKEN_FILE, JSON.stringify(t, null, 1), { mode: 0o600 });
+}
 
 function creds() {
   const { clientId, clientSecret } = getSettings().youtube;
@@ -79,10 +83,11 @@ async function fetchChannel(accessToken) {
   return { id: c.id, title: c.snippet?.title, thumbnail: c.snippet?.thumbnails?.default?.url || '' };
 }
 
-async function accessToken() {
+/** A valid access token. force=true skips the cached one (after the API answered 401). */
+async function accessToken({ force = false } = {}) {
   const t = readToken();
   if (!t?.refresh_token) throw Object.assign(new Error('القناة مش مربوطة — اربطها من الإعدادات ← يوتيوب'), { status: 409 });
-  if (t.access_token && Date.now() < t.expiry) return t.access_token;
+  if (!force && t.access_token && Date.now() < t.expiry) return t.access_token;
   const { clientId, clientSecret } = creds();
   const res = await fetch(URLS().token, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -121,7 +126,7 @@ export function videoMetadata(p) {
 export async function uploadVideo(file, meta, { privacy = 'private', signal, onProgress = () => {} } = {}) {
   const size = fs.statSync(file).size;
   let token = await accessToken();
-  const init = await fetch(`${URLS().upload}/videos?uploadType=resumable&part=snippet,status`, {
+  const startSession = () => fetch(`${URLS().upload}/videos?uploadType=resumable&part=snippet,status`, {
     method: 'POST', signal,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': 'video/mp4', 'X-Upload-Content-Length': String(size) },
     body: JSON.stringify({
@@ -129,6 +134,8 @@ export async function uploadVideo(file, meta, { privacy = 'private', signal, onP
       status: { privacyStatus: privacy, selfDeclaredMadeForKids: false, embeddable: true },
     }),
   });
+  let init = await startSession();
+  if (init.status === 401) { token = await accessToken({ force: true }); init = await startSession(); } // revoked before expiry
   if (!init.ok) {
     const j = await init.json().catch(() => ({}));
     const reason = j.error?.errors?.[0]?.reason;
@@ -141,7 +148,7 @@ export async function uploadVideo(file, meta, { privacy = 'private', signal, onP
   const CHUNK = Math.max(1, Math.round((Number(process.env.YT_CHUNK_BYTES) || 8 * 1024 * 1024) / KB256)) * KB256;
   const fd = fs.openSync(file, 'r');
   try {
-    let offset = 0;
+    let offset = 0, authRetries = 0;
     for (;;) {
       if (signal?.aborted) throw new Error('cancelled');
       const len = Math.min(CHUNK, size - offset);
@@ -153,12 +160,19 @@ export async function uploadVideo(file, meta, { privacy = 'private', signal, onP
         body: buf,
       });
       if (res.status === 308) { // chunk accepted — continue from what the server has
+        // Range = what the server has stored; no Range header means it stored nothing yet.
         const r = res.headers.get('range');
-        offset = r ? Number(r.split('-')[1]) + 1 : offset + len;
+        offset = r ? Number(r.split('-')[1]) + 1 : 0;
+        authRetries = 0;
         onProgress(offset / size);
         continue;
       }
-      if (res.status === 401) { token = await accessToken(); continue; }
+      if (res.status === 401) {
+        // the cached token was revoked early: refresh once; a second 401 in a row is a real failure
+        if (++authRetries > 1) throw new Error('YouTube رفض الصلاحية (401) — اربط القناة تاني');
+        token = await accessToken({ force: true });
+        continue;
+      }
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j.id) throw new Error(`YouTube upload: ${j.error?.message || res.status}`);
       onProgress(1);

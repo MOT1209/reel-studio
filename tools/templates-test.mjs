@@ -33,6 +33,8 @@ async function waitStage(id, stage, status, ms = 600000) {
     const p = await api(`/api/projects/${id}`);
     const err = Object.entries(p.stages).find(([, s]) => s.status === 'error');
     if (err) throw new Error(`${err[0]}: ${err[1].error}`);
+    const waiting = Object.entries(p.stages).find(([k, s]) => s.status === 'review' && k !== stage);
+    if (waiting) throw new Error(`${waiting[0]} is waiting for approval — the test would wait forever`);
     if (p.stages[stage].status === status) return p;
     if (Date.now() - t0 > ms) throw new Error('timeout');
     await sleep(500);
@@ -48,12 +50,12 @@ const theme = (args.find((a) => a.startsWith('--theme=')) || '').slice(8);
 if (theme) await api('/api/settings', { method: 'PUT', body: JSON.stringify({ look: { theme } }) });
 const suffix = theme ? `-${theme}` : '';
 
-const { chromium } = await import('playwright');
-const browser = await chromium.launch({ args: ['--disable-gpu'] });
+const { launchBrowser } = await import('../server/render.mjs'); // same fallback as rendering (bundled → Chrome → Edge)
+const browser = await launchBrowser(console.log);
 const page = await browser.newPage({ viewport: { width: 1080, height: 1920 } });
 const issues = [];
 for (const template of list) {
-  const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: `template test: ${template}`, seconds: 20, approvals: fullRender ? {} : { storyboard: 'wait' }, options: { forceTemplate: template } }) });
+  const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: `template test: ${template}`, seconds: 20, approvals: { script: 'auto', voice: 'auto', timing: 'auto', storyboard: fullRender ? 'auto' : 'wait', render: 'auto' }, options: { forceTemplate: template } }) });
   const proj = await waitStage(p.id, fullRender ? 'render' : 'storyboard', fullRender ? 'done' : 'review');
   const used = [...new Set(proj.storyboard.scenes.map((s) => s.template))];
   if (used.length !== 1 || used[0] !== template) issues.push(`${template}: storyboard used ${used.join(',')}`);

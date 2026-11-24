@@ -2,16 +2,18 @@
 import { resolveIconKey } from './icons.mjs';
 
 export const TYPES = ['intro', 'question', 'concept', 'process', 'compare', 'stat', 'recap'];
-export const TEMPLATES = ['body', 'zoom', 'flow', 'cycle', 'timeline', 'chart', 'layers', 'cards', 'meter'];
+export const TEMPLATES = ['body', 'zoom', 'flow', 'cycle', 'timeline', 'chart', 'layers', 'cards', 'meter', 'photo', 'type'];
+export const BGS = ['card', 'full'];
 export const TONES = ['accent', 'blue', 'success', 'warning', 'underline'];
 
 const TYPE_DEFAULT = { intro: 'zoom', question: 'cards', concept: 'zoom', process: 'flow', compare: 'cards', stat: 'meter', recap: 'cards' };
-const ITEMS = { body: [1, 1], zoom: [2, 2], flow: [2, 4], cycle: [3, 5], timeline: [2, 5], chart: [2, 5], layers: [2, 5], cards: [1, 3], meter: [0, 1] };
+const ITEMS = { body: [1, 1], zoom: [2, 2], flow: [2, 4], cycle: [3, 5], timeline: [2, 5], chart: [2, 5], layers: [2, 5], cards: [1, 3], meter: [0, 1], photo: [0, 2], type: [0, 3] };
 const ALT = {
   body: ['zoom', 'cards'], zoom: ['cards', 'layers'], flow: ['timeline', 'cycle', 'cards'], cycle: ['flow', 'cards'],
   timeline: ['flow', 'cards'], chart: ['cards', 'meter'], layers: ['cards', 'flow'], cards: ['layers', 'flow', 'zoom'], meter: ['chart', 'cards'],
+  photo: ['cards', 'type'], type: ['cards', 'zoom'],
 };
-const TEMPLATE_ALIAS = { compare: 'cards', versus: 'cards', card: 'cards', bars: 'chart', bar: 'chart', gauge: 'meter', organ: 'body', anatomy: 'body', macro: 'zoom', micro: 'zoom', steps: 'flow', process: 'flow', loop: 'cycle', stack: 'layers', history: 'timeline' };
+const TEMPLATE_ALIAS = { image: 'photo', picture: 'photo', video: 'photo', footage: 'photo', text: 'type', quote: 'type', typography: 'type', headline: 'type', news: 'type', compare: 'cards', versus: 'cards', card: 'cards', bars: 'chart', bar: 'chart', gauge: 'meter', organ: 'body', anatomy: 'body', macro: 'zoom', micro: 'zoom', steps: 'flow', process: 'flow', loop: 'cycle', stack: 'layers', history: 'timeline' };
 const MIN_SCENE_SEC = 1.2;
 
 export function storyboardMessages({ title, words, duration, forceTemplate }) {
@@ -21,7 +23,7 @@ export function storyboardMessages({ title, words, duration, forceTemplate }) {
     { role: 'system', content: `[[TASK:STORYBOARD]]
 You are the motion designer of a faceless science-explainer reel (dark technical illustrations, one illustration card per scene).
 Return ONLY a JSON object, no prose, no code fences:
-{"scenes":[{"type":..., "template":..., "at":<wordIndex>, "title":"<short Arabic headline ≤ 4 words>", "items":[{"label":"<Arabic ≤ 3 words>","icon":"<simple English noun>","value":<number|null>,"at":<wordIndex|null>}], "organ":"<English noun, body only>", "value":<number, meter only>, "max":<number, meter only>, "unit":"<unit, meter/chart>"}],
+{"scenes":[{"type":..., "template":..., "at":<wordIndex>, "title":"<short Arabic headline ≤ 4 words>", "query":"<English stock-media keywords>", "items":[{"label":"<Arabic ≤ 3 words>","icon":"<simple English noun>","value":<number|null>,"at":<wordIndex|null>}], "organ":"<English noun, body only>", "value":<number, meter only>, "max":<number, meter only>, "unit":"<unit, meter/chart>"}],
  "accents":[[<wordIndex>, "<tone>"]]}
 
 Scene types: intro, question, concept, process, compare, stat, recap.
@@ -35,6 +37,9 @@ Templates (pick the one that best SHOWS what is being said):
 - layers: stacked layers/levels (skin layers, atmosphere, earth). 2–5 items, top first.
 - cards: 1–3 labelled icon cards; good for compare (2 cards) and recap.
 - meter: one number on a gauge. "value", "max", "unit", optional 1 item as label.
+- photo: a real photo/video of the subject fills the card (places, animals, objects, events). 0–2 items as captions. Needs a good "query".
+- type: animated typography — the title and up to 3 short phrases appear big (a definition, a quote, a key sentence, a news-style headline).
+Every scene also has "query": 2–4 English keywords to find a matching stock photo or video for it.
 Rules:
 - About ${target} scenes for ${duration.toFixed(1)} s. Each scene lasts at least ${MIN_SCENE_SEC}s. The first scene is type "intro" at 0.
 - "at" = index of the word where the scene starts — the word that introduces what the scene shows. Sorted ascending.
@@ -71,7 +76,8 @@ export function extractJson(text) {
   if (a < 0 || b <= a) throw new Error('No JSON object in LLM reply');
   t = t.slice(a, b + 1);
   try { return JSON.parse(t); } catch {}
-  const fixed = t.replace(/,\s*([}\]])/g, '$1').replace(/[“”]/g, '"').replace(/\/\/[^\n]*/g, '');
+  // line comments only when "//" starts the line or follows JSON punctuation — never inside "https://…"
+  const fixed = t.replace(/(^|[\[{,]\s*)\/\/[^\n]*/gm, '$1').replace(/,\s*([}\]])/g, '$1').replace(/[“”]/g, '"');
   return JSON.parse(fixed);
 }
 
@@ -86,6 +92,7 @@ const intIn = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.is
  */
 export function repairStoryboard(raw, words, { forceTemplate } = {}) {
   const fixes = [], notes = [];
+  if (!words?.length) throw new Error('storyboard needs timed words (timing produced none)');
   const n = words.length;
   const last = n - 1;
   const t0 = (i) => words[Math.max(0, Math.min(last, i))].start;
@@ -106,7 +113,11 @@ export function repairStoryboard(raw, words, { forceTemplate } = {}) {
     const items = (Array.isArray(s.items) ? s.items : []).filter((it) => it && typeof it === 'object').map((it) => ({
       label: str(it.label ?? it.text ?? it.title, 30), icon: nounOf(it.icon), value: num(it.value), at: it.at == null ? null : intIn(it.at, 0, last),
     }));
-    return { type, template, at, title: str(s.title, 40), items, organ: nounOf(s.organ), value: num(s.value), max: num(s.max), unit: str(s.unit, 12) };
+    return {
+      type, template, at, title: str(s.title, 40), items, organ: nounOf(s.organ), value: num(s.value), max: num(s.max), unit: str(s.unit, 12),
+      query: str(s.query, 60), image: /^[a-f0-9]{12}$/.test(s.image || '') ? s.image : null, bg: BGS.includes(s.bg) ? s.bg : 'card',
+      imageOffset: Math.max(0, Number(s.imageOffset) || 0),
+    };
   });
 
   // sort + dedupe "at"
@@ -116,7 +127,7 @@ export function repairStoryboard(raw, words, { forceTemplate } = {}) {
   scenes = scenes.filter((s, i) => { if (i && s.at === scenes[i - 1].at) { fixes.push(`duplicate scene at word ${s.at} dropped`); return false; } return true; });
 
   // first scene = intro at 0
-  if (!scenes.length) scenes.push({ type: 'intro', template: forceTemplate || 'zoom', at: 0, title: '', items: [], organ: '', value: null, max: null, unit: '' });
+  if (!scenes.length) scenes.push({ type: 'intro', template: forceTemplate || 'zoom', at: 0, title: '', items: [], organ: '', value: null, max: null, unit: '', query: '', image: null, bg: 'card', imageOffset: 0 });
   if (scenes[0].at !== 0) { fixes.push(`first scene moved from word ${scenes[0].at} to 0`); scenes[0].at = 0; }
   if (scenes[0].type !== 'intro') { fixes.push(`first scene type ${scenes[0].type} → intro`); scenes[0].type = 'intro'; }
 

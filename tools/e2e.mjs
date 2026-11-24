@@ -78,8 +78,9 @@ async function main() {
   const tests = {};
   for (const svc of ['llm', 'elevenlabs', 'deepgram']) tests[svc] = await api(`/api/test/${svc}`, { method: 'POST', body: '{}' });
   check('«اختبار الاتصال» works for LLM / ElevenLabs / Deepgram', Object.values(tests).every((r) => r.ok), Object.values(tests).map((r) => r.message).join(' | '));
-  const badKey = await api('/api/test/deepgram', { method: 'POST', body: JSON.stringify({ baseUrl: 'http://127.0.0.1:1' }) });
-  check('connection test reports a dead endpoint instead of crashing', badKey.ok === false, badKey.message.slice(0, 60));
+  // every base URL is pinned by .env here, so the form cannot point the saved key at another host
+  const pinned = await api('/api/test/deepgram', { method: 'POST', body: JSON.stringify({ baseUrl: 'http://127.0.0.1:1' }) });
+  check('connection test cannot redirect a .env-pinned base URL', pinned.ok === true, pinned.message.slice(0, 60));
   const style = await api('/api/style');
   check('style guide + reference scripts readable from the app', style.style.includes('عارف ليه') && style.examples.length >= 1, `${style.examples.length} example(s)`);
   const pa = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: TOPIC, seconds: 'auto', approvals: { script: 'wait' } }) });

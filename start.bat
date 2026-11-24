@@ -2,7 +2,7 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
-title Reel Studio v1
+title Reel Studio v2
 
 where node >nul 2>nul
 if errorlevel 1 (

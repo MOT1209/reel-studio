@@ -176,12 +176,80 @@ async function streamText(res, text, model = 'mock-llm') {
   res.end('data: [DONE]\n\n');
 }
 
+// ---- fake MCP server (Streamable HTTP) ---------------------------------------------------------
+const mcpState = { calls: [] };
+async function mcpMock(req, res) {
+  if (req.headers.authorization !== 'Bearer mcp-secret-token') return json(res, 401, { error: 'unauthorized' });
+  const msg = JSON.parse((await readBody(req)).toString('utf8'));
+  if (msg.id === undefined) { res.writeHead(202); return res.end(); }
+  const reply = (result) => {
+    // answer tools/call as SSE (like real servers that stream), everything else as plain JSON
+    if (msg.method === 'tools/call') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': 'sess-1' }); return res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`); }
+    return json(res, 200, { jsonrpc: '2.0', id: msg.id, result });
+  };
+  if (msg.method === 'initialize') { res.setHeader('Mcp-Session-Id', 'sess-1'); return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mock-mcp', version: '1' } }); }
+  if (msg.method === 'tools/list') return reply({ tools: [
+    { name: 'lookup_fact', description: 'Looks up a science fact', inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 } }, required: ['query'], additionalProperties: false } },
+    { name: 'delete_everything', description: 'Dangerous tool that must never run without permission', inputSchema: { type: 'object', properties: {} } },
+  ] });
+  if (msg.method === 'tools/call') {
+    mcpState.calls.push(msg.params.name);
+    if (msg.params.name === 'lookup_fact') return reply({ content: [{ type: 'text', text: `FACT about ${msg.params.arguments.query}: Rayleigh scattering ∝ 1/λ⁴` }] });
+    return reply({ content: [{ type: 'text', text: 'everything deleted' }] });
+  }
+  return json(res, 200, { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
+}
+
+// ---- fake Pexels / Pixabay / Unsplash ---------------------------------------------------------
+const media = {};
+async function mediaFile(kind) {
+  if (media[kind]) return media[kind];
+  const out = path.join(os.tmpdir(), `mock-media-${process.pid}.${kind === 'video' ? 'mp4' : 'jpg'}`);
+  await ff(kind === 'video'
+    ? ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=540x960:rate=30:duration=3', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', out]
+    : ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1080x1620:rate=1:duration=1', '-frames:v', '1', out]);
+  return (media[kind] = fs.readFileSync(out));
+}
+const stockStats = { unsplashDownloads: 0, requests: 0, rateLimitNext: 0 };
+async function stockMock(req, res, url) {
+  const p = url.pathname, base = `http://127.0.0.1:${PORT}`, q = url.searchParams;
+  if (p === '/media/_stats') return json(res, 200, { ...stockStats, mcpCalls: mcpState.calls });
+  if (p === '/media/_ratelimit') { stockStats.rateLimitNext = 1; return json(res, 200, { ok: true }); }
+  if (p.startsWith('/media/')) {
+    const buf = await mediaFile(p.endsWith('.mp4') ? 'video' : 'image');
+    res.writeHead(200, { 'Content-Type': p.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg', 'Content-Length': buf.length });
+    return res.end(buf);
+  }
+  stockStats.requests++;
+  if (stockStats.rateLimitNext) { stockStats.rateLimitNext = 0; res.writeHead(429, { 'Retry-After': '42', 'Content-Type': 'application/json' }); return res.end('{}'); }
+  const query = q.get('query') || q.get('q') || '';
+  if (p === '/pexels/v1/search') {
+    if (!req.headers.authorization) return json(res, 401, {});
+    return json(res, 200, { total_results: 2, photos: [1, 2].map((i) => ({ id: 100 + i, width: 1080, height: 1620, url: `https://www.pexels.com/photo/${100 + i}/`, photographer: `Mock Photographer ${i}`, photographer_url: 'https://www.pexels.com/@mock', alt: `${query} ${i}`, src: { medium: `${base}/media/p${i}.jpg`, large2x: `${base}/media/p${i}.jpg`, original: `${base}/media/p${i}.jpg` } })) });
+  }
+  if (p === '/pexels/videos/search') {
+    return json(res, 200, { total_results: 1, videos: [{ id: 900, width: 540, height: 960, duration: 3, url: 'https://www.pexels.com/video/900/', image: `${base}/media/v.jpg`, user: { name: 'Mock Filmmaker', url: 'https://www.pexels.com/@film' }, video_files: [{ file_type: 'video/mp4', width: 540, height: 960, link: `${base}/media/v.mp4` }] }] });
+  }
+  if (p === '/pixabay/api/' || p === '/pixabay/api/videos/') {
+    if (!q.get('key')) return json(res, 400, {});
+    return json(res, 200, { totalHits: 1, hits: [{ id: 555, pageURL: 'https://pixabay.com/photos/mock-555/', user: 'mockuser', user_id: 7, tags: query, webformatURL: `${base}/media/x.jpg`, largeImageURL: `${base}/media/x.jpg`, imageWidth: 1080, imageHeight: 1620, duration: 3, videos: { medium: { url: `${base}/media/x.mp4`, width: 540, height: 960, thumbnail: `${base}/media/x.jpg` } } }] });
+  }
+  if (p === '/unsplash/search/photos') {
+    if (!/^Client-ID /.test(req.headers.authorization || '')) return json(res, 401, {});
+    return json(res, 200, { total: 1, results: [{ id: 'uns1', width: 1080, height: 1620, alt_description: query, urls: { raw: `${base}/media/u.jpg?ixid=1`, small: `${base}/media/u.jpg` }, links: { html: 'https://unsplash.com/photos/uns1', download_location: `${base}/unsplash/photos/uns1/download` }, user: { name: 'Mock Unsplasher', links: { html: 'https://unsplash.com/@mock' } } }] });
+  }
+  if (p === '/unsplash/photos/uns1/download') { stockStats.unsplashDownloads++; return json(res, 200, { url: `${base}/media/u.jpg` }); }
+  return json(res, 404, { error: 'mock stock: ' + p });
+}
+
 // ---- fake YouTube ------------------------------------------------------------------------
-const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set() };
+const yt = { codes: new Map(), sessions: new Map(), last: null, tokens: new Set(), denyAll: false, revokeAfterChunks: 0 };
 const sha256url = (s) => crypto.createHash('sha256').update(s).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 async function youtubeMock(req, res, url) {
   const p = url.pathname, auth = req.headers.authorization || '';
-  const authed = () => yt.tokens.has(auth.replace(/^Bearer /, ''));
+  const authed = () => !yt.denyAll && yt.tokens.has(auth.replace(/^Bearer /, ''));
+  // test controls: revoke every access token after N more chunks / reject every token
+  if (p === '/yt/_control' && req.method === 'POST') { Object.assign(yt, JSON.parse((await readBody(req)).toString() || '{}')); return json(res, 200, { ok: true }); }
   if (p === '/yt/auth' && req.method === 'GET') { // consent screen → immediate "Allow"
     const q = url.searchParams;
     if (!q.get('client_id') || !q.get('code_challenge') || q.get('code_challenge_method') !== 'S256') return json(res, 400, { error: 'invalid_request' });
@@ -218,11 +286,13 @@ async function youtubeMock(req, res, url) {
   const sm = p.match(/^\/yt\/session\/(\w+)$/);
   if (sm && req.method === 'PUT') {
     const s = yt.sessions.get(sm[1]);
-    if (!s || !authed()) return json(res, 404, { error: { message: 'no session' } });
+    if (!s) return json(res, 404, { error: { message: 'no session' } });
+    if (!authed()) return json(res, 401, { error: { message: 'unauthorized' } });
     const m = String(req.headers['content-range']).match(/bytes (\d+)-(\d+)\/(\d+)/);
     const body = await readBody(req);
     if (!m || Number(m[2]) - Number(m[1]) + 1 !== body.length) return json(res, 400, { error: { message: 'bad range' } });
     s.got.push(body);
+    if (yt.revokeAfterChunks && --yt.revokeAfterChunks === 0) yt.tokens.clear(); // token revoked before its expiry
     const have = s.got.reduce((a, b) => a + b.length, 0);
     if (have < s.total) { res.writeHead(308, { Range: `bytes=0-${have - 1}` }); return res.end(); }
     yt.last = { meta: s.meta, bytes: have, chunks: s.got.length, mp4: Buffer.concat(s.got).subarray(4, 8).toString() };
@@ -244,10 +314,21 @@ const server = http.createServer(async (req, res) => {
         reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
+      else if (sys.includes('[[TASK:RESEARCH]]')) reply = JSON.stringify({ angle: 'الضوء الأزرق بيتشتت أكتر', facts: [
+        { claim: 'Sunlight contains all visible colours', confidence: 'high', source: 'NASA Space Place — Why is the sky blue?' },
+        { claim: 'Shorter (blue) wavelengths scatter more off air molecules (Rayleigh scattering)', confidence: 'high', source: 'Encyclopaedia Britannica — Rayleigh scattering' },
+        { claim: 'At sunset light crosses more air, so red dominates', confidence: 'medium', source: null }], misconceptions: ['السما مش بتعكس لون البحر'] });
+      else if (sys.includes('[[TASK:ARABIC:tashkeel]]')) reply = user.replace(/السما/g, 'السَّمَا').replace(/لونها/g, 'لَوْنُهَا');
+      else if (sys.includes('[[TASK:ARABIC:')) reply = user.replace(/(^|\s)انا(?=\s)/g, '$1أنا').replace(/اللى/g, 'اللي').replace(/ازاي/g, 'إزاي');
+      else if (sys.includes('[[TASK:SKILL]]')) reply = sys.includes('JSON') ? JSON.stringify({ titles: ['عنوان ١', 'عنوان ٢', 'عنوان ٣'] }) : 'mock skill output: ' + user.slice(0, 40);
+      else if (sys.includes('[[TASK:TRANSLATE_QUERY]]')) reply = 'blue sky';
       else reply = 'mock reply';
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
     }
+    if (url.pathname === '/mcp' && req.method === 'POST') return await mcpMock(req, res);
+    // ---- stock media providers -------------------------------------------------------
+    if (url.pathname.startsWith('/pexels/') || url.pathname.startsWith('/pixabay/') || url.pathname.startsWith('/unsplash/') || url.pathname.startsWith('/media/')) return await stockMock(req, res, url);
     // ---- YouTube (OAuth + Data API v3) ----------------------------------------------
     if (url.pathname.startsWith('/yt/')) return youtubeMock(req, res, url);
     if (req.method === 'GET' && url.pathname === '/v1/models') {

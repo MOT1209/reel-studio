@@ -1,4 +1,4 @@
-// Reel Studio v1 — local HTTP server (127.0.0.1 only). No framework.
+// Reel Studio — local HTTP server (127.0.0.1 only). No framework.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,12 +11,20 @@ const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as P from './pipeline.mjs';
+import { log as slog, redact, logFile } from './logger.mjs';
+import * as AR from './arabic.mjs';
+import { buildCues, toSrt, toVtt } from './subtitles.mjs';
+import * as F from './fonts.mjs';
+import * as A from './assets.mjs';
+import * as PV from './providers.mjs';
+import * as SK from './skills.mjs';
+import * as MCP from './mcp.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.RS_PORT || process.env.PORT || 4301);
 P.setServerPort(PORT);
 const PUBLIC = path.join(ROOT, 'public');
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.webp': 'image/webp', '.gif': 'image/gif', '.mov': 'video/quicktime', '.webm': 'video/webm', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.vtt': 'text/vtt; charset=utf-8', '.srt': 'application/x-subrip; charset=utf-8' };
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
@@ -35,17 +43,23 @@ async function readJson(req) {
   try { return JSON.parse(b.toString('utf8')); } catch { throw P.httpError(400, 'invalid JSON'); }
 }
 
+/** decodeURIComponent that answers 400 instead of crashing on malformed escapes ("%E0%A4%A"). */
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch { throw P.httpError(400, 'malformed URL encoding'); }
+}
+
 function sendFile(req, res, file, { cache = 'no-cache' } = {}) {
   let st;
   try { st = fs.statSync(file); } catch { return json(res, 404, { error: 'not found' }); }
   if (!st.isFile()) return json(res, 404, { error: 'not found' });
   const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
-  const range = req.headers.range && /bytes=(\d*)-(\d*)/.exec(req.headers.range);
-  if (range) {
-    const start = range[1] ? Number(range[1]) : st.size - Number(range[2]);
+  const range = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+  if (range && (range[1] || range[2])) {
+    const start = range[1] ? Number(range[1]) : Math.max(0, st.size - Number(range[2]));
     const end = range[1] && range[2] ? Math.min(Number(range[2]), st.size - 1) : st.size - 1;
     if (start >= st.size || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }); return res.end(); }
     res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1, 'Cache-Control': cache });
+    if (req.method === 'HEAD') return res.end();
     return fs.createReadStream(file, { start, end }).pipe(res);
   }
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes', 'Cache-Control': cache });
@@ -70,7 +84,7 @@ const FILE_RE = /^(voice\.mp3|video\.mp4|contact\.jpg|mix\.m4a|upload\.(mp3|wav|
 
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  const parts = url.pathname.split('/').filter(Boolean).map(safeDecode);
   const m = req.method;
 
   if (parts[0] === 'api') {
@@ -94,8 +108,10 @@ async function route(req, res) {
       const body = await readJson(req);
       const s = getSettings();
       const sec = id === 'llm' ? 'llm' : id;
+      const locked = getPublicSettings()._source;
       for (const [k, v] of Object.entries(body || {})) {
-        if (typeof v === 'string' && v.trim() && !v.startsWith('••••') && k in s[sec]) s[sec][k] = v.trim();
+        if (locked[`${sec}.${k}`] === 'env (locked)') continue; // a base URL pinned in .env cannot be redirected from the browser
+        if (typeof v === 'string' && v.trim() && !v.startsWith('••••') && Object.hasOwn(s[sec], k)) s[sec][k] = v.trim();
       }
       try { return json(res, 200, await TESTS[id](s)); }
       catch (e) { return json(res, 200, { ok: false, message: e.message }); }
@@ -128,6 +144,85 @@ async function route(req, res) {
       if (m === 'DELETE') { await unlinkYoutube(); return json(res, 200, youtubeStatus()); }
     }
     if (a === 'icons' && id === 'licenses') return json(res, 200, iconLicenses());
+    // ---- fonts -------------------------------------------------------------------------
+    if (a === 'fonts') {
+      if (!id && m === 'GET') return json(res, 200, { fonts: F.listFonts(), defaults: F.TYPO_DEFAULTS, styles: F.CAPTION_STYLES, typography: F.typographyFor(null) });
+      if (!id && m === 'POST') {
+        const buf = await readBody(req, 20 * 1024 * 1024);
+        return json(res, 201, F.importFont({ name: safeDecode(String(req.headers['x-font-name'] || '')), file: safeDecode(String(req.headers['x-filename'] || '')), buf, weight: String(req.headers['x-font-weight'] || '400'), license: String(req.headers['x-font-license'] || '') }));
+      }
+      if (id && m === 'DELETE') { F.deleteFont(id); return json(res, 200, { ok: true }); }
+    }
+    // ---- asset library -------------------------------------------------------------------
+    if (a === 'assets') {
+      if (!id && m === 'GET') return json(res, 200, A.listAssets(Object.fromEntries(url.searchParams)));
+      if (!id && m === 'POST') {
+        const tmp = await A.streamToTemp(req, A.LIMITS.video);
+        const h = (k) => safeDecode(String(req.headers[k] || ''));
+        const meta = await A.addAssetFromFile(tmp, {
+          name: h('x-filename'), folder: h('x-folder'), tags: h('x-tags'), source: { type: 'upload' },
+          license: { name: h('x-license-name') || 'ملك المستخدم', commercial: h('x-license-commercial') === 'false' ? false : h('x-license-commercial') === 'true' ? true : 'check', attribution: h('x-license-attribution') || null, notes: h('x-license-notes') || null },
+        });
+        return json(res, 201, meta);
+      }
+      const asset = A.getAsset(id);
+      if (!asset) return json(res, 404, { error: 'asset not found' });
+      if (!b && m === 'GET') return json(res, 200, asset);
+      if (!b && m === 'PATCH') return json(res, 200, A.updateAsset(id, await readJson(req)));
+      if (!b && m === 'DELETE') { A.deleteAsset(id); return json(res, 200, { ok: true }); }
+      if (b === 'file') return sendFile(req, res, A.assetFile(asset), { cache: 'max-age=86400' });
+      if (b === 'thumb' && asset.thumb) return sendFile(req, res, path.join(A.assetDir(id), 'thumb.jpg'), { cache: 'max-age=86400' });
+      if (b === 'scaled') return sendFile(req, res, await A.scaledFile(asset, url.searchParams.get('max')), { cache: 'max-age=86400' });
+    }
+    if (a === 'providers') {
+      if (!id && m === 'GET') return json(res, 200, PV.providerStatus());
+      if (b === 'search' && m === 'GET') return json(res, 200, await PV.search(id, url.searchParams.get('q'), Object.fromEntries(url.searchParams)));
+      if (b === 'import' && m === 'POST') { const body = await readJson(req); return json(res, 201, await PV.importResult(id, body.item, { folder: body.folder || 'stock' })); }
+    }
+    // ---- skills + MCP --------------------------------------------------------------------
+    if (a === 'skills') {
+      if (!id && m === 'GET') return json(res, 200, { skills: SK.listSkills(), runs: SK.runLog(50) });
+      if (!id && m === 'POST') return json(res, 201, SK.saveSkill(await readJson(req)));
+      if (id === 'import' && m === 'POST') return json(res, 201, { imported: SK.importSkills(await readJson(req)) });
+      if (id && !b && m === 'PUT') return json(res, 200, SK.saveSkill({ ...(await readJson(req)), id }, { replace: true }));
+      if (id && !b && m === 'PATCH') return json(res, 200, SK.setEnabled(id, (await readJson(req)).enabled));
+      if (id && !b && m === 'DELETE') { SK.deleteSkill(id); return json(res, 200, { ok: true }); }
+      if (id && b === 'export' && m === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="skill-${id}.json"` });
+        return res.end(JSON.stringify(SK.exportSkill(id), null, 2));
+      }
+      if (id && b === 'run' && m === 'POST') {
+        const ctl = new AbortController(); res.on('close', () => { if (!res.writableFinished) ctl.abort(); }); // client went away
+        return json(res, 200, await SK.runSkill(id, await readJson(req), { signal: ctl.signal }));
+      }
+    }
+    if (a === 'mcp') {
+      if (!id && m === 'GET') return json(res, 200, { servers: MCP.listServers(), calls: MCP.callLog(50) });
+      if (!id && m === 'POST') return json(res, 201, MCP.upsertServer(await readJson(req)));
+      if (id && !b && m === 'PUT') return json(res, 200, MCP.upsertServer({ ...(await readJson(req)), id }));
+      if (id && !b && m === 'DELETE') { MCP.removeServer(id); return json(res, 200, { ok: true }); }
+      if (id && b === 'sync' && m === 'POST') return json(res, 200, await MCP.syncServer(id));
+      if (id && b === 'permissions' && m === 'PUT') return json(res, 200, MCP.setPermissions(id, await readJson(req)));
+      if (id && b === 'call' && m === 'POST') { const body = await readJson(req); return json(res, 200, await MCP.callTool(id, body.tool, body.arguments || {})); }
+    }
+    if (a === 'logs' && m === 'GET') {
+      let lines = [];
+      try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
+      return json(res, 200, { lines: lines.filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { msg: l }; } }) });
+    }
+    if (a === 'arabic' && m === 'POST') {
+      const { text } = await readJson(req);
+      if (typeof text !== 'string') throw P.httpError(400, 'text is required');
+      if (id === 'analyze') return json(res, 200, { ...AR.detectDialect(text), sentences: AR.sentences(text), tashkeel: AR.hasTashkeel(text) });
+      const local = { 'strip-tashkeel': AR.stripTashkeel, 'arabic-digits': AR.toArabicDigits, 'latin-digits': AR.toLatinDigits };
+      if (local[id]) { const out = local[id](text); return json(res, 200, { op: id, text: out, diff: AR.wordDiff(text, out), warnings: [] }); }
+      if (AR.OPS[id]) {
+        const ctl = new AbortController(); res.on('close', () => { if (!res.writableFinished) ctl.abort(); }); // client went away
+        return json(res, 200, await AR.rewrite(id, text, { signal: ctl.signal }));
+      }
+      throw P.httpError(404, 'unknown Arabic operation');
+    }
+    if (a === 'arabic' && id === 'ops' && m === 'GET') return json(res, 200, { ops: Object.fromEntries(Object.entries(AR.OPS).map(([k, v]) => [k, v.label])) });
     if (a === 'projects') {
       if (!id) {
         if (m === 'GET') return json(res, 200, { projects: P.listProjects() });
@@ -148,10 +243,10 @@ async function route(req, res) {
       if (b === 'run' && m === 'POST') return json(res, 200, { started: P.runPipeline(id) });
       if (b === 'cancel' && m === 'POST') return json(res, 200, { cancelled: await P.cancel(id) });
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
-      if (b === 'voice-mode' && m === 'PUT') { P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
+      if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
       if (b === 'upload' && m === 'POST') {
         const buf = await readBody(req, 200 * 1024 * 1024);
-        P.saveUpload(id, buf, decodeURIComponent(req.headers['x-filename'] || ''), req.headers['content-type']);
+        await P.saveUpload(id, buf, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'publish' && m === 'POST') {
@@ -169,6 +264,19 @@ async function route(req, res) {
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p));
+      if (b === 'edit' && m === 'PUT') return json(res, 200, await P.saveEdit(id, await readJson(req)));
+      if (b === 'clips' && stage && action && m === 'GET') {
+        // extracted video-clip frames: /api/projects/<id>/clips/<key>/f_00001.jpg
+        if (!/^[a-f0-9]{12}-[\d.]+-[\d.]+-\d+-\d+x\d+$/.test(stage) || !/^f_\d{5}\.jpg$/.test(action)) return json(res, 404, { error: 'not found' });
+        return sendFile(req, res, path.join(P.projectDir(id), 'clips', stage, action), { cache: 'max-age=3600' });
+      }
+      if ((b === 'subtitles.srt' || b === 'subtitles.vtt') && m === 'GET') {
+        if (!p.words?.length) throw P.httpError(409, 'timing is not done yet');
+        const cues = buildCues(p.words, P.subtitleOptions(p));
+        const vtt = b.endsWith('.vtt');
+        res.writeHead(200, { 'Content-Type': `${vtt ? 'text/vtt' : 'application/x-subrip'}; charset=utf-8`, 'Content-Disposition': `attachment; filename="${p.id}.${vtt ? 'vtt' : 'srt'}"`, 'Cache-Control': 'no-store' });
+        return res.end('\uFEFF' + (vtt ? toVtt(cues) : toSrt(cues)));
+      }
       if (b === 'files' && stage && FILE_RE.test(stage)) return sendFile(req, res, path.join(P.projectDir(id), stage));
       if (b === 'stages' && P.STAGES.includes(stage)) {
         if (action === 'approve' && m === 'POST') { await P.approve(id, stage); return json(res, 200, { ok: true }); }
@@ -194,6 +302,11 @@ async function route(req, res) {
 <script>try{window.opener&&window.opener.postMessage({youtube:${ok}},location.origin)}catch(e){};${ok ? 'setTimeout(()=>window.close(),1500)' : ''}</script></body></html>`);
     }
   }
+  if (parts[0] === 'fonts' && parts[1] && parts[2]) {
+    const f = F.fontFile(parts[1], parts[2]);
+    if (!f) return json(res, 404, { error: 'font not found' });
+    return sendFile(req, res, f, { cache: 'max-age=86400' });
+  }
   if (parts[0] === 'font' && parts[1]) {
     const fonts = resolveFonts();
     const name = path.basename(parts[1]);
@@ -208,20 +321,20 @@ async function route(req, res) {
   return sendFile(req, res, file);
 }
 
-process.on('unhandledRejection', (e) => console.error('unhandled rejection:', e?.message || e));
+process.on('unhandledRejection', (e) => slog('error', 'unhandled rejection', { err: e?.message || String(e) }));
 
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: only answer to our own host names.
   if (!ALLOWED_HOSTS.has(String(req.headers.host || ''))) { res.writeHead(421); return res.end('misdirected request'); }
   try { await route(req, res); }
   catch (e) {
-    if (!res.headersSent) json(res, e.status || 500, { error: e.message });
+    if (!res.headersSent) json(res, e.status || 500, { error: redact(e.message) });
     else res.end();
-    if (!e.status) console.error(e);
+    if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
-  console.log(`Reel Studio v1 → http://${HOST}:${PORT}`);
+  console.log(`Reel Studio v2 → http://${HOST}:${PORT}`);
   if (!ff) console.warn('⚠ ffmpeg not found in PATH (set FFMPEG_PATH) — rendering will fail.');
 });
