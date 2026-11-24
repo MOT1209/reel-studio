@@ -11,7 +11,7 @@ import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
 import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
-import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
+import { effectiveEdit, cleanEdit, layoutFor, prepareClip, checkRenderInputs } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
@@ -451,6 +451,11 @@ const STAGE_FN = {
     const dir = projectDir(p.id);
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
+    { // validation gate: never start a long render on input the renderer cannot use
+      const rd = renderData(p);
+      const problems = checkRenderInputs({ words: p.words, storyboard: p.storyboard, edit: E, voiceExists: fs.existsSync(path.join(dir, 'voice.mp3')), hasAsset: (id) => !!getAsset(id), duration: rd.duration });
+      if (problems.length) throw new Error(`render input check failed: ${problems.join('; ')}`);
+    }
     const FPS = E.export.fps;
     // video clips (scene media and overlays) → frames on disk at the output fps and size
     p.clips = {};

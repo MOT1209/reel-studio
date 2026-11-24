@@ -141,6 +141,14 @@ await test('renderFrames: a damaged reused segment is detected by frame count an
   assert.ok(!logs.some((l) => /reusing/.test(l)));
 });
 
+await test('run(): a child that exceeds its execution limit is killed and reported; normal commands are unaffected', async () => {
+  const t0 = Date.now();
+  await assert.rejects(R.run(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { timeoutMs: 300 }), /timed out after 0 s and was killed|timed out after/);
+  assert.ok(Date.now() - t0 < 5000);
+  const r = await R.run(process.execPath, ['-e', 'console.log("ok")'], { timeoutMs: 5000 }); assert.equal(r.out.trim(), 'ok');
+  assert.equal(R.activeProcessCount(), 0, 'no child is left registered');
+});
+
 // ---- graceful shutdown -----------------------------------------------------------------------
 await test('shutdown: SIGTERM stops the server, kills its children and exits cleanly', async () => {
   const PORT = 4311;

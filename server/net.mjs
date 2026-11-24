@@ -14,7 +14,7 @@ export function retryDelay(res, attempt, base = Number(process.env.RS_RETRY_BASE
   return Math.min(15000, base * 2 ** attempt);
 }
 
-export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2, label = 'request', onRetry } = {}) {
+export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2, label = 'request', onRetry, retryStatus = RETRY_STATUS } = {}) {
   const user = init.signal;
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -26,7 +26,7 @@ export async function fetchRetry(url, init = {}, { timeout = 60000, retries = 2,
     try {
       const res = await fetch(url, { ...init, signal: ctl.signal });
       clearTimeout(timer);
-      if (RETRY_STATUS.has(res.status) && attempt < retries) {
+      if (retryStatus.has(res.status) && attempt < retries) {
         const d = retryDelay(res, attempt);
         await res.body?.cancel().catch(() => {});
         onRetry?.(attempt + 1, `HTTP ${res.status}`, d);

@@ -166,3 +166,35 @@ export async function prepareClip(projectDir, assetId, { offset = 0, seconds, fp
   fs.writeFileSync(done, JSON.stringify(info));
   return info;
 }
+
+// ---- pre-render validation -------------------------------------------------------------------------
+/**
+ * The gate between "AI / editor produced something" and "spend minutes rendering it". Returns a list of problems
+ * (empty = ok). Pure: the caller supplies what exists on disk.
+ */
+export function checkRenderInputs({ words, storyboard, edit, voiceExists, hasAsset = () => true, duration }) {
+  const bad = [];
+  if (!voiceExists) bad.push('voice.mp3 is missing');
+  if (!Array.isArray(words) || !words.length) { bad.push('no timed words'); return bad; }
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (!(Number.isFinite(w.start) && Number.isFinite(w.end))) bad.push(`word ${i + 1} has no valid time`);
+    else if (w.end < w.start) bad.push(`word ${i + 1} ends before it starts`);
+    else if (i && w.start < words[i - 1].start - 1e-6) bad.push(`word ${i + 1} starts before word ${i}`);
+    if (bad.length > 8) { bad.push('…'); return bad; }
+  }
+  const sc = storyboard?.scenes;
+  if (!Array.isArray(sc) || !sc.length) bad.push('storyboard has no scenes');
+  else {
+    if (sc[0].at !== 0) bad.push('the first scene must start at word 1');
+    sc.forEach((s, i) => {
+      if (!Number.isInteger(s.at) || s.at < 0 || s.at >= words.length) bad.push(`scene ${i + 1}: start word ${s.at} is outside the script`);
+      else if (i && s.at <= sc[i - 1].at) bad.push(`scene ${i + 1} does not start after scene ${i}`);
+      if (!s.template) bad.push(`scene ${i + 1} has no template`);
+      if (s.image && !hasAsset(s.image)) bad.push(`scene ${i + 1}: image ${s.image} is not in the library`);
+    });
+  }
+  for (const o of edit?.overlays || []) if (o.asset && !hasAsset(o.asset)) bad.push(`overlay ${o.id}: asset ${o.asset} is not in the library`);
+  if (duration !== undefined && !(duration >= 1)) bad.push(`the video would be ${Number(duration).toFixed(2)} s (minimum 1 s)`);
+  return bad;
+}

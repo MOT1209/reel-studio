@@ -180,7 +180,7 @@ test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue sp
 // ---- animation + snapping (public/anim.js is shared by the renderer and the editor) -----------------------------------
 const animCtx = {}; (await import('node:vm')).runInNewContext(fs.readFileSync(new URL('../public/anim.js', import.meta.url), 'utf8'), animCtx);
 const ANIM = { ...animCtx.ReelAnim, sample: (o, t) => ({ ...animCtx.ReelAnim.sample(o, t) }) }; // plain objects (the vm context has its own Object prototype)
-const { cleanKeyframes } = await import('../server/edit.mjs');
+const { cleanKeyframes, checkRenderInputs } = await import('../server/edit.mjs');
 test('keyframes: no keyframes → base values; before/after hold; linear midpoint; eases; hold', () => {
   const o = { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 };
   assert.deepEqual(ANIM.sample(o, 3), { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 });
@@ -211,6 +211,25 @@ test('server keyframe cleaning: sorted, clamped to the overlay length, capped at
   assert.deepEqual(r, [{ t: 0, opacity: 1 }, { t: 1, scale: 0.05 }, { t: 3, x: 1 }]);
   assert.equal(cleanKeyframes(Array.from({ length: 100 }, (_, i) => ({ t: i / 40, x: 0.1 })), 5).length, 24);
   assert.deepEqual(cleanKeyframes('nope', 3), []);
+});
+
+test('render input gate: accepts a valid project; names every kind of broken input before any rendering', () => {
+  const words = Array.from({ length: 10 }, (_, i) => ({ start: i * 0.5, end: i * 0.5 + 0.4 }));
+  const ok = { words, storyboard: { scenes: [{ at: 0, template: 'cards' }, { at: 5, template: 'meter', image: 'aaaaaaaaaaaa' }] }, edit: { overlays: [] }, voiceExists: true, duration: 5 };
+  assert.deepEqual(checkRenderInputs(ok), []);
+  const has = (patch, re) => assert.match(checkRenderInputs({ ...ok, ...patch }).join('|'), re);
+  has({ voiceExists: false }, /voice\.mp3 is missing/);
+  has({ words: [] }, /no timed words/);
+  has({ words: [{ start: 0, end: NaN }] }, /no valid time/);
+  has({ words: [{ start: 1, end: 2 }, { start: 0.5, end: 0.9 }] }, /starts before word 1/);
+  has({ storyboard: { scenes: [] } }, /no scenes/);
+  has({ storyboard: { scenes: [{ at: 1, template: 'cards' }] } }, /first scene must start at word 1/);
+  has({ storyboard: { scenes: [{ at: 0, template: 'cards' }, { at: 99, template: 'cards' }] } }, /outside the script/);
+  has({ storyboard: { scenes: [{ at: 0, template: 'cards' }, { at: 0, template: 'cards' }] } }, /does not start after/);
+  has({ storyboard: { scenes: [{ at: 0 }] } }, /no template/);
+  has({ hasAsset: () => false }, /image aaaaaaaaaaaa is not in the library/);
+  has({ edit: { overlays: [{ id: 'o1', asset: 'bbbbbbbbbbbb' }] }, hasAsset: () => false }, /overlay o1/);
+  has({ duration: 0.4 }, /minimum 1 s/);
 });
 
 console.log(`\n${n} unit tests passed`);
