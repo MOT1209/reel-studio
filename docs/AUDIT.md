@@ -87,7 +87,7 @@ Implemented: research (unverified, with confidence and "source to check"), photo
 
 ### Phase 5 — editor ✔
 Implemented: `public/editor.js` — six tracks, drag/trim/split/merge/swap, word timing drag, overlays, music, trim handles, zoom, inspector, undo/redo, autosave with server-side validation, live preview in the real renderer. Evidence: `tools/ui-test.mjs` 11/11 (add text → saved; undo/redo; aspect → preview canvas 1920×1080; trim drag → saved; scene template → saved, render reset), `tools/export-test.mjs` (edits visible in the MP4).
-Known limits: the narration is the master clock — you can trim the head/tail but not cut out the middle of the voice; no multi-select or ripple edit; video overlays are silent; music is not audible in the preview (it is in the export).
+Known limits at the time: no cutting from the middle, no multi-select, silent video overlays, music not heard in the preview — all four fixed in v2.1 (§6).
 
 ### Phase 6 — rendering and export ✔
 Implemented: 9:16 / 1:1 / 16:9 × 720p / 1080p, 24/25/30/60 fps, quality presets, segmented rendering with resume after cancel/crash, temp cleanup, downscaled images and on-disk clip frames (bounded memory), concurrency-safe image scaling. Evidence: export test 7/7 (ffprobe per format, duration after trim, loudness, recovery reuses 1/2 segments), e2e 37/37. 10-second 1080p reel renders in ≈ 12 s here (2 pages).
@@ -98,18 +98,30 @@ Implemented: declarative skills (prompt / MCP), validation (all-or-nothing impor
 ### Phase 8 — testing and release ✔
 `npm test` (unit 13 · Arabic 12 · library 10 · skills 10 · robustness 14), `npm run e2e` (37), `npm run test:export` (7), `npm run test:ui` (11), `npm run templates` (9) — all green on this machine. `npm audit`: 0 vulnerabilities, one runtime dependency (playwright, Apache-2.0).
 
-## 6. Known issues and limits
-- Secrets are not encrypted at rest (see decision 1).
-- Real-provider integrations (Pexels / Pixabay / Unsplash / MCP servers / ElevenLabs / Deepgram / YouTube) are tested against mocks here; first real use should be watched in `data/logs/server.log`.
-- Caption layout has no kashida justification; very long English-only captions use the same line rules as Arabic.
-- The editor is narration-driven (see Phase 5 limits).
-- Playwright's own Chromium could not be downloaded in this environment; tests ran with the system Chrome fallback — the same path Windows users get when the download fails.
+## 6. v2.1 — the known limits, fixed
+
+| Limit in v2.0 | v2.1 | Evidence |
+|---|---|---|
+| Secrets stored as plain JSON | AES-256-GCM per value (`server/vault.mjs`); master key from `RS_VAULT_KEY` (never on disk), Windows DPAPI (CurrentUser, via PowerShell), or a 0600 key file. Old plaintext is sealed on first read; tampered values read as missing | `tools/vault-test.mjs` 6/6; e2e checks the YouTube tokens on disk; skills-test checks the MCP header on disk |
+| Editor could only trim head/tail | **Cut ranges** anywhere (I / O / ✂): video frames, voice, clip sound, SFX and subtitles all skip the range; a subtitle cue split by a cut keeps only its surviving words | unit (time mapping round-trips, subtitle mapping), export test (MP4 duration = full − cut), UI test |
+| No multi-select / ripple | Shift+click multi-select of overlays, group move/delete; cuts close the gap (ripple) | UI test |
+| Video overlays silent | per-clip volume, mixed in source time and cut with the voice | export test: a 1 kHz clip tone measured in the right output window (> 12 dB above elsewhere) |
+| Music not heard in the preview | preview plays music (approximate ducking per spoken word) and clip sound, and jumps over cuts | manual (audio playback is not observable headless) |
+| No kashida | `public/kashida.js` — tatweel only between joining letters, never after ا د ذ ر ز و ة ى or inside لا; caption alignment "justify" | Arabic test: rules + Amiri line measured in the render browser |
+| Egyptian / MSA only | Levantine, Gulf and Maghrebi markers (+ b-/ka- prefixes), script generation and rewrites in Levantine / Gulf | Arabic test: one sentence per dialect, mixed, unknown |
+
+### Still open
+- **Real services:** the provider, TTS/STT, YouTube and MCP integrations are tested against mocks built from the documented API shapes. This environment's network blocks the real hosts (connection refused for api.pexels.com, pixabay.com, api.unsplash.com, api.elevenlabs.io, api.deepgram.com), so a first real run must be watched in `data/logs/server.log`.
+- **DPAPI** is implemented but could only be exercised on Windows; here the file-key and env-key paths are the ones tested. If PowerShell DPAPI fails, the vault falls back to the 0600 key file and says so.
+- The narration is still the master clock: you can remove parts of it, but not re-order it or insert silence.
+- Dialect detection is a marker heuristic (good for clear text, not a classifier); Maghrebi has detection but no generation preset.
+- Playwright's own Chromium could not be downloaded here; tests ran with the system Chrome fallback (the same path Windows users get when the download fails).
 
 ## 7. Release checklist
-- [x] `npm test`, `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
+- [x] `npm test` (unit · Arabic · library · skills · vault · robustness), `npm run e2e`, `npm run test:export`, `npm run test:ui`, `npm run templates` green
 - [x] `npm audit --omit=dev` → 0 vulnerabilities
 - [x] Fonts bundled only with their OFL licence files; icon licences in `assets/icons/LICENSES.md`
 - [x] No secret reaches the browser (settings, MCP, providers tested) or the logs (redaction tested)
 - [x] README updated (setup, sections, editor, Arabic, security, tests)
 - [ ] First run with real keys on the owner's machine (LLM, ElevenLabs, one image provider) — watch `data/logs/server.log`
-- [ ] Optional: DPAPI encryption of `data/*.json` on Windows
+- [ ] First run on Windows: the dashboard should show «AES-256 + Windows DPAPI»
