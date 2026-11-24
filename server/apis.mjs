@@ -219,3 +219,39 @@ export function applyPronunciation(text, dict) {
   }
   return { text: out, applied: rules.length };
 }
+
+// ---- OpenAI-compatible TTS (OpenAI, or any server exposing /audio/speech) ------------------------
+/** Plain speech (mp3), no timestamps — the timing stage gets them from Deepgram or estimates them. */
+export async function ttsOpenAI(settings, text, { signal } = {}) {
+  const { baseUrl, apiKey, model, voice, speed, instructions } = settings.openaiTts;
+  if (!apiKey && /api\.openai\.com/.test(baseUrl)) throw new Error('OpenAI TTS API key is missing (Settings → الصوت).');
+  assertSafeKeyUrl(baseUrl, apiKey);
+  const res = await fetch(`${trimSlash(baseUrl)}/audio/speech`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+    body: JSON.stringify({ model: model || 'gpt-4o-mini-tts', voice: voice || 'alloy', input: text, response_format: 'mp3', speed: Number(speed) || 1, ...(instructions && /gpt-4o/.test(model) ? { instructions } : {}) }),
+  });
+  if (!res.ok) throw new Error(`TTS ${await failText(res)}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 200 || !isAudio(buf)) throw new Error(`TTS returned no audio (${(res.headers.get('content-type') || '?').split(';')[0]}, ${buf.length} bytes)`);
+  return buf;
+}
+
+/** mp3 (ID3 / MPEG frame sync), WAV, Ogg/Opus, FLAC, AAC (ADTS) or MP4/M4A — anything ffmpeg can read as speech. */
+export function isAudio(b) {
+  const s = (i, n) => b.subarray(i, i + n).toString('latin1');
+  return s(0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) || (s(0, 4) === 'RIFF' && s(8, 4) === 'WAVE') || s(0, 4) === 'OggS' || s(0, 4) === 'fLaC' || s(4, 4) === 'ftyp';
+}
+
+/** A key is sent only over HTTPS — plain HTTP is allowed for this machine only (local servers, mocks). */
+export function assertSafeKeyUrl(url, key) {
+  if (!key) return;
+  let u; try { u = new URL(url); } catch { throw new Error('TTS base URL is not a valid URL'); }
+  const local = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(u.hostname);
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) throw new Error('refusing to send the API key over plain HTTP — use an https:// URL (http is allowed for localhost only)');
+}
+
+export async function testOpenAITts(settings) {
+  const buf = await ttsOpenAI(settings, 'تجربة', { signal: AbortSignal.timeout(30000) });
+  return { ok: true, message: `متصل — رجّع ${(buf.length / 1024).toFixed(0)} KB صوت` };
+}

@@ -4,29 +4,26 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
-import { chatStream, ttsWithTimestamps, transcribeWords, applyPronunciation } from './apis.mjs';
+import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
+import { estimateWords } from './estimate.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
-import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { storyboardMessages, reviewMessages, sceneMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { assertStoryboard } from './scene-schema.mjs';
 import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
-import { run, probeDuration, renderFrames, writeSfx, mixAudio, muxFinal, contactSheet } from './render.mjs';
-import { effectiveEdit, cleanEdit, layoutFor, prepareClip, checkRenderInputs } from './edit.mjs';
+import { run, probeDuration, writeSfx, mixAudio, muxFinal, contactSheet, validateOutput } from './render.mjs';
+import { renderVideo } from './engines/manager.mjs';
+import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
-import { JobQueue, runQueued, parseLimit } from './queue.mjs';
-import { keptSegments, outDuration, srcToOut } from './timeline.mjs';
+import { keptSegments, outDuration, srcToOut, outToSrc, sequenceToSegments, isHold } from './timeline.mjs';
+import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
-
-// Rendering is the memory-hungry stage (Chromium + ffmpeg): at most RS_MAX_RENDERS run at once (default 1), the rest queue.
-const lim = parseLimit(process.env.RS_MAX_RENDERS);
-if (lim.note) slog('warn', lim.note);
-export const renderQueue = new JobQueue({ limit: lim.n });
-const TRANSIENT_RENDER = /Target (page, context or browser has been )?(closed|crashed)|Target crashed|Page crashed|browser has been closed|Protocol error|ECONNRESET|socket hang up/i;
 
 const cache = new Map(); // id → project
 const buses = new Map(); // id → EventEmitter
@@ -91,7 +88,8 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
-    edit: ['9:16', '1:1', '16:9'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
+    edit: PLATFORMS[options.platform] ? { export: { platform: options.platform, aspect: PLATFORMS[options.platform].aspect, resolution: PLATFORMS[options.platform].resolution, fps: PLATFORMS[options.platform].fps } }
+      : ['9:16', '1:1', '16:9', '4:5'].includes(options.aspect) ? { export: { aspect: options.aspect } } : {},
     publish: { status: 'idle', log: [] },
   };
   fs.mkdirSync(projectDir(id), { recursive: true });
@@ -142,13 +140,7 @@ export function runPipeline(id) {
         log(p, stage, `▶ ${stage} started`);
         save(p);
         try {
-          if (stage === 'render') {
-            await runQueued(renderQueue, p.id, (attempt) => STAGE_FN.render(p, entry.controller.signal, attempt), {
-              signal: entry.controller.signal, retries: 1, backoffMs: 3000, retryable: (e) => TRANSIENT_RENDER.test(e.message),
-              onWait: (pos) => { log(p, 'render', `⏳ queued — position ${pos} (another render is running)`); bus(p.id).emit('event', { type: 'queue', data: { position: pos } }); },
-              onRetry: (n, e) => log(p, 'render', `⚠ transient browser failure (${e.message.split('\n')[0]}) — retry ${n}`),
-            });
-          } else await STAGE_FN[stage](p, entry.controller.signal);
+          await STAGE_FN[stage](p, entry.controller.signal);
           if (entry.controller.signal.aborted) throw new Error('cancelled');
           st.endedAt = new Date().toISOString();
           st.status = p.approvals[stage] === 'wait' ? 'review' : 'done';
@@ -174,15 +166,6 @@ export function runPipeline(id) {
     }
   })();
   return true;
-}
-
-/** Stops every running pipeline and publish and waits for them (used by the graceful shutdown). */
-export async function shutdown() {
-  const ids = [...running.keys()];
-  for (const id of ids) cancelPublish(id);
-  await Promise.all(ids.map((id) => stopRun(id)));
-  for (const id of ids) { const p = cache.get(id); if (p) { try { save(p); } catch {} } }
-  return ids.length;
 }
 
 export async function cancel(id) {
@@ -258,6 +241,7 @@ export async function editStage(id, stage, body) {
     });
   } else {
     const { storyboard, fixes } = repairStoryboard(body._parsed, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(storyboard, { words: p.words });
     p.storyboard = storyboard; p.storyboardFixes = fixes;
     p.icons = iconsFor(storyboardNouns(storyboard));
   }
@@ -282,35 +266,19 @@ function validateEdit(p, stage, body) {
 }
 
 export async function saveUpload(id, buf, filename, mime) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
   if (!buf?.length) throw httpError(400, 'empty upload');
-  if (!looksLikeMedia(buf)) throw httpError(415, UPLOAD_BAD);
-  const tmp = path.join(projectDir(id), `.upload-${crypto.randomBytes(6).toString('hex')}`);
-  if (!getProject(id)) throw httpError(404, 'project not found');
-  fs.writeFileSync(tmp, buf);
-  return saveUploadFile(id, tmp, filename, mime);
-}
-const UPLOAD_BAD = 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)';
-
-/** Takes ownership of an already-written temp file (streamed from the request — never held in RAM). Always removes it on failure. */
-export async function saveUploadFile(id, tmp, filename, mime) {
-  try {
-    const p = getProject(id);
-    if (!p) throw httpError(404, 'project not found');
-    const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(64); const got = fs.readSync(fd, head, 0, 64, 0); fs.closeSync(fd);
-    if (!got) throw httpError(400, 'empty upload');
-    if (!looksLikeMedia(head.subarray(0, got))) throw httpError(415, UPLOAD_BAD);
-    await stopForEdit(p, 'new voice-over uploaded');
-    const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
-    for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
-    const dest = path.join(projectDir(id), `upload.${ext}`);
-    try { fs.renameSync(tmp, dest); } catch { fs.copyFileSync(tmp, dest); fs.rmSync(tmp, { force: true }); }
-    const size = fs.statSync(dest).size;
-    p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size };
-    p.voiceMode = 'upload';
-    if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
-    log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(size / 1024).toFixed(0)} KB)`);
-    save(p);
-  } finally { fs.rmSync(tmp, { force: true }); }
+  if (!looksLikeMedia(buf)) throw httpError(415, 'الملف مش ملف صوت معروف (mp3/wav/m4a/aac/ogg/opus/flac/webm/mp4)');
+  await stopForEdit(p, 'new voice-over uploaded');
+  const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
+  for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
+  fs.writeFileSync(path.join(projectDir(id), `upload.${ext}`), buf);
+  p.upload = { file: `upload.${ext}`, mime: mime || 'audio/mpeg', name: String(filename || '').slice(0, 120), size: buf.length };
+  p.voiceMode = 'upload';
+  if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
+  log(p, 'voice', `uploaded voice-over ${p.upload.name || p.upload.file} (${(buf.length / 1024).toFixed(0)} KB)`);
+  save(p);
 }
 
 /** Magic-byte check: the bytes must be a container ffmpeg can read as audio, whatever the file name says. */
@@ -373,34 +341,47 @@ const STAGE_FN = {
     if (p.voiceMode === 'upload') {
       if (!p.upload) throw new Error('voice mode is "upload" but no file was uploaded');
       log(p, 'voice', `converting ${p.upload.file} → voice.mp3`);
-      const part = path.join(dir, 'voice.part.mp3'); // converted aside, then renamed: a crash never leaves a truncated voice.mp3
-      try { await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', part], { signal }); fs.renameSync(part, out); }
-      finally { fs.rmSync(part, { force: true }); }
+      await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
       p.voice = { file: 'voice.mp3', source: 'upload', duration: await probeDuration(out) };
       log(p, 'voice', `voice-over ${p.voice.duration.toFixed(2)} s`);
       return;
     }
     const s = getSettings();
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
+    if (s.tts?.provider === 'openai') {
+      log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
+      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
+      p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
+      log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
+      return;
+    }
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
-    writeFileAtomic(out, audio);
+    fs.writeFileSync(out, audio);
     const timed = charsToWords(chars);
-    writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
+    fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
     p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length };
     log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s · ${chars.length} timed characters → ${timed.length} words`);
   },
 
   async timing(p, signal) {
     const dir = projectDir(p.id);
-    let timed;
-    if (p.voice?.source === 'upload') {
-      const s = getSettings();
-      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on uploaded voice`);
+    let timed, estimated = false;
+    const s0 = getSettings();
+    if (['upload', 'openai'].includes(p.voice?.source) && !s0.deepgram.apiKey) {
+      // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
+      log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
+      const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
+      timed = wordsWithChars(dw);
+      estimated = true;
+    } else if (['upload', 'openai'].includes(p.voice?.source)) {
+      const s = s0;
+      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on the ${p.voice.source === 'upload' ? 'uploaded' : 'generated'} voice`);
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
-      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
       timed = wordsWithChars(dw);
       log(p, 'timing', `Deepgram heard ${dw.length} words`);
     } else {
@@ -412,7 +393,7 @@ const STAGE_FN = {
     p.words = words;
     const weak = words.filter((w) => w.weak);
     const avg = words.reduce((a, w) => a + w.match, 0) / Math.max(1, words.length);
-    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: p.voice.source };
+    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: estimated ? 'estimate' : p.voice.source, estimated };
     log(p, 'timing', `aligned ${words.length} script words · mean char match ${(avg * 100).toFixed(0)}% · ${weak.length} weak`);
     if (weak.length) log(p, 'timing', `weak: ${weak.slice(0, 12).map((w) => `#${w.i} ${w.text}`).join(', ')}${weak.length > 12 ? '…' : ''}`);
   },
@@ -441,6 +422,8 @@ const STAGE_FN = {
       if (signal.aborted) throw e;
       log(p, 'storyboard', `⚠ self-review failed (${e.message}) — keeping the draft`);
     }
+    assertStoryboard(final.storyboard, { words: p.words });
+    log(p, 'storyboard', `scene JSON valid (schema ${final.storyboard.scenes.length} scenes)`);
     p.storyboard = final.storyboard;
     p.storyboardFixes = final.fixes;
     await autoVisuals(p, signal);
@@ -449,15 +432,12 @@ const STAGE_FN = {
     log(p, 'storyboard', `icons: ${Object.entries(p.icons).map(([n, v]) => `${n}→${v.key}`).join(', ')}`);
   },
 
-  async render(p, signal, attempt = 0) {
+  async render(p, signal) {
     const dir = projectDir(p.id);
+    // every engine receives validated scene JSON — an invalid storyboard stops here with the exact problems
+    assertStoryboard(p.storyboard, { words: p.words });
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
-    { // validation gate: never start a long render on input the renderer cannot use
-      const rd = renderData(p);
-      const problems = checkRenderInputs({ words: p.words, storyboard: p.storyboard, edit: E, voiceExists: fs.existsSync(path.join(dir, 'voice.mp3')), hasAsset: (id) => !!getAsset(id), duration: rd.duration });
-      if (problems.length) throw new Error(`render input check failed: ${problems.join('; ')}`);
-    }
     const FPS = E.export.fps;
     // video clips (scene media and overlays) → frames on disk at the output fps and size
     p.clips = {};
@@ -474,14 +454,21 @@ const STAGE_FN = {
     const data = renderData(p);
     const { duration, start, segments } = data;
     const audioCfg = getSettings().audio;
-    log(p, 'render', `${duration.toFixed(2)} s${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    log(p, 'render', `${duration.toFixed(2)} s${E.sequence ? ` · custom order: ${segments.filter((x) => !isHold(x)).length} parts, ${segments.filter(isHold).length} pause(s)` : `${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''}`} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    if (data.platform?.check.level === 'over') log(p, 'render', `⚠ ${data.platform.check.message}`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
-    await renderFrames({
-      url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-      out: tmpVideo, duration, start, segments, fps: FPS, width: L.width, height: L.height, quality: E.export.quality,
-      segDir: path.join(dir, 'segments'), key, signal, maxWorkers: attempt > 0 ? 1 : 0 /* a retry after a browser crash (usually out of memory) uses one page */, log: (l) => log(p, 'render', l),
+    const total = Math.ceil(duration * FPS - 1e-9);
+    const job = await renderVideo({
+      project: p.id, engine: E.export.engine, fallback: getSettings().render.fallback !== false,
+      source: {
+        projectId: p.id, port: serverPort, data, url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
+        timeOf: (i) => outToSrc(i / FPS, segments),
+      },
+      total, out: tmpVideo, fps: FPS, width: L.width, height: L.height, quality: E.export.quality, codec: E.export.codec, bitrate: E.export.bitrate,
+      segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
+      onJob: (j) => bus(p.id).emit('event', { type: 'job', data: j }),
       onFrame: (i, total, jpg) => {
         const now = Date.now();
         if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
@@ -494,27 +481,38 @@ const STAGE_FN = {
     const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
-    // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
-    const vdur = Math.ceil(duration * FPS - 1e-9) / FPS;
-    writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
+    writeSfx(path.join(dir, 'sfx.wav'), duration, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
-      clips: await clipSounds(E.overlays, E.audio.tracks || []),
+      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration, segments, voiceVolume: E.audio.voiceVolume,
+      clips: await clipSounds(E.overlays),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
-    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal, expect: { width: L.width, height: L.height, fps: FPS, duration: vdur, frames: Math.ceil(duration * FPS - 1e-9) } });
-    log(p, 'render', 'output verified with ffprobe (codecs, size, fps, frame count, durations)');
+    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal });
+    // a zero exit code proves nothing: size, fps, codec, audio and duration are checked on the file itself
+    const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
+    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
     fs.rmSync(path.join(dir, 'segments'), { recursive: true, force: true });
-    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), ...(E.audio.tracks || []).map((x) => x.asset), musicAsset?.id].filter(Boolean);
+    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), musicAsset?.id].filter(Boolean);
     p.render = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
+      engine: job.engine, fallbackFrom: job.fallbackFrom, codec: job.codec, bitrate: E.export.bitrate, renderSeconds: job.seconds, job: job.id,
     };
+    const outDir = getSettings().render.outputDir;
+    if (outDir) {
+      try {
+        fs.mkdirSync(outDir, { recursive: true });
+        const name = `${(p.topic || p.id).replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').trim().slice(0, 60) || p.id} - ${p.id}.mp4`;
+        fs.copyFileSync(path.join(dir, 'video.mp4'), path.join(outDir, name));
+        p.render.exported = path.join(outDir, name);
+        log(p, 'render', `copied to ${p.render.exported}`);
+      } catch (e) { log(p, 'render', `⚠ output folder: ${e.message}`); }
+    }
     log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved${p.render.credits.length ? ` · ${p.render.credits.length} credits` : ''}`);
   },
 };
@@ -572,6 +570,7 @@ export async function saveEdit(id, body) {
     if (typeof body.storyboard !== 'object') throw httpError(400, 'storyboard must be an object');
     const r = repairStoryboard(body.storyboard, words || p.words, { forceTemplate: p.options.forceTemplate });
     for (const sc of r.storyboard.scenes) if (sc.image && !getAsset(sc.image)) throw httpError(400, `scene image ${sc.image} is not in the library`);
+    assertStoryboard(r.storyboard, { words: words || p.words });
     sb = r.storyboard; fixes = r.fixes;
   }
   const edit = body?.edit ? cleanEdit(body.edit, { duration }) : null;
@@ -584,6 +583,45 @@ export async function saveEdit(id, body) {
   log(p, 'render', `✎ editor: ${[words && 'timing', sb && 'scenes', edit && Object.keys(edit).join('/')].filter(Boolean).join(' + ')} changed${fixes.length ? ` (${fixes.length} auto-fixes)` : ''}`);
   save(p);
   return { project: publicProject(p), fixes };
+}
+
+/**
+ * Regenerates one scene with the LLM (optionally steered by a hint), keeps its start word and media, repairs and
+ * validates the whole storyboard, and resets the render. The other scenes are untouched.
+ */
+const regenerating = new Set();
+export async function regenerateScene(id, k, { hint = '' } = {}) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  if (!p.words || !p.storyboard) throw httpError(409, 'storyboard is not ready');
+  const scenes = p.storyboard.scenes;
+  k = Number(k);
+  if (!Number.isInteger(k) || k < 0 || k >= scenes.length) throw httpError(400, `scene ${k} does not exist`);
+  if (regenerating.has(id)) throw httpError(409, 'a scene is already being regenerated');
+  regenerating.add(id);
+  try {
+    const sc = scenes[k];
+    const to = k + 1 < scenes.length ? scenes[k + 1].at : p.words.length;
+    const msgs = sceneMessages({ title: p.script?.title || p.topic, words: p.words.slice(sc.at, to), scene: sc, prev: scenes[k - 1], next: scenes[k + 1], hint: String(hint || '').slice(0, 300) });
+    const r = await chatStream(getSettings(), msgs, { temperature: 0.8, maxTokens: 900 });
+    let raw = extractJson(r.text);
+    if (Array.isArray(raw?.scenes)) raw = raw.scenes[0];
+    if (!raw || typeof raw !== 'object') throw httpError(502, 'the model did not return a scene');
+    // the scene keeps its place in time and the media the user picked for it
+    const next = { ...raw, at: sc.at, image: raw.template === 'photo' || sc.bg === 'full' ? sc.image : null, bg: sc.bg, imageOffset: sc.imageOffset };
+    if (k === 0) next.type = 'intro';
+    const rep = repairStoryboard({ ...p.storyboard, scenes: scenes.map((s, i) => (i === k ? next : s)) }, p.words, { forceTemplate: p.options.forceTemplate });
+    assertStoryboard(rep.storyboard, { words: p.words });
+    if (rep.storyboard.scenes.length !== scenes.length) throw httpError(422, 'the new scene would merge with a neighbour — try again');
+    await stopForEdit(p, 'scene regeneration');
+    p.storyboard = rep.storyboard;
+    p.icons = iconsFor(storyboardNouns(rep.storyboard));
+    resetFrom(p, 'render');
+    const ns = rep.storyboard.scenes[k];
+    log(p, 'storyboard', `↻ scene ${k + 1} regenerated: ${sc.template} → ${ns.template}${hint ? ` (hint: ${String(hint).slice(0, 60)})` : ''}${rep.fixes.length ? ` · ${rep.fixes.length} auto-fixes` : ''}`);
+    save(p);
+    return { project: publicProject(p), scene: ns, fixes: rep.fixes };
+  } finally { regenerating.delete(id); }
 }
 
 // ---- publish (YouTube) ------------------------------------------------------------
@@ -655,8 +693,9 @@ export function renderData(p) {
   const full = Math.max(p.voice?.duration || 0, lastEnd + 0.3) + 0.6;
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
-  let segments = keptSegments(start, end, E.cuts);
-  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a cut list that removes everything is ignored
+  let segments = E.sequence ? sequenceToSegments(E.sequence) : keptSegments(start, end, E.cuts); // custom order wins
+  // only the default trim/cut path falls back; a custom sequence is validated (cleanSequence) and kept as is
+  if (!E.sequence && outDuration(segments) < 0.5) segments = [[start, end]];
   const sc = p.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,
@@ -675,10 +714,10 @@ export function renderData(p) {
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
     id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
-    tracks: (E.audio.tracks || []).filter((x) => getAsset(x.asset)).map((x) => ({ id: x.id, src: `/api/assets/${x.asset}/file`, start: x.start, end: x.end, offset: x.offset || 0, volume: Math.min(1, x.volume), fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 })),
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
+    platform: E.export.platform ? { id: E.export.platform, ...PLATFORMS[E.export.platform], check: durationCheck(E.export.platform, outDuration(segments)) } : null,
     words: p.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
     accents: p.storyboard.accents, scenes, icons: p.icons || {}, media,
     overlays: E.overlays.map((o) => ({ ...o, clip: p.clips?.[`ov-${o.id}`] ? clipRef(p, `ov-${o.id}`) : null })),
@@ -686,14 +725,8 @@ export function renderData(p) {
   };
 }
 /** Video overlays whose sound is turned up → mix inputs (source time). Files without an audio stream are skipped. */
-async function clipSounds(overlays, tracks = []) {
+async function clipSounds(overlays) {
   const out = [];
-  // independent audio tracks (sound effects, a second voice, extra music): same source-time mix as clip sounds, so cuts apply
-  for (const x of tracks) {
-    const a = getAsset(x.asset);
-    if (!a || a.kind !== 'audio' || !(x.volume > 0)) continue;
-    out.push({ file: assetFile(a), at: x.start, offset: x.offset || 0, length: Math.min(x.end - x.start, Math.max(0.1, (a.duration || 1e9) - (x.offset || 0))), volume: x.volume, fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 });
-  }
   for (const o of overlays) {
     if (o.kind !== 'video' || !(o.volume > 0)) continue;
     const a = getAsset(o.asset);

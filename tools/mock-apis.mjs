@@ -315,6 +315,16 @@ const server = http.createServer(async (req, res) => {
         reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
+      else if (sys.includes('[[TASK:SCENE]]')) {
+        // a different template than the current one; the hint "chart" asks for numbers (a bad chart without them, to exercise repair)
+        const cur = JSON.parse((user.match(/CURRENT SCENE: (.*)/) || [])[1] || '{}');
+        const idx = [...user.matchAll(/(\d+):\S+@/g)].map((m) => +m[1]);
+        const hint = (user.match(/HINT FROM THE EDITOR: (.*)/) || [])[1] || '';
+        const sc = /chart/.test(hint)
+          ? { type: 'stat', template: 'chart', title: 'بالأرقام', items: [{ label: 'أزرق', icon: 'sun', value: 70, at: idx[1] ?? null }, { label: 'أحمر', icon: 'fire', value: 30, at: null }], unit: '%' }
+          : { type: 'concept', template: cur.template === 'type' ? 'cards' : 'type', title: 'مشهد جديد', items: [{ label: 'فكرة جديدة', icon: 'light', value: null, at: idx[1] ?? null }], transition: 'wipe', titleAnim: 'words' };
+        reply = '```json\n' + JSON.stringify(sc) + '\n```';
+      }
       else if (sys.includes('[[TASK:RESEARCH]]')) reply = JSON.stringify({ angle: 'الضوء الأزرق بيتشتت أكتر', facts: [
         { claim: 'Sunlight contains all visible colours', confidence: 'high', source: 'NASA Space Place — Why is the sky blue?' },
         { claim: 'Shorter (blue) wavelengths scatter more off air molecules (Rayleigh scattering)', confidence: 'high', source: 'Encyclopaedia Britannica — Rayleigh scattering' },
@@ -359,6 +369,24 @@ const server = http.createServer(async (req, res) => {
         audio_base64: mp3.toString('base64'),
         alignment: { characters: chars.map((c) => c.c), character_start_times_seconds: chars.map((c) => +c.start.toFixed(3)), character_end_times_seconds: chars.map((c) => +c.end.toFixed(3)) },
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/audio/speech') { // OpenAI-compatible TTS: mp3, no timestamps
+      const { input, model, voice } = JSON.parse((await readBody(req)).toString('utf8'));
+      if (!input || !model || !voice) return json(res, 400, { error: { message: 'input, model and voice are required' } });
+      lastTtsText = input;
+      const { wav } = synth(input);
+      const tmp = path.join(os.tmpdir(), `mock-oai-${process.pid}-${Date.now()}.mp3`);
+      await ff(['-hide_banner', '-loglevel', 'error', '-y', '-f', 'wav', '-i', 'pipe:0', '-c:a', 'libmp3lame', '-b:a', '128k', tmp], wav);
+      const mp3 = fs.readFileSync(tmp); fs.rmSync(tmp, { force: true });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3.length });
+      return res.end(mp3);
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/_truth') { // test helper: the synthesizer's real word onsets
+      const { text } = JSON.parse((await readBody(req)).toString('utf8'));
+      const { chars } = synth(text);
+      const words = []; let cur = null;
+      for (const c of chars) { if (/\s/.test(c.c)) { cur = null; continue; } if (!cur) { cur = { text: '', start: c.start, end: c.end }; words.push(cur); } cur.text += c.c; cur.end = c.end; }
+      return json(res, 200, { words });
     }
     if (req.method === 'POST' && url.pathname === '/v1/listen') {
       if (!/^Token /.test(req.headers.authorization || '')) return json(res, 401, { err_msg: 'missing token' });

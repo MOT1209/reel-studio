@@ -46,8 +46,8 @@
         <label>اللغة
           <select id="dialect"><option value="egyptian">عامية مصرية</option><option value="msa">فصحى مبسطة</option><option value="levantine">شامي</option><option value="gulf">خليجي</option></select>
         </label>
-        <label>المقاس
-          <select id="newAspect"><option value="9:16">9:16 ريلز/شورتس</option><option value="1:1">1:1 مربع</option><option value="16:9">16:9 يوتيوب</option></select>
+        <label>المنصة
+          <select id="newPlatform"><option value="youtube-shorts">YouTube Shorts</option><option value="tiktok">TikTok</option><option value="instagram-reels">Instagram Reels</option><option value="facebook-reels">Facebook Reels</option><option value="instagram-feed">Instagram منشور 4:5</option><option value="youtube">YouTube عرضي 16:9</option><option value="square">مربع X / LinkedIn</option></select>
         </label>
       </div>
       <label class="row"><input type="checkbox" id="research" checked> بحث مبدئي قبل الكتابة (ملاحظات غير متحقق منها)</label>
@@ -216,11 +216,19 @@
         <a class="btnlink" href="https://unsplash.com/developers" target="_blank" rel="noopener">↗ سجّل تطبيق</a></section>
       <section><h4>اختيار الصور تلقائيًا</h4><p class="hint">المشاهد اللي قالبها «صورة/فيديو» بتاخد أول نتيجة مناسبة من أول مكتبة متوصلة (Pexels ← Pixabay ← Unsplash). من غير مكتبة، المشهد بيتحوّل لقالب مرسوم.</p></section>
       <section><h4>الرندر الافتراضي</h4>
-        <div class="two"><label>المقاس <select name="render.aspect"><option value="9:16">9:16</option><option value="1:1">1:1</option><option value="16:9">16:9</option></select></label>
+        <div class="two"><label>المقاس <select name="render.aspect"><option value="9:16">9:16</option><option value="4:5">4:5</option><option value="1:1">1:1</option><option value="16:9">16:9</option></select></label>
         <label>الدقة <select name="render.resolution"><option value="1080">1080p</option><option value="720">720p</option></select></label></div>
         <label>الجودة <select name="render.quality"><option value="draft">مسودة (سريع)</option><option value="standard">عادي</option><option value="high">عالي</option></select></label>
         <label>مستوى الموسيقى الافتراضي <input type="range" name="audio.musicVolume" min="0" max="1" step="0.05"></label>
         <label class="row"><input type="checkbox" name="audio.duck"> وطّي الموسيقى تحت صوت الراوي</label></section>
+      <section><h4>محرك الرندر</h4>
+        <p class="hint" id="engineStatus">…</p>
+        <div class="two"><label>المحرك <select name="render.engine"><option value="auto">تلقائي (Remotion لو متاح)</option><option value="remotion">Remotion</option><option value="legacy">كلاسيكي (Canvas + Playwright)</option></select></label>
+        <label>فيديوهات في نفس الوقت <select name="render.maxJobs"><option value="1">1 (مقترح لـ 8 GB رام)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label></div>
+        <label class="row"><input type="checkbox" name="render.fallback"> لو المحرك المختار فشل، كمّل بالمحرك الكلاسيكي</label>
+        <div class="two"><label>الترميز <select name="render.codec"><option value="h264">H.264 (كل المنصات)</option><option value="h265">H.265 (حجم أصغر)</option></select></label>
+        <label>معدل البت <select name="render.bitrate"><option value="">جودة ثابتة (حسب «الجودة»)</option><option value="4000">4 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option></select></label></div>
+        <label>فولدر التصدير (اختياري) <input name="render.outputDir" dir="ltr" placeholder="مثلاً D:\Videos\Reels — نسخة من كل فيديو بتتحط هنا"></label></section>
     </div>
 
     <p class="err" id="settingsErr"></p>

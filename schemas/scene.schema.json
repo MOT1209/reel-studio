@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://reel-studio.local/schemas/scene.schema.json",
+  "title": "Reel Studio storyboard",
+  "description": "The validated scene JSON every render engine receives (after AI generation + repair, and after editor changes). Times are word indices into the timed script; the server turns them into seconds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scenes", "accents"],
+  "properties": {
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 60,
+      "items": { "$ref": "#/definitions/scene" }
+    },
+    "accents": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": [
+          { "type": "integer", "minimum": 0 },
+          { "enum": ["accent", "blue", "success", "warning", "underline"] }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "template", "at", "title", "items"],
+      "properties": {
+        "type": { "enum": ["intro", "question", "concept", "process", "compare", "stat", "recap"] },
+        "template": { "enum": ["body", "zoom", "flow", "cycle", "timeline", "chart", "layers", "cards", "meter", "photo", "type"] },
+        "at": { "type": "integer", "minimum": 0, "description": "index of the word where the scene starts" },
+        "title": { "type": "string", "maxLength": 40 },
+        "items": { "type": "array", "maxItems": 5, "items": { "$ref": "#/definitions/item" } },
+        "organ": { "type": "string", "maxLength": 40 },
+        "value": { "type": ["number", "null"] },
+        "max": { "type": ["number", "null"] },
+        "unit": { "type": "string", "maxLength": 12 },
+        "query": { "type": "string", "maxLength": 60 },
+        "image": { "type": ["string", "null"], "pattern": "^[a-f0-9]{12}$" },
+        "bg": { "enum": ["card", "full"] },
+        "imageOffset": { "type": "number", "minimum": 0 },
+        "transition": { "enum": ["push", "fade", "zoom", "slide", "wipe", "rise", "none", null], "description": "how this scene enters (null = project default)" },
+        "titleAnim": { "enum": ["rise", "fade", "pop", "words", "none", null], "description": "scene title animation (null = rise)" }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "icon", "value", "at"],
+      "properties": {
+        "label": { "type": "string", "maxLength": 30 },
+        "icon": { "type": "string", "maxLength": 40 },
+        "value": { "type": ["number", "null"] },
+        "at": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

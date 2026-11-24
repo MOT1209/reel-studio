@@ -5,9 +5,13 @@ export const TYPES = ['intro', 'question', 'concept', 'process', 'compare', 'sta
 export const TEMPLATES = ['body', 'zoom', 'flow', 'cycle', 'timeline', 'chart', 'layers', 'cards', 'meter', 'photo', 'type'];
 export const BGS = ['card', 'full'];
 export const TONES = ['accent', 'blue', 'success', 'warning', 'underline'];
+/** Animation presets a scene may choose (null = the project default). Implemented in public/render.js. */
+export const SCENE_TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'wipe', 'rise', 'none'];
+export const TITLE_ANIMS = ['rise', 'fade', 'pop', 'words', 'none'];
+export const ITEM_RANGE = { body: [1, 1], zoom: [2, 2], flow: [2, 4], cycle: [3, 5], timeline: [2, 5], chart: [2, 5], layers: [2, 5], cards: [1, 3], meter: [0, 1], photo: [0, 2], type: [0, 3] };
 
 const TYPE_DEFAULT = { intro: 'zoom', question: 'cards', concept: 'zoom', process: 'flow', compare: 'cards', stat: 'meter', recap: 'cards' };
-const ITEMS = { body: [1, 1], zoom: [2, 2], flow: [2, 4], cycle: [3, 5], timeline: [2, 5], chart: [2, 5], layers: [2, 5], cards: [1, 3], meter: [0, 1], photo: [0, 2], type: [0, 3] };
+const ITEMS = ITEM_RANGE;
 const ALT = {
   body: ['zoom', 'cards'], zoom: ['cards', 'layers'], flow: ['timeline', 'cycle', 'cards'], cycle: ['flow', 'cards'],
   timeline: ['flow', 'cards'], chart: ['cards', 'meter'], layers: ['cards', 'flow'], cards: ['layers', 'flow', 'zoom'], meter: ['chart', 'cards'],
@@ -49,6 +53,24 @@ Rules:
 - Labels are Egyptian Arabic and short; keep English science terms in English (DNA, oxygen).
 - accents: 2–6 key words. tones: accent (main term), blue (secondary term), success (good/positive), warning (danger only), underline (the key number or the answer).${forceTemplate ? `\n- TEST MODE: use template "${forceTemplate}" for every scene.` : ''}` },
     { role: 'user', content: `TITLE: ${title}\nDURATION: ${duration.toFixed(2)}s\nWORDS (index:word@startSeconds):\n${wordList}` },
+  ];
+}
+
+/** Regenerates ONE scene: the words it covers, its neighbours for context, an optional user hint. */
+export function sceneMessages({ title, words, scene, prev, next, hint }) {
+  const wordList = words.map((w) => `${w.i}:${w.text}@${w.start.toFixed(2)}`).join(' ');
+  return [
+    { role: 'system', content: `[[TASK:SCENE]]
+You redesign ONE scene of a science-explainer reel storyboard. Return ONLY one JSON object (no prose, no code fences):
+{"type":..., "template":..., "title":"<short Arabic headline ≤ 4 words>", "query":"<English stock keywords>", "items":[{"label":"<Arabic ≤ 3 words>","icon":"<simple English noun>","value":<number|null>,"at":<wordIndex|null>}], "organ":"<body only>", "value":<meter only>, "max":<meter only>, "unit":"<meter/chart>", "transition":"push|fade|zoom|slide|wipe|rise|none", "titleAnim":"rise|fade|pop|words|none"}
+Templates: body, zoom, flow, cycle, timeline, chart, layers, cards, meter, photo, type (same rules as the full storyboard: item counts per template, chart needs numbers, meter needs value).
+Pick a DIFFERENT angle than the current scene unless the hint says otherwise. Item "at" values must be word indices from the list below.` },
+    { role: 'user', content: `TITLE: ${title}
+PREVIOUS SCENE: ${prev ? JSON.stringify({ type: prev.type, template: prev.template, title: prev.title }) : 'none'}
+CURRENT SCENE: ${JSON.stringify({ type: scene.type, template: scene.template, title: scene.title, items: scene.items })}
+NEXT SCENE: ${next ? JSON.stringify({ type: next.type, template: next.template, title: next.title }) : 'none'}
+${hint ? `HINT FROM THE EDITOR: ${hint}\n` : ''}WORDS OF THIS SCENE (index:word@startSeconds):
+${wordList}` },
   ];
 }
 
@@ -117,6 +139,7 @@ export function repairStoryboard(raw, words, { forceTemplate } = {}) {
       type, template, at, title: str(s.title, 40), items, organ: nounOf(s.organ), value: num(s.value), max: num(s.max), unit: str(s.unit, 12),
       query: str(s.query, 60), image: /^[a-f0-9]{12}$/.test(s.image || '') ? s.image : null, bg: BGS.includes(s.bg) ? s.bg : 'card',
       imageOffset: Math.max(0, Number(s.imageOffset) || 0),
+      transition: SCENE_TRANSITIONS.includes(s.transition) ? s.transition : null, titleAnim: TITLE_ANIMS.includes(s.titleAnim) ? s.titleAnim : null,
     };
   });
 
@@ -127,7 +150,7 @@ export function repairStoryboard(raw, words, { forceTemplate } = {}) {
   scenes = scenes.filter((s, i) => { if (i && s.at === scenes[i - 1].at) { fixes.push(`duplicate scene at word ${s.at} dropped`); return false; } return true; });
 
   // first scene = intro at 0
-  if (!scenes.length) scenes.push({ type: 'intro', template: forceTemplate || 'zoom', at: 0, title: '', items: [], organ: '', value: null, max: null, unit: '', query: '', image: null, bg: 'card', imageOffset: 0 });
+  if (!scenes.length) scenes.push({ type: 'intro', template: forceTemplate || 'zoom', at: 0, title: '', items: [], organ: '', value: null, max: null, unit: '', query: '', image: null, bg: 'card', imageOffset: 0, transition: null, titleAnim: null });
   if (scenes[0].at !== 0) { fixes.push(`first scene moved from word ${scenes[0].at} to 0`); scenes[0].at = 0; }
   if (scenes[0].type !== 'intro') { fixes.push(`first scene type ${scenes[0].type} → intro`); scenes[0].type = 'intro'; }
 

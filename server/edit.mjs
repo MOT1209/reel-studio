@@ -7,10 +7,11 @@ import { getSettings, ASPECTS, QUALITIES } from './settings.mjs';
 import { cleanTypography } from './fonts.mjs';
 import { getAsset, assetFile, validAssetId } from './assets.mjs';
 import { run } from './render.mjs';
-import { cleanCuts } from './timeline.mjs';
+import { cleanCuts, cleanSequence } from './timeline.mjs';
+import { PLATFORMS } from './platforms.mjs';
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
-export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'none'];
+export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'wipe', 'rise', 'none'];
 export const OVERLAY_KINDS = ['text', 'image', 'video'];
 export const POSITIONS = ['top', 'center', 'bottom', 'full'];
 export const ANIMS = ['fade', 'pop', 'slide', 'none'];
@@ -45,6 +46,11 @@ export function cleanKeyframes(list, length) {
 }
 
 /** Edit with every default filled in (Settings supply the project-independent defaults). */
+export const ENGINES = ['auto', 'legacy', 'remotion'];
+export const CODEC_IDS = ['h264', 'h265'];
+/** Video bitrate in kbit/s (500–50000) or null = constant quality (CRF). */
+export function bitrateOf(x) { const n = Math.round(Number(x)); return x != null && x !== '' && Number.isFinite(n) && n >= 500 && n <= 50000 ? n : null; }
+
 export function effectiveEdit(e = {}) {
   const s = getSettings();
   return {
@@ -53,9 +59,14 @@ export function effectiveEdit(e = {}) {
       resolution: [720, 1080].includes(e.export?.resolution) ? e.export.resolution : s.render.resolution || 1080,
       fps: [24, 25, 30, 60].includes(e.export?.fps) ? e.export.fps : s.render.fps || 30,
       quality: QUALITIES.includes(e.export?.quality) ? e.export.quality : s.render.quality || 'standard',
+      platform: PLATFORMS[e.export?.platform] ? e.export.platform : null,
+      engine: ENGINES.includes(e.export?.engine) ? e.export.engine : ENGINES.includes(s.render.engine) ? s.render.engine : 'auto',
+      codec: CODEC_IDS.includes(e.export?.codec) ? e.export.codec : CODEC_IDS.includes(s.render.codec) ? s.render.codec : 'h264',
+      bitrate: bitrateOf(e.export?.bitrate) ?? bitrateOf(s.render.bitrate),
     },
     trim: { start: Math.max(0, Number(e.trim?.start) || 0), end: Number(e.trim?.end) > 0 ? Number(e.trim.end) : null },
     cuts: Array.isArray(e.cuts) ? e.cuts : [],
+    sequence: Array.isArray(e.sequence) && e.sequence.length ? e.sequence : null,
     audio: {
       voiceVolume: num(e.audio?.voiceVolume, 0, 2, s.audio.voiceVolume ?? 1),
       sfxVolume: num(e.audio?.sfxVolume, 0, 1, s.audio.sfxVolume ?? 0.6),
@@ -82,6 +93,18 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
     if ([720, 1080].includes(Number(e.export.resolution))) out.export.resolution = Number(e.export.resolution);
     if ([24, 25, 30, 60].includes(Number(e.export.fps))) out.export.fps = Number(e.export.fps);
     if (QUALITIES.includes(e.export.quality)) out.export.quality = e.export.quality;
+    if (ENGINES.includes(e.export.engine)) out.export.engine = e.export.engine;
+    if (CODEC_IDS.includes(e.export.codec)) out.export.codec = e.export.codec;
+    if (e.export.bitrate === null || bitrateOf(e.export.bitrate) !== null) out.export.bitrate = bitrateOf(e.export.bitrate);
+    if (e.export.platform === null) out.export.platform = null;
+    else if (PLATFORMS[e.export.platform]) {
+      // choosing a platform applies its format unless the same edit sets one explicitly
+      const pf = PLATFORMS[e.export.platform];
+      out.export.platform = e.export.platform;
+      out.export.aspect = out.export.aspect || pf.aspect;
+      out.export.resolution = out.export.resolution || pf.resolution;
+      out.export.fps = out.export.fps || pf.fps;
+    }
   }
   if (e.trim && typeof e.trim === 'object') {
     const st = Math.max(0, Math.min(duration - 1, Number(e.trim.start) || 0));
@@ -111,6 +134,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
     });
   }
   if (Array.isArray(e.cuts)) out.cuts = cleanCuts(e.cuts, duration);
+  if (e.sequence === null || Array.isArray(e.sequence)) out.sequence = e.sequence?.length ? cleanSequence(e.sequence, duration) : null;
   if (TRANSITIONS.includes(e.transition)) out.transition = e.transition;
   if (e.typography && typeof e.typography === 'object') out.typography = cleanTypography(e.typography);
   if (Array.isArray(e.overlays)) {
@@ -149,6 +173,7 @@ export function layoutFor(aspect = '9:16', resolution = 1080) {
     '9:16': { DW: 720, DH: 1280, place: { x: 36, y: 232, k: 1 }, title: { right: 684, width: 648, y: 150, size: 40 }, tag: true, caption: { cx: 360, cy: 1036, maxW: 620, lines: 2 } },
     '1:1': { DW: 720, DH: 720, place: { x: 165, y: 158, k: 0.6 }, title: { right: 684, width: 470, y: 120, size: 30 }, tag: true, caption: { cx: 360, cy: 640, maxW: 640, lines: 2, scale: 0.78 } },
     '16:9': { DW: 1280, DH: 720, place: { x: 40, y: 82, k: 0.9 }, title: { right: 1244, width: 600, y: 170, size: 42 }, tag: true, caption: { cx: 960, cy: 470, maxW: 540, lines: 3, scale: 0.95 } },
+    '4:5': { DW: 720, DH: 900, place: { x: 126, y: 160, k: 0.72 }, title: { right: 684, width: 560, y: 124, size: 32 }, tag: true, caption: { cx: 360, cy: 772, maxW: 640, lines: 2, scale: 0.85 } },
   }[aspect] || null;
   if (!L) throw new Error(`unknown aspect ${aspect}`);
   return { aspect, S, width: Math.round(L.DW * S), height: Math.round(L.DH * S), ...L };

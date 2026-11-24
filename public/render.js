@@ -1,7 +1,10 @@
-/* Reel Studio renderer — window.drawFrame(t) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
- * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random). */
+/* Reel Studio renderer — drawFrame(t, tau) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
+ * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random).
+ * Shared by every engine: render.html boots one renderer on its #c canvas (legacy engine, editor preview);
+ * the Remotion composition creates its own with window.ReelRenderer.create(canvas, { host: 'remotion' }). */
 (() => {
   'use strict';
+  function createRenderer(canvas, opts = {}) {
   const C = {
     bg: '#0C1014', card: '#161C22', elev: '#202830', text: '#F4F3EE', sec: '#9AA5AE',
     accent: '#27B8C7', blue: '#5978FF', success: '#36C98F', warning: '#F28A30',
@@ -27,7 +30,6 @@
     TONE = { accent: C.accent, blue: C.blue, success: C.success, warning: C.warning, underline: C.text };
   }
 
-  const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   let D = null; // render data
 
@@ -44,16 +46,31 @@
   const toArDigits = (s) => String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d)));
   const dg = (s) => (TYPO.digits === 'arabic' ? toArDigits(s) : String(s));
   // source time (narration) → output time (after trim + cuts); inside a cut → the output time where the cut sits
+  // segments: [a,b] source ranges or [t,t,d] pauses, in output order (see server/timeline.mjs)
+  const segsOf = () => D.segments || [[D.start, D.end]];
+  const isHold = (sg) => sg.length === 3;
+  const segLen = (sg) => (isHold(sg) ? sg[2] : sg[1] - sg[0]);
+  /** Source → output time; an instant that was cut maps to where the cut sits (nearest following part). */
   function outT(t) {
-    const segs = D.segments || [[D.start, D.end]];
-    let acc = 0;
-    for (const [a, b] of segs) { if (t < a) return acc; if (t <= b) return acc + (t - a); acc += b - a; }
-    return acc;
+    let acc = 0, best = null;
+    for (const sg of segsOf()) {
+      if (!isHold(sg) && t >= sg[0] && t <= sg[1]) return acc + (t - sg[0]);
+      if (!isHold(sg) && t < sg[0] && (best === null || sg[0] < best[0])) best = [sg[0], acc];
+      acc += segLen(sg);
+    }
+    return best ? best[1] : acc;
   }
-  /** Next kept instant at/after t (skips cut ranges); null after the end. */
-  function keptFrom(t) {
-    for (const [a, b] of D.segments || [[D.start, D.end]]) { if (t < a) return a; if (t <= b) return t; }
-    return null;
+  /** Output → source time (+ the segment index and whether it is a pause). */
+  function srcAt(tau) {
+    const segs = segsOf();
+    let acc = 0;
+    for (let k = 0; k < segs.length; k++) {
+      const sg = segs[k], len = segLen(sg);
+      if (tau < acc + len) return { t: isHold(sg) ? sg[0] : sg[0] + (tau - acc), k, hold: isHold(sg), acc };
+      acc += len;
+    }
+    const last = segs[segs.length - 1];
+    return { t: isHold(last) ? last[0] : last[1], k: segs.length - 1, hold: false, acc, end: true };
   }
 
   // ---------- text ----------
@@ -538,6 +555,7 @@
   const CUR = new Map(); // render only: clip ref → decoded frame image for the current t
   const FRAME_CACHE = new Map(); // url → Promise<Image>
   let PREVIEW = false;
+  let HOLD = false; // preview: the output is inside a pause
   function loadImage(src) {
     if (FRAME_CACHE.has(src)) return FRAME_CACHE.get(src);
     const pr = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image failed: ' + src)); im.src = src; });
@@ -569,19 +587,16 @@
     if (!v) return null;
     const want = offset + (m.duration ? local % Math.max(0.1, m.duration - offset) : local);
     if (Math.abs(v.currentTime - want) > 0.25) { try { v.currentTime = want; } catch {} }
-    if (PLAYING && v.paused) v.play().catch(() => {}); else if (!PLAYING && !v.paused) v.pause();
+    // during a pause in the order the frame is held: clips stand still (the output clock and music keep going)
+    const run = PLAYING && !HOLD;
+    if (run && v.paused) v.play().catch(() => {}); else if (!run && !v.paused) v.pause();
     return v.readyState >= 2 ? v : null;
   }
   const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
   /** Draws img covering (x,y,w,h) with a slow Ken Burns push k∈[0,1]. */
-  function drawCover(img, x, y, w, h, k = 0, alpha = 1, crop = null) {
+  function drawCover(img, x, y, w, h, k = 0, alpha = 1) {
     const [iw, ih] = dims(img);
     if (!iw || !ih) return;
-    if (crop) { // draw only the cropped part of the source (fractions of its width/height), cover-fitted
-      const sx = crop.x * iw, sy = crop.y * ih, sw = crop.w * iw, sh = crop.h * ih, sc2 = Math.max(w / sw, h / sh);
-      ctx.save(); ctx.globalAlpha *= alpha; ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-      ctx.drawImage(img, sx, sy, sw, sh, x + (w - sw * sc2) / 2, y + (h - sh * sc2) / 2, sw * sc2, sh * sc2); ctx.restore(); return;
-    }
     const sc = Math.max(w / iw, h / ih) * (1 + 0.08 * k);
     const dw = iw * sc, dh = ih * sc;
     ctx.save(); ctx.globalAlpha *= alpha;
@@ -648,16 +663,12 @@
     return { x: (DW - W) / 2, y: cy - h / 2, w: W, h };
   }
   function drawOverlays(t) {
-    // draw order = array order: later overlays are in front (layer order); position/scale/opacity/rotation may be keyframed
     for (const o of D.overlays || []) {
       if (t < o.start || t > o.end) continue;
-      const kp = ReelAnim.sample(o, t - o.start);
       const kin = o.anim === 'none' ? 1 : eOut(prog(t, o.start, 0.3)), kout = o.anim === 'none' ? 0 : eInOut(prog(t, o.end - 0.25, 0.25));
-      const a = kin * (1 - kout) * Math.max(0, Math.min(1, kp.opacity));
+      const a = kin * (1 - kout) * o.opacity;
       if (a <= 0.001) continue;
       ctx.save(); ctx.globalAlpha = a;
-      ctx.translate(kp.x * DW, kp.y * DH); // keyframed / manual offset (fraction of the design size)
-      const rotAbout = (cx, cy) => { if (kp.rot) { ctx.translate(cx, cy); ctx.rotate((kp.rot * Math.PI) / 180); ctx.translate(-cx, -cy); } };
       if (o.kind === 'text') {
         const size = o.size * (CAP.scale || 1);
         const lines = wrap(o.text, DW * 0.86 * o.scale, size, 800);
@@ -665,8 +676,6 @@
         font(size, 800); const w = Math.min(DW - 40, Math.max(...lines.map((l) => ctx.measureText(l).width)) + size * 1.2);
         const cy = o.pos === 'top' ? DH * 0.1 + h / 2 : o.pos === 'bottom' ? DH * 0.9 - h / 2 : DH / 2;
         ctx.translate(DW / 2, cy);
-        if (kp.rot) ctx.rotate((kp.rot * Math.PI) / 180);
-        if (kp.scale !== o.scale && o.scale > 0) { const k = kp.scale / o.scale; ctx.scale(k, k); }
         if (o.anim === 'pop') { const k = lerp(0.6, 1, eBack(prog(t, o.start, 0.45))); ctx.scale(k, k); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 80 - kout * 80, 0);
         if (o.box) { rrect(-w / 2, -h / 2, w, h, size * 0.4); ctx.fillStyle = hexA(C.card, 0.88); ctx.fill(); ctx.strokeStyle = hexA(o.color || C.accent, 0.7); ctx.lineWidth = 2.5; ctx.stroke(); }
@@ -674,13 +683,12 @@
       } else {
         const img = mediaDrawable(`ov-${o.id}`, o.asset, t, t - o.start, o.offset || 0);
         const m = D.media[o.asset] || {};
-        const b = overlayBox({ ...o, scale: kp.scale }, m.width, m.height);
-        rotAbout(b.x + b.w / 2, b.y + b.h / 2);
+        const b = overlayBox(o, m.width, m.height);
         if (o.anim === 'pop') { const k = lerp(0.7, 1, eBack(prog(t, o.start, 0.45))); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.translate(-(b.x + b.w / 2), -(b.y + b.h / 2)); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);
         if (o.pos !== 'full') { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24; rrect(b.x, b.y, b.w, b.h, 18); ctx.fillStyle = C.card; ctx.fill(); ctx.restore(); }
         ctx.save(); if (o.pos !== 'full') { rrect(b.x, b.y, b.w, b.h, 18); ctx.clip(); }
-        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0, 1, o.crop || null); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
+        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
         ctx.restore();
       }
       ctx.restore();
@@ -878,7 +886,7 @@
   function drawHeader(t) {
     // progress (of the exported clip)
     ctx.fillStyle = hexA(C.text, 0.08); rrect(36, 30, DW - 72, 5, 3); ctx.fill();
-    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp(outT(t) / D.duration);
+    ctx.fillStyle = C.accent; const pw = (DW - 72) * clamp((TAU ?? outT(t)) / D.duration);
     rrect(36 + (DW - 72) - pw, 30, pw, 5, 3); ctx.fill(); // fills right → left (RTL)
     // series tag
     font(22, 700);
@@ -900,17 +908,73 @@
   }
   function sceneIndexAt(t) { let k = 0; D.scenes.forEach((s, i) => { if (t >= s.start) k = i; }); return k; }
   /** Scene enter/exit: returns { alpha, scale, dx } for the chosen transition style. */
+  // Animation library (shared by the preview, the legacy engine and Remotion — one code path, identical frames).
+  // A scene's own transition / title animation wins over the project default; the NEXT scene's transition
+  // decides how this one leaves (enter and exit of one cut always match).
   function transitionState(sc, i, t) {
-    const style = D.transition || 'push';
-    if (style === 'none') return { alpha: t <= sc.end ? 1 : 0, scale: 1, dx: 0 };
-    const kin = i === 0 ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
-    const kout = t > sc.end ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
+    const style = sc.transition || D.transition || 'push';
+    const nextStyle = D.scenes[i + 1]?.transition || D.transition || 'push';
+    const out = t > sc.end;
+    // hard cut out: the next scene appears at once, so this one must vanish at once
+    if (out && nextStyle === 'none') return { alpha: 0, scale: 1, dx: 0 };
+    // wipe out: stays put and is cut back to the part the incoming scene has not reached yet (same edge)
+    if (out && nextStyle === 'wipe') return { alpha: 1, scale: 1, dx: 0, keep: 1 - eInOut(prog(t, sc.end, TRANS)) };
+    // wipe in: revealed from the right edge (the reading direction)
+    if (!out && style === 'wipe') return { alpha: 1, scale: 1, dx: 0, reveal: i === 0 ? 1 : eInOut(prog(t, sc.start, TRANS)) };
+    if (!out && style === 'none') return { alpha: 1, scale: 1, dx: 0 };
+    const kin = i === 0 || style === 'none' || style === 'wipe' ? 1 : eOut(prog(t, sc.start + TRANS * 0.3, TRANS * 0.7));
+    const kout = out ? eInOut(prog(t, sc.end, TRANS * 0.55)) : 0;
     const alpha = kin * (1 - kout);
+    if (style === 'rise') return { alpha, scale: 1, dx: 0, dy: (1 - kin) * SH * 0.35 - kout * SH * 0.2 };
     if (style === 'fade') return { alpha, scale: 1, dx: 0 };
     if (style === 'zoom') return { alpha, scale: lerp(0.82, 1, kin) * lerp(1, 1.18, kout), dx: 0 };
     if (style === 'slide') return { alpha: Math.min(1, alpha * 1.6), scale: 1, dx: (1 - kin) * SW * 0.9 - kout * SW * 0.9 };
     const push = 1 + 0.045 * eInOut(prog(t, sc.start, Math.max(1, sc.end - sc.start)));
     return { alpha, scale: push * lerp(0.94, 1, kin) * lerp(1, 1.08, kout), dx: (1 - kin) * 50 - kout * 50 }; // RTL: enter from the right
+  }
+  /**
+   * Scene title animation presets: rise (default), fade, pop (overshoot scale), words (word by word, in reading
+   * order — whole words only, so Arabic letters always keep their joined forms), none.
+   */
+  function drawSceneTitle(sc, t, color) {
+    const anim = sc.titleAnim || TYPO.titleAnim || 'rise';
+    const t0 = sc.start + 0.05;
+    const ta = anim === 'none' ? 1 : eOut(prog(t, t0, 0.35));
+    const opts = { size: 32, color, weight: TYPO.titleWeight };
+    if (anim === 'pop') {
+      const k = lerp(0.55, 1, eBack(prog(t, t0, 0.45)));
+      ctx.save(); ctx.translate(SW / 2, 40); ctx.scale(k, k);
+      text(sc.title, 0, 0, { ...opts, alpha: Math.min(1, prog(t, t0, 0.15)) });
+      ctx.restore();
+    } else if (anim === 'words') {
+      const words = dg(sc.title).split(/\s+/).filter(Boolean);
+      const per = Math.min(0.22, 0.9 / Math.max(1, words.length));
+      font(32, TYPO.titleWeight);
+      const full = ctx.measureText(words.join(' ')).width;
+      const rtl = isArabic(sc.title);
+      // each prefix is drawn anchored at the line's start edge, so shown words never move
+      let shown = 0;
+      for (let k = 0; k < words.length; k++) if (t >= t0 + k * per) shown = k + 1;
+      if (shown) {
+        const last = eOut(prog(t, t0 + (shown - 1) * per, per));
+        const head = words.slice(0, shown - 1).join(' '), all = words.slice(0, shown).join(' ');
+        const x = rtl ? SW / 2 + full / 2 : SW / 2 - full / 2;
+        const align = rtl ? 'right' : 'left';
+        if (head) text(head, x, 40, { ...opts, align });
+        ctx.save();
+        // only the newest word fades in: clip away the part already drawn by the head
+        const hw = head ? ctx.measureText(head + ' ').width : 0;
+        ctx.beginPath();
+        if (rtl) ctx.rect(0, 0, x - hw + 1, 80); else ctx.rect(x + hw - 1, 0, SW, 80);
+        ctx.clip();
+        text(all, x, 40 + (1 - last) * 6, { ...opts, align, alpha: last });
+        ctx.restore();
+      }
+    } else {
+      const dy = anim === 'fade' || anim === 'none' ? 0 : (1 - ta) * 10;
+      text(sc.title, SW / 2, 40 + dy, { ...opts, alpha: ta });
+    }
+    ctx.save(); ctx.globalAlpha *= ta; ctx.fillStyle = C.accent; rrect(SW / 2 - 24 * ta, 68, 48 * ta, 4, 2); ctx.fill(); ctx.restore();
   }
   function drawCard(t) {
     ctx.save();
@@ -920,22 +984,21 @@
     rrect(CARD.x, CARD.y + BAR, CARD.w, CARD.h - BAR, [0, 0, CARD.r, CARD.r]); ctx.clip();
     D.scenes.forEach((sc, i) => {
       if (t < sc.start || t > sc.end + TRANS) return;
-      const { alpha, scale: scl, dx } = transitionState(sc, i, t);
-      if (alpha <= 0.001) return;
+      const { alpha, scale: scl, dx, dy = 0, reveal = 1, keep = 1 } = transitionState(sc, i, t);
+      if (alpha <= 0.001 || reveal <= 0.001 || keep <= 0.001) return;
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.translate(CARD.x + SW / 2, CARD.y + BAR + SH / 2);
       ctx.scale(scl, scl);
-      ctx.translate(-SW / 2 + dx, -SH / 2);
+      ctx.translate(-SW / 2 + dx, -SH / 2 + dy);
+      if (reveal < 1) { ctx.beginPath(); ctx.rect(SW * (1 - reveal), 0, SW * reveal, SH); ctx.clip(); }
+      if (keep < 1) { ctx.beginPath(); ctx.rect(0, 0, SW * keep, SH); ctx.clip(); }
       const tpl = T[sc.template] || T.cards;
       if (tpl.drawsTitleOver) tpl(sc, t);
       if (sc.type === 'question' && !tpl.drawsTitleOver) text('؟', SW / 2, SH / 2 + 20, { size: 460, color: hexA(C.accent, 0.06) });
-      if (sc.title) {
-        const ta = eOut(prog(t, sc.start + 0.05, 0.35));
-        text(sc.title, SW / 2, 40 + (1 - ta) * 10, { size: 32, color: tpl.drawsTitleOver ? '#FFFFFF' : C.text, alpha: ta, weight: TYPO.titleWeight });
-        ctx.save(); ctx.globalAlpha *= ta; ctx.fillStyle = C.accent; rrect(SW / 2 - 24 * ta, 68, 48 * ta, 4, 2); ctx.fill(); ctx.restore();
-      }
+      if (sc.title) drawSceneTitle(sc, t, tpl.drawsTitleOver ? '#FFFFFF' : C.text);
       if (!tpl.drawsTitleOver) tpl(sc, t);
+      if (reveal < 1) { ctx.globalAlpha = 1; ctx.fillStyle = C.accent; ctx.fillRect(SW * (1 - reveal), 0, 3, SH); } // the wipe edge
       ctx.restore();
     });
     ctx.restore();
@@ -968,8 +1031,21 @@
     ctx.restore();
   }
 
-  function drawFrame(t) {
+  let GUIDES = false; // preview only: show the platform's unsafe zones (never in a render)
+  function drawGuides() {
+    const z = D.platform.safe;
+    ctx.save(); ctx.fillStyle = 'rgba(242,80,60,0.22)'; ctx.strokeStyle = 'rgba(242,80,60,0.8)'; ctx.setLineDash([8, 6]); ctx.lineWidth = 2;
+    const rect = (x, y, w, h) => { if (w > 0 && h > 0) { ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); } };
+    rect(0, 0, DW, DH * z.top); rect(0, DH * (1 - z.bottom), DW, DH * z.bottom);
+    rect(DW * (1 - z.right), DH * z.top, DW * z.right, DH * (1 - z.top - z.bottom)); rect(0, DH * z.top, DW * z.left, DH * (1 - z.top - z.bottom));
+    ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = `700 ${Math.round(DW / 30)}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.direction = 'rtl';
+    if (z.bottom) ctx.fillText(`منطقة أزرار ${D.platform.name}`, DW / 2, DH * (1 - z.bottom / 2));
+    ctx.restore();
+  }
+  let TAU = null; // output time of the frame being drawn (progress bar, end fade); null → derived from t
+  function drawFrame(t, tau) {
     t = Math.max(0, Number(t) || 0);
+    TAU = Number.isFinite(Number(tau)) && tau !== null ? Number(tau) : outT(t);
     ctx.setTransform(S, 0, 0, S, 0, 0);
     ctx.globalAlpha = 1;
     const prof = window.__prof ? (window.__profData = window.__profData || {}) : null;
@@ -979,8 +1055,9 @@
     step('card', drawCard);
     step('captions', drawCaptions);
     step('overlays', drawOverlays);
+    if (GUIDES && D.platform?.safe) drawGuides();
     // end fade (at the end of the exported clip)
-    const fo = prog(t, D.end - 0.35, 0.35);
+    const fo = prog(TAU, D.duration - 0.35, 0.35);
     if (fo > 0) { ctx.fillStyle = hexA(C.bg, fo * 0.6); ctx.fillRect(0, 0, DW, DH); }
   }
 
@@ -989,8 +1066,30 @@
     const L = D.layout || {};
     if (L.DW) { DW = L.DW; DH = L.DH; S = L.S; PLACE = L.place; TITLE = L.title; CAP = { scale: 1, ...L.caption }; }
     TYPO = { ...TYPO, ...(D.typography || {}) };
+    // platform safe zone: captions stay above the app's bottom UI and clear of its side buttons
+    const sz = D.platform?.safe;
+    if (sz && L.DW) {
+      const centered = Math.abs(CAP.cx - DW / 2) < 1;
+      const lh = (TYPO.captionSize || 52) * (CAP.scale || 1) * 1.42;
+      const maxCy = DH * (1 - sz.bottom) - (lh * CAP.lines) / 2 - 8;
+      if (CAP.cy > maxCy) {
+        CAP.cy = maxCy;
+        // the card makes room: shrink it (kept centred) so it ends above the captions
+        const capTop = CAP.cy - (lh * CAP.lines) / 2 - 14;
+        const centeredCard = Math.abs(PLACE.x + (CARD.w * PLACE.k) / 2 - DW / 2) < 2;
+        if (centeredCard && PLACE.y + CARD.h * PLACE.k > capTop) {
+          const k = Math.max(0.5, (capTop - PLACE.y) / CARD.h);
+          PLACE = { x: (DW - CARD.w * k) / 2, y: PLACE.y, k };
+        }
+      }
+      if (centered && (sz.left || sz.right)) {
+        const l = DW * sz.left, r = DW * (1 - sz.right);
+        CAP.maxW = Math.min(CAP.maxW, r - l - 24);
+        CAP.cx = (l + r) / 2;
+      }
+    }
     canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
-    if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
+    if (!opts.host && !document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
   }
   async function loadFonts() {
     const faces = [];
@@ -1026,6 +1125,7 @@
     buildChunks();
     buildLayers();
     window.renderData = D;
+    window.__layout = () => ({ cap: { ...CAP }, DW, DH }); // for tests: where the captions ended up
   }
   let PLAYING = false;
   async function boot() {
@@ -1041,70 +1141,88 @@
     if (PREVIEW) setupPlayer(id, q.get('embed') === '1');
     window.__ready = true;
   }
+  /**
+   * Preview player, driven by OUTPUT time (tau) so it plays exactly what the export will contain: cuts are skipped,
+   * reordered parts play in their new order, pauses hold the frame in silence. The voice <audio> is re-positioned at
+   * every part boundary; within a part its clock drives the picture.
+   */
   function setupPlayer(id, embedded) {
     const audio = new Audio(`/api/projects/${encodeURIComponent(id)}/files/voice.mp3`);
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
     if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
-    let t = D.start;
-    let music = null;
+    let tau = 0, cur = srcAt(0), lastNow = performance.now(), music = null;
     const setMusic = () => {
       if (music) { music.pause(); music = null; }
       if (D.music) { music = new Audio(D.music.src); music.loop = true; }
     };
     setMusic();
-    // independent audio tracks (source time, like the voice): each plays while the playhead is inside [start, end)
-    let trackEls = [];
-    const setTracks = () => { trackEls.forEach((x) => x.el.pause()); trackEls = (D.tracks || []).map((x) => ({ x, el: new Audio(x.src) })); };
-    setTracks();
-    const syncTracks = () => {
-      for (const { x, el } of trackEls) {
-        const inside = PLAYING && t >= x.start && t < x.end;
-        if (!inside) { if (!el.paused) el.pause(); continue; }
-        const want = (x.offset || 0) + (t - x.start);
-        const fade = Math.min(1, x.fadeIn > 0 ? (t - x.start) / x.fadeIn : 1, x.fadeOut > 0 ? (x.end - t) / x.fadeOut : 1);
-        el.volume = Math.max(0, Math.min(1, x.volume * fade));
-        if (el.paused || Math.abs(el.currentTime - want) > 0.35) { el.currentTime = want; el.play().catch(() => {}); }
-      }
-    };
     const syncMusic = () => {
       if (!music) return;
       // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
-      const speaking = D.words.some((w) => t >= w.start - 0.05 && t <= w.end + 0.2);
+      const speaking = !cur.hold && D.words.some((w) => cur.t >= w.start - 0.05 && cur.t <= w.end + 0.2);
       music.volume = Math.min(1, D.music.volume * (speaking ? 0.35 : 1));
-      if (PLAYING && music.paused) { music.currentTime = outT(t) % (music.duration || 1e9); music.play().catch(() => {}); }
+      if (PLAYING && music.paused) { music.currentTime = tau % (music.duration || 1e9); music.play().catch(() => {}); }
       if (!PLAYING && !music.paused) music.pause();
     };
+    let placedK = -1;
+    const placeAudio = (exact = false) => {
+      HOLD = !!cur.hold;
+      if (!PLAYING || cur.hold || cur.end) { audio.pause(); return; }
+      // entering another part (or an explicit seek) positions the voice exactly; within a part only drift is corrected
+      if (exact || cur.k !== placedK || Math.abs(audio.currentTime - cur.t) > 0.12) audio.currentTime = cur.t;
+      placedK = cur.k;
+      if (audio.paused) audio.play().catch(() => {});
+    };
+    const goTo = (x, exact = false) => { tau = Math.max(0, Math.min(D.duration, x)); cur = srcAt(tau); if (music) music.currentTime = tau % (music.duration || 1e9); placeAudio(exact); };
     const setPlaying = (on) => {
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
-      if (on) { if (t >= D.end - 0.05) t = D.start; t = keptFrom(t) ?? D.start; audio.currentTime = t; audio.play().catch(() => {}); } else audio.pause();
-      if (music) { music.pause(); }
-      if (!on) trackEls.forEach((x) => x.el.pause());
+      if (on && tau >= D.duration - 0.05) goTo(0);
+      lastNow = performance.now();
+      placeAudio();
+      if (music) music.pause();
     };
-    const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t, playing: PLAYING }, location.origin); };
+    const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t: cur.t, tau, playing: PLAYING }, location.origin); };
     let lastPost = 0;
     const loop = (now) => {
+      const dt = Math.min(0.25, (now - lastNow) / 1000); lastNow = now;
       if (PLAYING) {
-        t = audio.currentTime;
-        const k = keptFrom(t); // jump over cut ranges, like the export does
-        if (k === null || t >= D.end - 0.03 || audio.ended) { setPlaying(false); t = D.end; } else if (k > t + 0.01) { t = k; audio.currentTime = k; if (music) music.currentTime = outT(t) % (music.duration || 1e9); }
+        if (!cur.hold && !audio.paused) {
+          // inside a part the voice clock leads; at the part's end move to the next part (maybe a jump or a pause)
+          const sg = segsOf()[cur.k];
+          const t = audio.currentTime;
+          if (t >= sg[1] - 0.01 || audio.ended) goTo(cur.acc + segLen(sg));
+          else { tau = cur.acc + (t - sg[0]); cur = { ...cur, t }; }
+        } else goTo(tau + dt);
+        if (tau >= D.duration - 0.02) { setPlaying(false); tau = D.duration; cur = srcAt(tau); }
       }
-      syncMusic(); syncTracks();
-      drawFrame(t); seek.value = String(Math.round(((t - D.start) / D.duration) * 1000)); tm.textContent = t.toFixed(2);
+      syncMusic();
+      drawFrame(cur.t, tau); seek.value = String(Math.round((tau / D.duration) * 1000)); tm.textContent = tau.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
     };
     btn.onclick = () => setPlaying(!PLAYING);
-    seek.oninput = () => { t = D.start + (Number(seek.value) / 1000) * D.duration; audio.currentTime = t; };
-    // editor ↔ preview: seek / play / pause / reload (after an autosave)
+    seek.oninput = () => goTo((Number(seek.value) / 1000) * D.duration, true);
+    // editor ↔ preview: seek (source time, or output time) / play / pause / reload (after an autosave)
     window.addEventListener('message', async (e) => {
       if (e.origin !== location.origin || !e.data?.type) return;
       const m = e.data;
-      if (m.type === 'reel:seek') { t = Math.max(0, Number(m.t) || 0); audio.currentTime = t; }
+      if (m.type === 'reel:seek') goTo(outT(Math.max(0, Number(m.t) || 0)), true);
+      if (m.type === 'reel:seekOut') goTo(Number(m.tau) || 0, true);
+      if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); setTracks(); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }
-  boot().catch((e) => { window.__error = e.message; console.error(e); });
+  return {
+    setup, drawFrame, prepareFrame, fetchData, boot,
+    get data() { return D; },
+    get size() { return { width: canvas.width, height: canvas.height }; },
+  };
+  }
+  window.ReelRenderer = { create: createRenderer };
+  // render.html: boot the page's own renderer (the Remotion bundle sets __REEL_NO_BOOT and creates its own)
+  const own = !window.__REEL_NO_BOOT && document.getElementById('c');
+  if (own) createRenderer(own).boot().catch((e) => { window.__error = e.message; console.error(e); });
 })();

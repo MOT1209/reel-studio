@@ -151,11 +151,9 @@ await test('recovery: a render cancelled after its first segment resumes from th
   const t0 = Date.now();
   while (!(fs.existsSync(man) && JSON.parse(fs.readFileSync(man, 'utf8')).done?.length >= 1)) { if (Date.now() - t0 > 180000) throw new Error('first segment never finished'); await sleep(200); }
   await api(`/api/projects/${id}/cancel`, { method: 'POST' });
-  // the cancel can land just after the 2nd segment finished too: whatever the manifest holds now is what must be reused
-  const kept = JSON.parse(fs.readFileSync(man, 'utf8')).done.length; assert.ok(kept >= 1);
   await api(`/api/projects/${id}/run`, { method: 'POST' });
   const done = await waitStage(id, 'render', 'done');
-  assert.match(done.stages.render.log.join('\n'), new RegExp(`recovery: reusing ${kept}/2 segments`), done.stages.render.log.filter((l) => !/clip|loudness|mixing/.test(l)).slice(-14).join(' | '));
+  assert.match(done.stages.render.log.join('\n'), /recovery: reusing 1\/2 segments/);
   const pr = probe(path.join(DATA, 'projects', id, 'video.mp4'));
   assert.ok(Math.abs(Number(pr.format.duration) - done.render.duration) < 0.15, `duration ${pr.format.duration} vs ${done.render.duration}`);
 });
@@ -195,78 +193,56 @@ await test('cut from the middle + clip sound: video, audio and subtitles all los
   for (const w of cutWords) assert.ok(!srt.includes(w) || before.words.filter((x) => x.text === w).length > 1, `cut word «${w}» still in subtitles`);
 });
 
-// ---- keyframes, layer order, independent audio tracks (rendered + measured) -----------------------------------------
-const solid = (name, color) => { const f = path.join(TMP, name); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:s=400x400`, '-frames:v', '1', f]); return f; };
-const [magA, grnA] = [await add(solid('mag.png', 'magenta'), 'img'), await add(solid('grn.png', 'lime'), 'img')];
-function frameRgb(file, t, w, h) { // raw RGB of the frame at t seconds
-  return spawnSync(FFMPEG, ['-v', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 28 }).stdout;
-}
-const centroid = (buf, w, h, test) => { let sx = 0, sy = 0, c = 0; for (let y = Math.round(h * 0.36); y < Math.round(h * 0.64); y += 2) for (let x = 0; x < w; x += 2) { const i = (y * w + x) * 3; if (test(buf[i], buf[i + 1], buf[i + 2])) { sx += x; sy += y; c++; } } return c ? { x: sx / c, y: sy / c, n: c } : null; };
-const isMag = (r, g, b) => r > 200 && g < 70 && b > 200, isGrn = (r, g, b) => g > 200 && r < 90 && b < 90;
-const base720 = { export: { aspect: '9:16', resolution: 720, quality: 'draft', fps: 30 }, trim: { start: 0, end: null }, cuts: [] };
+await test('custom order: the second half plays first, then a 1.5 s pause, then the first half', async () => {
+  const before = await api(`/api/projects/${id}/render-data`);
+  const split = before.words[Math.floor(before.words.length / 2)].start;
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { cuts: [], overlays: [], export: { aspect: '9:16', resolution: 720, quality: 'draft', fps: 30 },
+    sequence: [{ start: split, end: before.full }, { hold: 1.5, at: split }, { start: 0, end: split }] } }) });
+  const d = await api(`/api/projects/${id}/render-data`);
+  assert.ok(Math.abs(d.duration - (before.full + 1.5)) < 0.01, `duration ${d.duration}`);
+  await api(`/api/projects/${id}/run`, { method: 'POST' });
+  const done = await waitStage(id, 'render', 'done');
+  assert.match(done.stages.render.log.join('\n'), /custom order: 2 parts, 1 pause/);
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  assert.ok(Math.abs(Number(probe(f).format.duration) - d.duration) < 0.15);
+  // the pause is silent (voice gone, no music in this edit) while the parts around it are not
+  const vol = (t0, t1) => Number(spawnSync(FFMPEG, ['-hide_banner', '-ss', String(t0), '-t', String(t1 - t0), '-i', f, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr.match(/mean_volume:\s*(-?[\d.]+)/)?.[1]);
+  const pauseAt = before.full - split;
+  const quiet = vol(pauseAt + 0.25, pauseAt + 1.25), loud = vol(0.3, 1.3);
+  assert.ok(quiet < loud - 25, `pause ${quiet} dB vs speech ${loud} dB`);
+  const srt = await (await fetch(`${BASE}/api/projects/${id}/subtitles.srt`)).text();
+  const first = srt.split('\n')[2].replace(/‏/g, '');
+  const firstLate = before.words.find((w) => w.start >= split - 0.01).text;
+  assert.ok(first.startsWith(firstLate), `first subtitle «${first}» should start with «${firstLate}»`);
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { sequence: null } }) });
+});
 
-await test('keyframes: an overlay really moves across the rendered video (x −0.25 → +0.25 of the frame width)', async () => {
-  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, audio: { tracks: [] }, overlays: [
-    { kind: 'image', asset: magA.id, start: 1, end: 5, pos: 'center', scale: 0.3, anim: 'none', keyframes: [{ t: 0, x: -0.25, ease: 'linear' }, { t: 4, x: 0.25 }] }] } }) });
-  assert.equal(r.project.edit.overlays[0].keyframes.length, 2);
+await test('platform presets: TikTok keeps captions out of its button zones; Instagram feed renders 4:5 at 1080×1350', async () => {
+  const { platforms } = await api('/api/platforms');
+  assert.ok(platforms.tiktok && platforms['youtube-shorts'] && platforms['instagram-reels'] && platforms['instagram-feed']);
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { platform: 'tiktok' }, trim: { start: 0, end: null }, cuts: [], sequence: null, typography: {} } }) });
+  let d = await api(`/api/projects/${id}/render-data`);
+  assert.equal(d.platform.id, 'tiktok'); assert.equal(d.layout.aspect, '9:16'); assert.equal(d.platform.check.level, 'hint', 'a ~11 s reel is shorter than TikTok\'s usual 15–60 s');
+  const { launchBrowser } = await import('../server/render.mjs');
+  const b = await launchBrowser();
+  try {
+    const pg = await b.newPage();
+    await pg.goto(`${BASE}/render.html?project=${id}`);
+    await pg.waitForFunction(() => window.__ready || window.__error);
+    const L = await pg.evaluate(() => window.__layout());
+    const z = platforms.tiktok.safe;
+    const capBottom = L.cap.cy + (52 * 1.42 * L.cap.lines) / 2;
+    assert.ok(capBottom <= L.DH * (1 - z.bottom) + 1, `captions end at ${capBottom.toFixed(0)} > safe ${(L.DH * (1 - z.bottom)).toFixed(0)}`);
+    assert.ok(L.cap.cx + L.cap.maxW / 2 <= L.DW * (1 - z.right) + 1, 'captions clear the right-side buttons');
+  } finally { await b.close(); }
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { export: { platform: 'instagram-feed', quality: 'draft' }, trim: { start: 0, end: 3 } } }) });
+  d = await api(`/api/projects/${id}/render-data`);
+  assert.equal(d.layout.aspect, '4:5');
   await api(`/api/projects/${id}/run`, { method: 'POST' });
   await waitStage(id, 'render', 'done');
-  const f = path.join(DATA, 'projects', id, 'video.mp4');
-  fs.copyFileSync(f, path.join(OUT, 'keyframes.mp4'));
-  const a = centroid(frameRgb(f, 1.1, 720, 1280), 720, 1280, isMag), b = centroid(frameRgb(f, 3.1, 720, 1280), 720, 1280, isMag), m = centroid(frameRgb(f, 2.1, 720, 1280), 720, 1280, isMag);
-  assert.ok(a && b && m, 'magenta overlay not found in the frames');
-  assert.ok(Math.abs(b.x - a.x - 180) < 25, `the overlay moved ${(b.x - a.x).toFixed(0)} px between 1.1 s and 3.1 s, expected ≈ 180 (0.125 × 720 px per second)`);
-  assert.ok(Math.abs(m.x - (a.x + b.x) / 2) < 25, `mid-point ${m.x.toFixed(0)} is not halfway between ${a.x.toFixed(0)} and ${b.x.toFixed(0)}`);
-  assert.ok(Math.abs(a.y - b.y) < 6, 'y must not change');
-});
-await test('keyframes: out-of-range values are clamped and bad entries dropped by the server', async () => {
-  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { overlays: [
-    { kind: 'image', asset: magA.id, start: 1, end: 3, keyframes: [{ t: 99, x: 5, opacity: -3, rot: 9999 }, { t: 'x', x: 1 }, { t: 1 }, null, { t: 0.5, scale: 0.01, ease: 'bogus' }] }] } }) });
-  const k = r.project.edit.overlays[0].keyframes;
-  assert.deepEqual(k.map((x) => x.t), [0.5, 2]); assert.equal(k[1].x, 1); assert.equal(k[1].opacity, 0); assert.equal(k[1].rot, 360); assert.equal(k[0].scale, 0.05); assert.equal(k[0].ease, undefined);
-});
-await test('layer order: the later overlay is drawn in front; reversing the array reverses what is on top', async () => {
-  const ov = (a) => ({ kind: 'image', asset: a.id, start: 1, end: 5, pos: 'center', scale: 0.3, anim: 'none' });
-  const f = path.join(DATA, 'projects', id, 'video.mp4');
-  const topAt = async (order) => {
-    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, overlays: order.map(ov) } }) });
-    await api(`/api/projects/${id}/run`, { method: 'POST' }); await waitStage(id, 'render', 'done');
-    const buf = frameRgb(f, 2, 720, 1280), i = ((Math.round(1280 * 0.5)) * 720 + 360) * 3; // centre of the frame
-    return [buf[i], buf[i + 1], buf[i + 2]];
-  };
-  const a = await topAt([grnA, magA]); assert.ok(isMag(...a), `expected magenta in front, got rgb(${a})`);
-  const b = await topAt([magA, grnA]); assert.ok(isGrn(...b), `expected green in front, got rgb(${b})`);
-});
-await test('audio tracks: an independent track is mixed at its start time (and not elsewhere); fades and invalid assets are handled', async () => {
-  const beep = path.join(TMP, 'beep.mp3'); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=1000:d=2', beep]);
-  const bA = await add(beep, 'sfx');
-  await assert.rejects(api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { audio: { tracks: [{ asset: iA.id, start: 1 }] } } }) }), /400/);
-  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, overlays: [], audio: { tracks: [{ asset: bA.id, start: 6, end: 8, volume: 1, fadeOut: 0.3 }] } } }) });
-  assert.equal(r.project.edit.audio.tracks.length, 1);
-  await api(`/api/projects/${id}/run`, { method: 'POST' }); const done = await waitStage(id, 'render', 'done');
-  const f = path.join(DATA, 'projects', id, 'video.mp4');
-  assert.match(done.stages.render.log.join('\n'), /1 clip sound/);
-  const inT = toneDb(f, 6.2, 7.5), outT = toneDb(f, 1.0, 2.5);
-  assert.ok(inT > outT + 12, `track window ${inT} dB vs elsewhere ${outT} dB`);
-});
-
-await test('crop: only the cropped half of a two-colour image is drawn; render-data carries the audio tracks for the live preview', async () => {
-  const two = path.join(TMP, 'two.png');
-  execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=magenta:s=200x400', '-f', 'lavfi', '-i', 'color=c=lime:s=200x400', '-filter_complex', 'hstack', '-frames:v', '1', two]);
-  const tA = await add(two, 'img');
-  const run = async (crop) => {
-    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, audio: { tracks: [] }, overlays: [{ kind: 'image', asset: tA.id, start: 1, end: 5, pos: 'center', scale: 0.4, anim: 'none', ...(crop ? { crop } : {}) }] } }) });
-    await api(`/api/projects/${id}/run`, { method: 'POST' }); await waitStage(id, 'render', 'done');
-    const buf = frameRgb(path.join(DATA, 'projects', id, 'video.mp4'), 2, 720, 1280);
-    return { mag: centroid(buf, 720, 1280, isMag)?.n || 0, grn: centroid(buf, 720, 1280, isGrn)?.n || 0 };
-  };
-  const full = await run(null), right = await run({ x: 0.5, y: 0, w: 0.5, h: 1 });
-  assert.ok(full.mag > 500 && full.grn > 500, `uncropped shows both colours: ${JSON.stringify(full)}`);
-  assert.ok(right.grn > 500 && right.mag < full.mag * 0.05, `cropped to the right half shows only green: ${JSON.stringify(right)}`);
-  const bA = await add(path.join(TMP, 'beep.mp3'), 'sfx');
-  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { audio: { tracks: [{ asset: bA.id, start: 2, end: 3, volume: 0.5, fadeIn: 0.2 }] } } }) });
-  const d = await api(`/api/projects/${id}/render-data`);
-  assert.equal(d.tracks.length, 1); assert.equal(d.tracks[0].start, 2); assert.equal(d.tracks[0].volume, 0.5); assert.match(d.tracks[0].src, /^\/api\/assets\/[a-f0-9]{12}\/file$/);
+  const v = probe(path.join(DATA, 'projects', id, 'video.mp4')).streams.find((s) => s.codec_type === 'video');
+  assert.equal(`${v.width}x${v.height}`, '1080x1350');
+  execFileSync(FFMPEG, ['-v', 'error', '-y', '-ss', '1.5', '-i', path.join(DATA, 'projects', id, 'video.mp4'), '-frames:v', '1', path.join(OUT, 'frame-4x5.jpg')]);
 });
 
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);

@@ -24,6 +24,8 @@ export const DEFAULTS = {
   llm: { baseUrl: 'http://127.0.0.1:31415/v1', apiKey: '', model: 'auto', temperature: 0.8 },
   elevenlabs: { baseUrl: 'https://api.elevenlabs.io', apiKey: '', voiceId: '', modelId: 'eleven_multilingual_v2', speed: 1, stability: 0.45, style: 0.2 },
   deepgram: { baseUrl: 'https://api.deepgram.com', apiKey: '', model: 'nova-3', language: 'ar' },
+  tts: { provider: 'elevenlabs' }, // elevenlabs | openai
+  openaiTts: { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini-tts', voice: 'alloy', speed: 1, instructions: 'Speak like a warm, clear science narrator.' },
   youtube: { clientId: '', clientSecret: '', privacy: 'private', autoPublish: false, tags: 'علوم, shorts, science', categoryId: '27' },
   pexels: { apiKey: '' },
   pixabay: { apiKey: '' },
@@ -33,7 +35,7 @@ export const DEFAULTS = {
   seriesTag: 'علوم في دقيقة',
   look: { theme: 'dark', colors: {}, grid: true, typography: {} },
   audio: { sfxVolume: 0.6, whoosh: true, tick: true, voiceVolume: 1, musicVolume: 0.25, duck: true },
-  render: { fps: 30, aspect: '9:16', resolution: 1080, quality: 'standard' },
+  render: { fps: 30, aspect: '9:16', resolution: 1080, quality: 'standard', engine: 'auto', fallback: true, codec: 'h264', bitrate: null, maxJobs: 1, outputDir: '' },
   approvals: { script: 'wait', voice: 'auto', timing: 'auto', storyboard: 'auto', render: 'auto' },
 };
 
@@ -57,15 +59,15 @@ export function resolvePalette(look = getSettings().look) {
   for (const k of COLOR_KEYS) if (HEX.test(look.colors?.[k] || '')) out[k] = look.colors[k];
   return out;
 }
-export const ASPECTS = ['9:16', '1:1', '16:9'];
+export const ASPECTS = ['9:16', '1:1', '16:9', '4:5'];
 export const QUALITIES = ['draft', 'standard', 'high'];
 export const STAGE_NAMES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 
 // Secret fields: [section, field, envVar]
 const SECRETS = [['llm', 'apiKey', 'LLM_API_KEY'], ['elevenlabs', 'apiKey', 'ELEVENLABS_API_KEY'], ['deepgram', 'apiKey', 'DEEPGRAM_API_KEY'], ['youtube', 'clientSecret', 'YOUTUBE_CLIENT_SECRET'],
-  ['pexels', 'apiKey', 'PEXELS_API_KEY'], ['pixabay', 'apiKey', 'PIXABAY_API_KEY'], ['unsplash', 'accessKey', 'UNSPLASH_ACCESS_KEY']];
+  ['openaiTts', 'apiKey', 'OPENAI_TTS_API_KEY'], ['pexels', 'apiKey', 'PEXELS_API_KEY'], ['pixabay', 'apiKey', 'PIXABAY_API_KEY'], ['unsplash', 'accessKey', 'UNSPLASH_ACCESS_KEY']];
 // Base URLs: env always wins (lets tools/mock-apis.mjs and tests redirect everything).
-const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', 'ELEVENLABS_BASE_URL'], ['deepgram', 'baseUrl', 'DEEPGRAM_BASE_URL']];
+const URL_ENV = [['llm', 'baseUrl', 'LLM_BASE_URL'], ['elevenlabs', 'baseUrl', 'ELEVENLABS_BASE_URL'], ['deepgram', 'baseUrl', 'DEEPGRAM_BASE_URL'], ['openaiTts', 'baseUrl', 'OPENAI_TTS_BASE_URL']];
 // Other plain fields with env fallbacks (settings.json wins when set).
 const PLAIN_ENV = [['llm', 'model', 'LLM_MODEL'], ['elevenlabs', 'voiceId', 'ELEVENLABS_VOICE_ID'], ['elevenlabs', 'modelId', 'ELEVENLABS_MODEL_ID'], ['deepgram', 'model', 'DEEPGRAM_MODEL'], ['youtube', 'clientId', 'YOUTUBE_CLIENT_ID']];
 
@@ -163,7 +165,7 @@ export function deleteSecret(key) {
 export function updateSettings(patch) {
   const stored = readStored();
   const next = structuredClone(stored);
-  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash']) {
+  for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash', 'tts', 'openaiTts']) {
     if (!patch?.[sec] || typeof patch[sec] !== 'object') continue;
     next[sec] = next[sec] || {};
     for (const [f, v] of Object.entries(patch[sec])) {
@@ -179,6 +181,10 @@ export function updateSettings(patch) {
         if (['private', 'unlisted', 'public'].includes(v)) next[sec][f] = v;
       } else if (f === 'temperature') {
         const t = Number(v); if (Number.isFinite(t)) next[sec][f] = Math.max(0, Math.min(2, t));
+      } else if (sec === 'tts' && f === 'provider') {
+        if (['elevenlabs', 'openai'].includes(v)) next[sec][f] = v;
+      } else if (sec === 'openaiTts' && f === 'speed') {
+        const t = Number(v); if (Number.isFinite(t)) next[sec][f] = Math.max(0.25, Math.min(4, t));
       } else if (['speed', 'stability', 'style'].includes(f)) {
         const t = Number(v), [lo, hi] = f === 'speed' ? [0.7, 1.2] : [0, 1];
         if (Number.isFinite(t)) next[sec][f] = Math.max(lo, Math.min(hi, t));
@@ -214,6 +220,12 @@ export function updateSettings(patch) {
     if (ASPECTS.includes(patch.render.aspect)) R.aspect = patch.render.aspect;
     if ([720, 1080].includes(Number(patch.render.resolution))) R.resolution = Number(patch.render.resolution);
     if (QUALITIES.includes(patch.render.quality)) R.quality = patch.render.quality;
+    if (['auto', 'legacy', 'remotion'].includes(patch.render.engine)) R.engine = patch.render.engine;
+    if (typeof patch.render.fallback === 'boolean') R.fallback = patch.render.fallback;
+    if (['h264', 'h265'].includes(patch.render.codec)) R.codec = patch.render.codec;
+    if ('bitrate' in patch.render) { const n = Math.round(Number(patch.render.bitrate)); R.bitrate = patch.render.bitrate && n >= 500 && n <= 50000 ? n : null; }
+    if ([1, 2, 3, 4].includes(Number(patch.render.maxJobs))) R.maxJobs = Number(patch.render.maxJobs);
+    if (typeof patch.render.outputDir === 'string') R.outputDir = patch.render.outputDir.trim().slice(0, 500);
   }
   if (patch?.approvals && typeof patch.approvals === 'object') {
     next.approvals = { ...DEFAULTS.approvals, ...(next.approvals || {}) };
