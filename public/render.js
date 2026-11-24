@@ -1,7 +1,10 @@
-/* Reel Studio renderer — window.drawFrame(t) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
- * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random). */
+/* Reel Studio renderer — drawFrame(t, tau) draws frame t (seconds) on a 720×1280 design canvas scaled ×1.5.
+ * Deterministic: every pixel depends only on t and the project data (no Date.now, no Math.random).
+ * Shared by every engine: render.html boots one renderer on its #c canvas (legacy engine, editor preview);
+ * the Remotion composition creates its own with window.ReelRenderer.create(canvas, { host: 'remotion' }). */
 (() => {
   'use strict';
+  function createRenderer(canvas, opts = {}) {
   const C = {
     bg: '#0C1014', card: '#161C22', elev: '#202830', text: '#F4F3EE', sec: '#9AA5AE',
     accent: '#27B8C7', blue: '#5978FF', success: '#36C98F', warning: '#F28A30',
@@ -27,7 +30,6 @@
     TONE = { accent: C.accent, blue: C.blue, success: C.success, warning: C.warning, underline: C.text };
   }
 
-  const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   let D = null; // render data
 
@@ -1032,7 +1034,7 @@
       }
     }
     canvas.width = Math.round(DW * S); canvas.height = Math.round(DH * S);
-    if (!document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
+    if (!opts.host && !document.body.classList.contains('fit')) { canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; }
   }
   async function loadFonts() {
     const faces = [];
@@ -1158,5 +1160,14 @@
     });
     requestAnimationFrame(loop);
   }
-  boot().catch((e) => { window.__error = e.message; console.error(e); });
+  return {
+    setup, drawFrame, prepareFrame, fetchData, boot,
+    get data() { return D; },
+    get size() { return { width: canvas.width, height: canvas.height }; },
+  };
+  }
+  window.ReelRenderer = { create: createRenderer };
+  // render.html: boot the page's own renderer (the Remotion bundle sets __REEL_NO_BOOT and creates its own)
+  const own = !window.__REEL_NO_BOOT && document.getElementById('c');
+  if (own) createRenderer(own).boot().catch((e) => { window.__error = e.message; console.error(e); });
 })();

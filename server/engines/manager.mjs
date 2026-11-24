@@ -9,6 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { encodeSegmented, availableCodecs } from './ffmpeg.mjs';
 import { legacyEngine } from './legacy.mjs';
+import { remotionEngine } from './remotion.mjs';
 
 const engines = new Map();
 export function registerEngine(engine) {
@@ -17,6 +18,7 @@ export function registerEngine(engine) {
 }
 export function unregisterEngine(id) { if (id !== 'legacy') engines.delete(id); }
 registerEngine(legacyEngine);
+registerEngine(remotionEngine);
 
 /** Preference order for "auto": the first available wins; legacy is always last. */
 const AUTO_ORDER = ['remotion', 'legacy'];

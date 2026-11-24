@@ -11,6 +11,7 @@ const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as EM from './engines/manager.mjs';
+import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
 import * as P from './pipeline.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
 import * as AR from './arabic.mjs';
@@ -328,6 +329,12 @@ async function route(req, res) {
     return sendFile(req, res, f, { cache: 'max-age=3600' });
   }
   if (m !== 'GET' && m !== 'HEAD') return json(res, 405, { error: 'method not allowed' });
+  // the Remotion composition bundle (built by engines/remotion.mjs), same origin as render data and fonts
+  if (parts[0] === 'remotion') {
+    const file = path.resolve(REMOTION_DIR, parts.length > 1 ? parts.slice(1).join('/') : 'index.html');
+    if (!file.startsWith(REMOTION_DIR + path.sep)) return json(res, 403, { error: 'forbidden' });
+    return sendFile(req, res, file);
+  }
   const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   const file = path.resolve(PUBLIC, rel);
   if (!file.startsWith(PUBLIC + path.sep)) return json(res, 403, { error: 'forbidden' });

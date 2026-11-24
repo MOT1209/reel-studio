@@ -21,13 +21,19 @@
     "templates": "node tools/templates-test.mjs",
     "test:export": "node tools/export-test.mjs",
     "test:ui": "node tools/ui-test.mjs",
-    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:ui && npm run templates",
+    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:remotion && npm run test:ui && npm run templates",
     "test:skills": "node tools/skills-test.mjs",
     "test:vault": "node tools/vault-test.mjs",
     "test:voice": "node tools/voice-test.mjs",
-    "test:engines": "node tools/engines-test.mjs"
+    "test:engines": "node tools/engines-test.mjs",
+    "test:remotion": "node tools/remotion-test.mjs"
   },
   "dependencies": {
-    "playwright": "^1.49.0"
+    "@remotion/bundler": "4.0.546",
+    "@remotion/renderer": "4.0.546",
+    "playwright": "^1.49.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "remotion": "4.0.546"
   }
 }
