@@ -3,7 +3,7 @@
 Legend: **T** = implemented and tested here · **I** = implemented, not covered by an automated test · **P** = partial · **N** = not implemented · **B** = blocked.
 All tests below ran on this machine against offline mocks (no real API key or real network), 4 CPU / 16 GB, Node 22.23.5, system ffmpeg, Playwright's Chromium.
 
-Final run: `npm run test:all` → unit 21 · Arabic 14 · library 10 · skills/MCP 13 · vault 6 · robustness 14 · phase1 22 · e2e 38/38 · export 13 · UI 15 · XSS 3 · a11y 19 · Arabic-video 7 · templates 9 sheets · `npm audit --omit=dev`: 0 vulnerabilities. Separately (long-running, not in `test:all`): `npm run test:perf` (4 tests) and `npm run test:lowmem` (see `docs/PERFORMANCE.md`). (Baseline before any change: the same suites minus the new ones, all green — `docs/PHASE0-AUDIT.md`.)
+Final run: `npm run test:all` → unit 21 · Arabic 14 · library 10 · skills/MCP 13 · vault 6 · robustness 14 · phase1 22 · e2e 38/38 · export 13 · UI 16 · XSS 3 · a11y 19 · Arabic-video 7 · templates 9 sheets · `npm audit --omit=dev`: 0 vulnerabilities. Separately (long-running, not in `test:all`): `npm run test:perf` (4 tests) and `npm run test:lowmem` (see `docs/PERFORMANCE.md`). (Baseline before any change: the same suites minus the new ones, all green — `docs/PHASE0-AUDIT.md`.)
 
 ## Phase 0 — audit
 `docs/PHASE0-AUDIT.md`. No P0 reproduced. Not every file was read in full (listed in that document); `text`, `storyboard`, `arabic`, `fonts`, `skills`, `youtube`, `subtitles` and most of `public/render.js` / `app.js` were only exercised through their tests.
@@ -30,7 +30,7 @@ Final run: `npm run test:all` → unit 21 · Arabic 14 · library 10 · skills/M
 | Stored XSS: hostile strings in project, asset, skill, MCP, example, settings values → nothing executes in any view | **T** (`xss-test`; mutation-checked: with `esc()` neutered the test fails) |
 | Secrets: AES-256-GCM at rest, masked in API/UI, redacted in logs (pre-existing) | **T** (vault/library/skills tests) |
 | OS credential store on macOS/Linux | **N** — decided with the owner: keep the 0600 key file + document (Windows DPAPI exists, untested here) |
-| Explicit "delete this credential": `DELETE /api/settings/secrets/<section.field>` (reports when `.env` still supplies it; unknown key → 404) | **T** (`phase1-test`: sealed on disk, deleted from disk and API, others untouched) — no button in the Settings UI yet |
+| Explicit "delete this credential": `DELETE /api/settings/secrets/<section.field>` (reports when `.env` still supplies it; unknown key → 404) | **T** (`phase1-test`: sealed on disk, deleted from disk and API, others untouched) — plus a «حذف المفتاح المحفوظ» button in Settings (shown only for keys saved there; **T** in the UI test) |
 | `spawn` with argument arrays, no shell | **I** — verified by reading every `spawn` in `server/`; DNS names in MCP URLs are not resolved, so a public name pointing at a private IP is not caught |
 | CSRF token | **N** (loopback bind + Host/Origin checks remain the guard) |
 
@@ -76,7 +76,7 @@ Retry/timeouts (above), audio tracks, clip-sound mixing with fades, frame-exact 
 Added the pre-render gate (word timing monotonic, scenes strictly increasing within the script, templates, referenced assets exist, minimum duration). Stage retry/cancel/approval/recovery were already present and are covered by e2e. **N**: any check that LLM text is factually true (research notes remain flagged "unverified" — the app cannot verify facts). **B**: real LLM output quality.
 
 ## Phase 10 — UI
-`tools/a11y-test.mjs` (19 tests) audits every screen incl. the editor, its inspectors and every Settings tab at 1440 px and 390 px: it found 11 unnamed controls (library/fonts/voice/settings/editor-item fields), a header that pushed the Settings button 50 px off a phone screen, a table wider than the screen, and no `:focus-visible` style on buttons/links — all fixed, then **T**. `<html lang=ar dir=rtl>` checked on every screen. **N**: colour-contrast measurement, screen-reader testing, and a review of RTL *visual* polish beyond the checked screens.
+`tools/a11y-test.mjs` (19 tests) audits every screen incl. the editor, its inspectors and every Settings tab at 1440 px and 390 px: it found 11 unnamed controls (library/fonts/voice/settings/editor-item fields), a header that pushed the Settings button 50 px off a phone screen, a table wider than the screen, and no `:focus-visible` style on buttons/links — all fixed, then **T**. `<html lang=ar dir=rtl>` checked on every screen. Colour contrast (WCAG AA 4.5:1, 3:1 for large text, computed against the real background) is now measured on every screen, the editor and every Settings tab: one failure found (dimmed caption-preview words, 2.45:1) and fixed. **N**: screen-reader testing, and a review of RTL *visual* polish beyond the checked screens.
 
 ## Phase 11 — tests / performance
 New suites listed at the top; real measurements in `docs/REMOTION-EVALUATION.md` §4 (flat RAM from 30 s to 90 s). Real-pipeline small/medium/large + queue-of-3 + low-memory cgroup runs: `docs/PERFORMANCE.md`. **N**: 4K, other OSes, an 8 GB physical machine, real (non-mock) audio longer than ~45 s.
@@ -87,6 +87,6 @@ README updated (queue, shutdown, limits, editor features, tests, keychain limita
 ## Remaining / recommended next
 1. First run with real keys (LLM, ElevenLabs, Deepgram, one image provider) and send `data/logs/server.log`.
 2. Accessibility + responsive + RTL pass over every screen.
-3. A "delete" button in Settings for each credential (the API exists); a first listen to the live audio-track preview.
+3. A first listen to the live audio-track preview (audio playback cannot be observed headless).
 4. Run the CI workflow once on GitHub (it has not produced a run on this branch — Actions may need enabling/approval) and fix whatever differs on a clean Ubuntu runner.
 5. Real-hardware check on an 8 GB machine.

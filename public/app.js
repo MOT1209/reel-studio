@@ -401,7 +401,18 @@ async function openSettings(tab = 'keys') {
   dlg.querySelectorAll('.testres').forEach((x) => { x.textContent = ''; x.className = 'testres'; });
   S = await api('/api/settings');
   for (const sec of ['llm', 'elevenlabs', 'deepgram', 'youtube', 'pexels', 'pixabay', 'unsplash']) for (const [k, v] of Object.entries(S[sec])) {
-    if (k === 'apiKey' || k === 'clientSecret' || k === 'accessKey') { const el = field(sec + '.' + k); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.${k}`]})` : 'مش متسجل'; }
+    if (k === 'apiKey' || k === 'clientSecret' || k === 'accessKey') { const el = field(sec + '.' + k); el.value = ''; el.placeholder = v ? `${v}  (${S._source[`${sec}.${k}`]})` : 'مش متسجل';
+      // explicit delete (only a key saved here can be deleted; one that comes from .env must be removed in .env)
+      const key = `${sec}.${k}`; let del = el.parentElement.querySelector('[data-del-secret]');
+      if (!del) { del = document.createElement('button'); del.type = 'button'; del.className = 'small danger'; del.dataset.delSecret = key; del.textContent = 'حذف المفتاح المحفوظ'; el.after(del);
+        del.addEventListener('click', async () => {
+          if (!confirm('تحذف المفتاح ده من الجهاز؟')) return;
+          const r = await actToast(() => api(`/api/settings/secrets/${encodeURIComponent(key)}`, { method: 'DELETE' }), 'اتحذف المفتاح');
+          if (r?.stillSetBy) toast('لسه موجود في ملف .env — شيله من هناك كمان', 'bad');
+          openSettings(tab);
+        }); }
+      del.hidden = S._source[key] !== 'settings';
+    }
     else setField(`${sec}.${k}`, v);
   }
   for (const [k, src] of Object.entries(S._source)) if (src === 'env (locked)') { const el = field(k); if (el) { el.disabled = true; el.title = 'محدد من متغير بيئة'; } }

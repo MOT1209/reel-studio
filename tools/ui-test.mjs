@@ -236,6 +236,19 @@ try {
     await page.uncheck('#rippleOn');
   });
 
+  await test('settings: a saved key has a delete button; it removes the key (and not keys that come from .env)', async () => {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify({ pixabay: { apiKey: 'pixabay-test-key-123456' } }) });
+    await page.goto(`${BASE}/#/dashboard`); await sleep(400);
+    await page.click('#btnSettings'); await page.click('#setTabs [data-tab="libs"]');
+    const btn = '[data-del-secret="pixabay.apiKey"]';
+    await page.waitForSelector(btn, { state: 'visible' });
+    assert.equal(await page.isVisible('[data-del-secret="pexels.apiKey"]'), false, 'a key that comes from .env has no delete button');
+    await page.click(btn);
+    await until('key deleted', async () => (await api('/api/settings'))._source['pixabay.apiKey'] === 'none');
+    await page.waitForSelector(btn, { state: 'hidden' });
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('dialog[open]'));
+  });
+
   await test('skills page: run a built-in skill from its dialog', async () => {
     await page.goto(`${BASE}/#/skills`);
     await page.waitForSelector('tr[data-sk="titles"] [data-run]');

@@ -212,7 +212,7 @@ pre.out { background: var(--bg); border: 1px solid var(--line); border-radius: 1
 .cap { background: #0C1014; border: 1px solid var(--line); border-radius: 12px; padding: 18px 10px 8px; text-align: center; font-size: 24px; cursor: pointer; direction: rtl; }
 .cap.on { outline: 2px solid var(--accent); }
 .cap small { display: block; font: 12px 'Plex Arabic', system-ui; color: var(--sec); margin-top: 8px; }
-.cap span { color: rgba(154,165,174,.45); }
+.cap span { color: rgba(154,165,174,.68); }
 .cap span.lit { color: #F4F3EE; }
 .cap.boxed span.act { background: #202830; border-radius: 8px; padding: 0 6px; }
 .cap.karaoke span.act { color: var(--accent); }

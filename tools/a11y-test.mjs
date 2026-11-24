@@ -46,6 +46,28 @@ const AUDIT = () => {
   return out;
 };
 
+/** WCAG contrast of every visible text element against its nearest opaque background (alpha-blended up the tree). AA: 4.5, large text (≥ 24px or ≥ 18.66px bold): 3. */
+const CONTRAST = () => {
+  const parse = (c) => { const m = c.match(/rgba?\(([^)]+)\)/); if (!m) return null; const [r, g, b, a = 1] = m[1].split(',').map((x) => parseFloat(x)); return { r, g, b, a }; };
+  const lum = ({ r, g, b }) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const over = (top, bot) => ({ r: top.r * top.a + bot.r * (1 - top.a), g: top.g * top.a + bot.g * (1 - top.a), b: top.b * top.a + bot.b * (1 - top.a), a: 1 });
+  const bgOf = (e) => { const stack = []; for (let x = e; x; x = x.parentElement) { const cs = getComputedStyle(x); if (cs.backgroundImage !== 'none' && !/^linear-gradient\(rgba?\(\d+, \d+, \d+, 0?\.?\d*\)/.test(cs.backgroundImage) && x !== document.body) return null; const c = parse(cs.backgroundColor); if (c && c.a > 0) { stack.push(c); if (c.a >= 1) break; } }
+    let base = { r: 12, g: 16, b: 20, a: 1 }; for (const c of stack.reverse()) base = over(c, base); return base; };
+  const out = [];
+  const seen = new Set();
+  for (const e of document.querySelectorAll('body *')) {
+    if (![...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+    const r = e.getBoundingClientRect(); const cs = getComputedStyle(e);
+    if (!r.width || !r.height || cs.visibility === 'hidden' || cs.display === 'none' || e.closest('[hidden], canvas, iframe, svg') || e.disabled) continue;
+    const fg = parse(cs.color), bg = bgOf(e); if (!fg || !bg) continue;
+    let eff = fg; if (fg.a < 1) eff = over(fg, bg); let op = 1; for (let x = e; x; x = x.parentElement) op *= parseFloat(getComputedStyle(x).opacity); if (op < 1) eff = over({ ...eff, a: op }, bg);
+    const L1 = lum(eff), L2 = lum(bg), ratio = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05);
+    const size = parseFloat(cs.fontSize), bold = parseInt(cs.fontWeight, 10) >= 700, large = size >= 24 || (size >= 18.66 && bold);
+    if (ratio < (large ? 3 : 4.5)) { const k = `${e.tagName}.${String(e.className).split(' ')[0]}|${cs.color}|${ratio.toFixed(1)}`; if (!seen.has(k)) { seen.add(k); out.push(`${e.tagName.toLowerCase()}${e.className && typeof e.className === 'string' ? '.' + e.className.split(' ')[0] : ''} "${e.textContent.trim().slice(0, 24)}" ${ratio.toFixed(2)}:1 (needs ${large ? 3 : 4.5})`); } }
+  }
+  return out;
+};
+
 const { launchBrowser } = await import('../server/render.mjs');
 const browser = await launchBrowser();
 let n = 0, failed = 0;
@@ -57,7 +79,7 @@ for (const [w, h, label] of [[1440, 900, 'desktop'], [390, 844, 'phone']]) {
   for (const [name, hash] of screens) {
     await test(`${label} · ${name}: accessible names, alt text, lang/dir${w < 500 ? ', no horizontal overflow' : ''}`, async () => {
       await page.goto(`${BASE}/${hash}`); await sleep(900);
-      const problems = await page.evaluate(AUDIT);
+      const problems = [...(await page.evaluate(AUDIT)), ...(await page.evaluate(CONTRAST)).map((x) => 'low contrast: ' + x)];
       if (w < 500) { const ov = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth); if (ov > 2) problems.push(`page is ${ov}px wider than the ${w}px screen`); }
       assert.deepEqual([...new Set(problems)], []);
     });
