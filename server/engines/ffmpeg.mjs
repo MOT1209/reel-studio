@@ -72,7 +72,7 @@ export async function mixAudio({ voice, sfx, out, duration, start = 0, segments 
     const idx = 2 + k;
     inputs.push('-i', c.file);
     const ms = Math.round(c.at * 1000);
-    g += `[${idx}:a]atrim=start=${f3(c.offset)}:end=${f3(c.offset + c.length)},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(+c.volume).toFixed(3)},adelay=${ms}|${ms}[c${k}];`;
+    g += `[${idx}:a]atrim=start=${f3(c.offset)}:end=${f3(c.offset + c.length)},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(+c.volume).toFixed(3)}${c.fadeIn > 0 ? `,afade=t=in:d=${Math.min(c.fadeIn, c.length / 2).toFixed(3)}` : ''}${c.fadeOut > 0 ? `,afade=t=out:st=${Math.max(0, c.length - Math.min(c.fadeOut, c.length / 2)).toFixed(3)}:d=${Math.min(c.fadeOut, c.length / 2).toFixed(3)}` : ''},adelay=${ms}|${ms}[c${k}];`;
     srcLabels.push(`[c${k}]`);
   });
   if (clips.length) g += `${srcLabels.join('')}amix=inputs=${srcLabels.length}:normalize=0:duration=first[src];`;

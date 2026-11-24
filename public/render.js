@@ -594,9 +594,14 @@
   }
   const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
   /** Draws img covering (x,y,w,h) with a slow Ken Burns push k∈[0,1]. */
-  function drawCover(img, x, y, w, h, k = 0, alpha = 1) {
+  function drawCover(img, x, y, w, h, k = 0, alpha = 1, crop = null) {
     const [iw, ih] = dims(img);
     if (!iw || !ih) return;
+    if (crop) { // draw only the cropped part of the source (fractions of its width/height), cover-fitted
+      const sx = crop.x * iw, sy = crop.y * ih, sw = crop.w * iw, sh = crop.h * ih, sc2 = Math.max(w / sw, h / sh);
+      ctx.save(); ctx.globalAlpha *= alpha; ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      ctx.drawImage(img, sx, sy, sw, sh, x + (w - sw * sc2) / 2, y + (h - sh * sc2) / 2, sw * sc2, sh * sc2); ctx.restore(); return;
+    }
     const sc = Math.max(w / iw, h / ih) * (1 + 0.08 * k);
     const dw = iw * sc, dh = ih * sc;
     ctx.save(); ctx.globalAlpha *= alpha;
@@ -663,12 +668,16 @@
     return { x: (DW - W) / 2, y: cy - h / 2, w: W, h };
   }
   function drawOverlays(t) {
+    // draw order = array order: later overlays are in front (layer order); position/scale/opacity/rotation may be keyframed
     for (const o of D.overlays || []) {
       if (t < o.start || t > o.end) continue;
+      const kp = ReelAnim.sample(o, t - o.start);
       const kin = o.anim === 'none' ? 1 : eOut(prog(t, o.start, 0.3)), kout = o.anim === 'none' ? 0 : eInOut(prog(t, o.end - 0.25, 0.25));
-      const a = kin * (1 - kout) * o.opacity;
+      const a = kin * (1 - kout) * Math.max(0, Math.min(1, kp.opacity));
       if (a <= 0.001) continue;
       ctx.save(); ctx.globalAlpha = a;
+      ctx.translate(kp.x * DW, kp.y * DH); // keyframed / manual offset (fraction of the design size)
+      const rotAbout = (cx, cy) => { if (kp.rot) { ctx.translate(cx, cy); ctx.rotate((kp.rot * Math.PI) / 180); ctx.translate(-cx, -cy); } };
       if (o.kind === 'text') {
         const size = o.size * (CAP.scale || 1);
         const lines = wrap(o.text, DW * 0.86 * o.scale, size, 800);
@@ -676,6 +685,8 @@
         font(size, 800); const w = Math.min(DW - 40, Math.max(...lines.map((l) => ctx.measureText(l).width)) + size * 1.2);
         const cy = o.pos === 'top' ? DH * 0.1 + h / 2 : o.pos === 'bottom' ? DH * 0.9 - h / 2 : DH / 2;
         ctx.translate(DW / 2, cy);
+        if (kp.rot) ctx.rotate((kp.rot * Math.PI) / 180);
+        if (kp.scale !== o.scale && o.scale > 0) { const k = kp.scale / o.scale; ctx.scale(k, k); }
         if (o.anim === 'pop') { const k = lerp(0.6, 1, eBack(prog(t, o.start, 0.45))); ctx.scale(k, k); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 80 - kout * 80, 0);
         if (o.box) { rrect(-w / 2, -h / 2, w, h, size * 0.4); ctx.fillStyle = hexA(C.card, 0.88); ctx.fill(); ctx.strokeStyle = hexA(o.color || C.accent, 0.7); ctx.lineWidth = 2.5; ctx.stroke(); }
@@ -683,12 +694,13 @@
       } else {
         const img = mediaDrawable(`ov-${o.id}`, o.asset, t, t - o.start, o.offset || 0);
         const m = D.media[o.asset] || {};
-        const b = overlayBox(o, m.width, m.height);
+        const b = overlayBox({ ...o, scale: kp.scale }, m.width, m.height);
+        rotAbout(b.x + b.w / 2, b.y + b.h / 2);
         if (o.anim === 'pop') { const k = lerp(0.7, 1, eBack(prog(t, o.start, 0.45))); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.translate(-(b.x + b.w / 2), -(b.y + b.h / 2)); }
         if (o.anim === 'slide') ctx.translate((1 - kin) * 120 - kout * 120, 0);
         if (o.pos !== 'full') { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24; rrect(b.x, b.y, b.w, b.h, 18); ctx.fillStyle = C.card; ctx.fill(); ctx.restore(); }
         ctx.save(); if (o.pos !== 'full') { rrect(b.x, b.y, b.w, b.h, 18); ctx.clip(); }
-        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
+        if (img) drawCover(img, b.x, b.y, b.w, b.h, 0, 1, o.crop || null); else mediaPlaceholder(b.x, b.y, b.w, b.h, m.name);
         ctx.restore();
       }
       ctx.restore();
@@ -1156,6 +1168,20 @@
       if (D.music) { music = new Audio(D.music.src); music.loop = true; }
     };
     setMusic();
+    // independent audio tracks (source time, like the voice): each plays while the source playhead is inside [start, end)
+    let trackEls = [];
+    const setTracks = () => { trackEls.forEach((x) => x.el.pause()); trackEls = (D.tracks || []).map((x) => ({ x, el: new Audio(x.src) })); };
+    setTracks();
+    const syncTracks = () => {
+      for (const { x, el } of trackEls) {
+        const inside = PLAYING && !cur.hold && cur.t >= x.start && cur.t < x.end;
+        if (!inside) { if (!el.paused) el.pause(); continue; }
+        const want = (x.offset || 0) + (cur.t - x.start);
+        const fade = Math.min(1, x.fadeIn > 0 ? (cur.t - x.start) / x.fadeIn : 1, x.fadeOut > 0 ? (x.end - cur.t) / x.fadeOut : 1);
+        el.volume = Math.max(0, Math.min(1, x.volume * fade));
+        if (el.paused || Math.abs(el.currentTime - want) > 0.35) { el.currentTime = want; el.play().catch(() => {}); }
+      }
+    };
     const syncMusic = () => {
       if (!music) return;
       // the export side-chain ducks the music under the voice; the preview approximates it per spoken word
@@ -1180,6 +1206,7 @@
       lastNow = performance.now();
       placeAudio();
       if (music) music.pause();
+      if (!on) trackEls.forEach((x) => x.el.pause());
     };
     const post = () => { if (embedded && parent !== window) parent.postMessage({ type: 'reel:time', t: cur.t, tau, playing: PLAYING }, location.origin); };
     let lastPost = 0;
@@ -1195,7 +1222,7 @@
         } else goTo(tau + dt);
         if (tau >= D.duration - 0.02) { setPlaying(false); tau = D.duration; cur = srcAt(tau); }
       }
-      syncMusic();
+      syncMusic(); syncTracks();
       drawFrame(cur.t, tau); seek.value = String(Math.round((tau / D.duration) * 1000)); tm.textContent = tau.toFixed(2);
       if (now - lastPost > 50) { lastPost = now; post(); }
       requestAnimationFrame(loop);
@@ -1211,7 +1238,7 @@
       if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); setTracks(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }

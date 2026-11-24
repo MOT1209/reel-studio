@@ -45,7 +45,7 @@ const treeRss = (root) => {
 procs.push(spawn('node', ['tools/mock-apis.mjs'], { cwd: ROOT, env: { ...process.env, MOCK_PORT: String(MOCK_PORT) }, stdio: 'ignore' }));
 // PERF_CGROUP=/sys/fs/cgroup/memory/<name> (cgroup v1, pre-created with memory.limit_in_bytes) runs the server inside that memory limit
 const serverEnv = { ...process.env };
-const server = spawn(...(process.env.PERF_CGROUP ? ['sh', ['-c', `echo $$ > ${process.env.PERF_CGROUP}/cgroup.procs && exec node server/index.mjs`]] : ['node', ['server/index.mjs']]), { cwd: ROOT, stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: DATA, RS_MAX_RENDERS: '1',
+const server = spawn(...(process.env.PERF_CGROUP ? ['sh', ['-c', `echo $$ > ${process.env.PERF_CGROUP}/cgroup.procs && exec node server/index.mjs`]] : ['node', ['server/index.mjs']]), { cwd: ROOT, stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: DATA, 
   LLM_BASE_URL: `${MOCK}/v1`, ELEVENLABS_BASE_URL: MOCK, DEEPGRAM_BASE_URL: MOCK, ELEVENLABS_API_KEY: 'mock', ELEVENLABS_VOICE_ID: 'mock-voice-eg', DEEPGRAM_API_KEY: 'mock', LLM_API_KEY: '' } });
 procs.push(server);
 await up(`${MOCK}/media/_stats`); await up(`${BASE}/api/health`);
@@ -88,12 +88,12 @@ if (only('large')) await test('large project (60 s) with 6000×4000 photos in 3 
   } });
   assert.ok(row.peakRssMB < 4096, `${row.peakRssMB} MB`);
 });
-if (only('queue')) await test('queue: 3 projects started together with RS_MAX_RENDERS=1 → at most one render runs at a time and all three finish', async () => {
+if (only('queue')) await test('queue: 3 projects started together (render.maxJobs = 1, the default) → at most one render runs at a time and all three finish', async () => {
   const ids = []; for (let i = 0; i < 3; i++) ids.push((await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: `طابور ${i}`, seconds: 10, approvals }) })).id);
   let maxRunning = 0, sawWaiting = false; const t0 = Date.now();
   for (;;) {
-    const q = await api('/api/queue'); const running = q.jobs.filter((j) => j.status === 'running').length;
-    maxRunning = Math.max(maxRunning, running); if (q.jobs.some((j) => j.status === 'pending')) sawWaiting = true;
+    const q = await api('/api/render-jobs'); const running = q.jobs.filter((j) => j.status === 'running').length;
+    maxRunning = Math.max(maxRunning, running); if (q.jobs.some((j) => j.status === 'queued')) sawWaiting = true;
     const sts = await Promise.all(ids.map(async (id) => (await api(`/api/projects/${id}`)).stages));
     if (sts.some((s) => Object.values(s).some((x) => x.status === 'error'))) throw new Error('a project failed: ' + JSON.stringify(sts.map((s) => s.render.error)));
     if (sts.every((s) => s.render.status === 'done')) break;

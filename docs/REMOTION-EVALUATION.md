@@ -1,6 +1,8 @@
 # Remotion evaluation (Phase 4) — measured, 2026-11-24
 
-**Decision: do not integrate Remotion. Keep Canvas + Playwright + FFmpeg.** HyperFrames: not integrated, not benchmarked (see end).
+> **Status after the merge with `main` (v3.0):** `main` integrated Remotion as an optional engine behind an engine manager, with the legacy engine kept as the fallback (`docs/RENDERING.md`). This evaluation was written before that and recommended *against* integration; the merge keeps `main`'s decision (the owner chose to build on `main`). What this document still contributes is independent evidence: on a different (synthetic) scene Remotion was also slower (4.6× vs `main`'s own 2.1–2.5× on a real project), the Arabic output was identical, and the licence is not MIT (see §1). The memory figure differs in direction (+19 % here, −250 MB in `main`'s benchmark): treat memory as unresolved. The cost side (217 MB, React) is now accepted by `main`.
+
+**Original recommendation (not adopted): do not integrate Remotion. Keep Canvas + Playwright + FFmpeg.** HyperFrames: not integrated, not benchmarked (see end).
 
 ## 1. Compatibility audit
 | Item | Finding |

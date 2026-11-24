@@ -515,7 +515,7 @@ const STAGE_FN = {
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
     await mixAudio({
       voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
-      clips: await clipSounds(E.overlays),
+      clips: await clipSounds(E.overlays, E.audio.tracks || []),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
     // a zero exit code proves nothing: size, fps, codec, audio, frame count and durations are checked on the file BEFORE it reaches its final path
@@ -527,7 +527,7 @@ const STAGE_FN = {
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
     fs.rmSync(path.join(dir, 'segments'), { recursive: true, force: true });
-    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), musicAsset?.id].filter(Boolean);
+    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), ...(E.audio.tracks || []).map((x) => x.asset), musicAsset?.id].filter(Boolean);
     p.render = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
@@ -744,6 +744,7 @@ export function renderData(p) {
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
     id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
+    tracks: (E.audio.tracks || []).filter((x) => getAsset(x.asset)).map((x) => ({ id: x.id, src: `/api/assets/${x.asset}/file`, start: x.start, end: x.end, offset: x.offset || 0, volume: Math.min(1, x.volume), fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 })),
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
@@ -755,8 +756,14 @@ export function renderData(p) {
   };
 }
 /** Video overlays whose sound is turned up → mix inputs (source time). Files without an audio stream are skipped. */
-async function clipSounds(overlays) {
+async function clipSounds(overlays, tracks = []) {
   const out = [];
+  // independent audio tracks (sound effects, a second voice, extra music): same source-time mix as clip sounds, so cuts apply
+  for (const x of tracks) {
+    const a = getAsset(x.asset);
+    if (!a || a.kind !== 'audio' || !(x.volume > 0)) continue;
+    out.push({ file: assetFile(a), at: x.start, offset: x.offset || 0, length: Math.min(x.end - x.start, Math.max(0.1, (a.duration || 1e9) - (x.offset || 0))), volume: x.volume, fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 });
+  }
   for (const o of overlays) {
     if (o.kind !== 'video' || !(o.volume > 0)) continue;
     const a = getAsset(o.asset);

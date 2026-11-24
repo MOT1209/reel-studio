@@ -2,6 +2,8 @@
 
 Machine: 4 CPU, 15.7 GB RAM, Node 22.23.5, system ffmpeg, Playwright Chromium. Real pipeline (script → voice → timing → storyboard → render) against the offline mocks, so LLM/TTS time is ~0 and the numbers are **render-dominated**. Reproduce: `npm run test:perf`, `npm run test:lowmem`. Peak RSS = sum over the whole process tree (server + Chromium + ffmpeg); it double-counts shared pages, so the cgroup figure (real usage) is lower.
 
+> Numbers in the first table were measured on the audit branch (legacy engine). After merging `main` (default engine **Remotion**, legacy as fallback) the same test measured: small 24.2 s / 1637 MB, medium 62.3 s / 1662 MB, large 80.9 s / 2130 MB, queue of 3 → max 1 running; and the 1.5 GB low-memory run still passes (peak 1310 MB, 0 OOM kills). Remotion is slower here, consistent with `docs/RENDERING.md`.
+
 ## Real projects, 1080×1920, 30 fps, "standard" quality, 3 parallel pages
 | Project | Video length | Stage wall time | Peak RSS (tree) |
 |---|---|---|---|
@@ -26,6 +28,6 @@ Memory does not grow with length (see also `docs/REMOTION-EVALUATION.md` §4: 30
 What was wrong and what changed:
 - `os.freemem()` reports the **host's** free RAM, so inside a container/VM with a memory limit the renderer started 3 pages that the kernel then killed. `availableMemory()` now reads the process's own cgroup (v2 `memory.max`/`memory.current`, v1 `memory.limit_in_bytes`/`usage_in_bytes`, page cache excluded) and takes the smaller number.
 - The per-page estimate was 400 MB with a 300 MB base; measured, it is ≈ 450 MB per page + ≈ 600 MB for server/ffmpeg/headroom. Updated (unit-tested).
-- `Target crashed` / `Page crashed` now count as transient: the job is retried once **with a single page**.
+- `Target crashed` / `Page crashed` now count as transient: the engine manager retries the job once **with a single page** (segments already finished are reused).
 
 Not measured: other OSes, an 8 GB physical machine with swap, 4K output, more than one concurrent render (`RS_MAX_RENDERS` > 1).
