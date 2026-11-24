@@ -9,6 +9,20 @@ export async function mountVoice(el) {
   el.innerHTML = `
     <div class="cols2">
       <div class="panel">
+        <h3>مزوّد الصوت</h3>
+        <label class="row"><input type="radio" name="vProv" value="elevenlabs" ${S.tts?.provider !== 'openai' ? 'checked' : ''}> ElevenLabs — توقيت كل حرف مع الصوت (الأدق للكابشن)</label>
+        <label class="row"><input type="radio" name="vProv" value="openai" ${S.tts?.provider === 'openai' ? 'checked' : ''}> OpenAI أو أي API متوافق (<code dir="ltr">/audio/speech</code>) — التوقيت من Deepgram، ولو مفيش مفتاح بيتقدّر من السكتات</label>
+        <div id="oaiBox" ${S.tts?.provider === 'openai' ? '' : 'hidden'}>
+          <div class="two"><label>Base URL <input id="oBase" dir="ltr" value="${esc(S.openaiTts.baseUrl)}" ${S._source['openaiTts.baseUrl'] === 'env (locked)' ? 'disabled' : ''}></label>
+            <label>API key <input id="oKey" dir="ltr" autocomplete="off" placeholder="${esc(S.openaiTts.apiKey || 'مش متسجل')}"></label></div>
+          <div class="two"><label>Model <input id="oModel" dir="ltr" value="${esc(S.openaiTts.model)}"></label><label>Voice <input id="oVoice" dir="ltr" value="${esc(S.openaiTts.voice)}" list="oVoices"></label></div>
+          <datalist id="oVoices">${['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'].map((v) => `<option value="${v}">`).join('')}</datalist>
+          <label>السرعة <input type="number" id="oSpeed" min="0.25" max="4" step="0.05" value="${S.openaiTts.speed}"></label>
+          <label>تعليمات الأداء (للموديلات اللي بتدعمها) <input id="oInstr" value="${esc(S.openaiTts.instructions || '')}"></label>
+          <div class="tools"><button id="oTest">اختبار الاتصال</button><span class="testres" id="oRes"></span></div>
+        </div>
+      </div>
+      <div class="panel">
         <h3>الصوت (ElevenLabs)</h3>
         <div class="two">
           <label>الصوت <select id="vVoice" dir="ltr"><option value="${esc(S.elevenlabs.voiceId)}">${esc(S.elevenlabs.voiceId || '— حمّل الأصوات —')}</option></select></label>
@@ -50,7 +64,15 @@ export async function mountVoice(el) {
     if (r.voices.some((v) => v.id === cur)) sel.value = cur;
     toast(`${r.voices.length} صوت`);
   });
+  el.querySelectorAll('[name=vProv]').forEach((r) => r.addEventListener('change', () => { $('#oaiBox', el).hidden = !(r.value === 'openai' && r.checked); }));
+  const oai = () => ({ ...(!$('#oBase', el).disabled ? { baseUrl: $('#oBase', el).value } : {}), ...($('#oKey', el).value ? { apiKey: $('#oKey', el).value } : {}), model: $('#oModel', el).value, voice: $('#oVoice', el).value, speed: Number($('#oSpeed', el).value), instructions: $('#oInstr', el).value });
+  $('#oTest', el).addEventListener('click', async () => {
+    const out = $('#oRes', el); out.className = 'testres wait'; out.textContent = 'بيختبر…';
+    try { const r = await api('/api/test/openaiTts', { method: 'POST', body: JSON.stringify(oai()) }); out.className = 'testres ' + (r.ok ? 'ok' : 'bad'); out.textContent = (r.ok ? '✔ ' : '✖ ') + r.message; }
+    catch (e) { out.className = 'testres bad'; out.textContent = '✖ ' + e.message; }
+  });
   $('#vSave', el).addEventListener('click', () => act(() => api('/api/settings', { method: 'PUT', body: JSON.stringify({
+    tts: { provider: el.querySelector('[name=vProv]:checked').value }, openaiTts: oai(),
     elevenlabs: { voiceId: $('#vVoice', el).value, modelId: $('#vModel', el).value, speed: Number($('#vSpeed', el).value), stability: Number($('#vStab', el).value), style: Number($('#vStyle', el).value) },
     pronunciation: $('#vPron', el).value, look: { theme: S.look.theme, typography: { ...(S.look.typography || {}), captions: $('#vCaps', el).checked } },
   }) }), 'اتحفظ'));

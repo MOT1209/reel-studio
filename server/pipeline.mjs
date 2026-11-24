@@ -4,7 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
-import { chatStream, ttsWithTimestamps, transcribeWords, applyPronunciation } from './apis.mjs';
+import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
+import { estimateWords } from './estimate.mjs';
 import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
 import { storyboardMessages, reviewMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
 import { iconsFor } from './icons.mjs';
@@ -342,6 +343,13 @@ const STAGE_FN = {
     }
     const s = getSettings();
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
+    if (s.tts?.provider === 'openai') {
+      log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
+      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
+      p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
+      log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
+      return;
+    }
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
     fs.writeFileSync(out, audio);
@@ -353,10 +361,18 @@ const STAGE_FN = {
 
   async timing(p, signal) {
     const dir = projectDir(p.id);
-    let timed;
-    if (p.voice?.source === 'upload') {
-      const s = getSettings();
-      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on uploaded voice`);
+    let timed, estimated = false;
+    const s0 = getSettings();
+    if (['upload', 'openai'].includes(p.voice?.source) && !s0.deepgram.apiKey) {
+      // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
+      log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
+      const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
+      timed = wordsWithChars(dw);
+      estimated = true;
+    } else if (['upload', 'openai'].includes(p.voice?.source)) {
+      const s = s0;
+      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on the ${p.voice.source === 'upload' ? 'uploaded' : 'generated'} voice`);
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
@@ -372,7 +388,7 @@ const STAGE_FN = {
     p.words = words;
     const weak = words.filter((w) => w.weak);
     const avg = words.reduce((a, w) => a + w.match, 0) / Math.max(1, words.length);
-    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: p.voice.source };
+    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: estimated ? 'estimate' : p.voice.source, estimated };
     log(p, 'timing', `aligned ${words.length} script words · mean char match ${(avg * 100).toFixed(0)}% · ${weak.length} weak`);
     if (weak.length) log(p, 'timing', `weak: ${weak.slice(0, 12).map((w) => `#${w.i} ${w.text}`).join(', ')}${weak.length > 12 ? '…' : ''}`);
   },

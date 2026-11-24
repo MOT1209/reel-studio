@@ -356,6 +356,24 @@ const server = http.createServer(async (req, res) => {
         alignment: { characters: chars.map((c) => c.c), character_start_times_seconds: chars.map((c) => +c.start.toFixed(3)), character_end_times_seconds: chars.map((c) => +c.end.toFixed(3)) },
       });
     }
+    if (req.method === 'POST' && url.pathname === '/v1/audio/speech') { // OpenAI-compatible TTS: mp3, no timestamps
+      const { input, model, voice } = JSON.parse((await readBody(req)).toString('utf8'));
+      if (!input || !model || !voice) return json(res, 400, { error: { message: 'input, model and voice are required' } });
+      lastTtsText = input;
+      const { wav } = synth(input);
+      const tmp = path.join(os.tmpdir(), `mock-oai-${process.pid}-${Date.now()}.mp3`);
+      await ff(['-hide_banner', '-loglevel', 'error', '-y', '-f', 'wav', '-i', 'pipe:0', '-c:a', 'libmp3lame', '-b:a', '128k', tmp], wav);
+      const mp3 = fs.readFileSync(tmp); fs.rmSync(tmp, { force: true });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3.length });
+      return res.end(mp3);
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/_truth') { // test helper: the synthesizer's real word onsets
+      const { text } = JSON.parse((await readBody(req)).toString('utf8'));
+      const { chars } = synth(text);
+      const words = []; let cur = null;
+      for (const c of chars) { if (/\s/.test(c.c)) { cur = null; continue; } if (!cur) { cur = { text: '', start: c.start, end: c.end }; words.push(cur); } cur.text += c.c; cur.end = c.end; }
+      return json(res, 200, { words });
+    }
     if (req.method === 'POST' && url.pathname === '/v1/listen') {
       if (!/^Token /.test(req.headers.authorization || '')) return json(res, 401, { err_msg: 'missing token' });
       const audio = await readBody(req);

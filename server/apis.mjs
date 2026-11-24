@@ -218,3 +218,24 @@ export function applyPronunciation(text, dict) {
   }
   return { text: out, applied: rules.length };
 }
+
+// ---- OpenAI-compatible TTS (OpenAI, or any server exposing /audio/speech) ------------------------
+/** Plain speech (mp3), no timestamps — the timing stage gets them from Deepgram or estimates them. */
+export async function ttsOpenAI(settings, text, { signal } = {}) {
+  const { baseUrl, apiKey, model, voice, speed, instructions } = settings.openaiTts;
+  if (!apiKey && /api\.openai\.com/.test(baseUrl)) throw new Error('OpenAI TTS API key is missing (Settings → الصوت).');
+  const res = await fetch(`${trimSlash(baseUrl)}/audio/speech`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+    body: JSON.stringify({ model: model || 'gpt-4o-mini-tts', voice: voice || 'alloy', input: text, response_format: 'mp3', speed: Number(speed) || 1, ...(instructions && /gpt-4o/.test(model) ? { instructions } : {}) }),
+  });
+  if (!res.ok) throw new Error(`TTS ${await failText(res)}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 200) throw new Error('TTS returned no audio');
+  return buf;
+}
+
+export async function testOpenAITts(settings) {
+  const buf = await ttsOpenAI(settings, 'تجربة', { signal: AbortSignal.timeout(30000) });
+  return { ok: true, message: `متصل — رجّع ${(buf.length / 1024).toFixed(0)} KB صوت` };
+}

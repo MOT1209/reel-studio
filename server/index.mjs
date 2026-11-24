@@ -3,11 +3,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
-import { listVoices, testLlm, testElevenLabs, testDeepgram } from './apis.mjs';
+import { listVoices, testLlm, testElevenLabs, testDeepgram, testOpenAITts } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
 import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
 
-const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram };
+const TESTS = { llm: testLlm, elevenlabs: testElevenLabs, deepgram: testDeepgram, openaiTts: testOpenAITts };
 import { iconLicenses } from './icons.mjs';
 import { checkFfmpeg } from './render.mjs';
 import * as P from './pipeline.mjs';
