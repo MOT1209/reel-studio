@@ -16,7 +16,7 @@ import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
-import { keptSegments, outDuration, srcToOut } from './timeline.mjs';
+import { keptSegments, outDuration, srcToOut, sequenceToSegments, isHold } from './timeline.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -445,7 +445,7 @@ const STAGE_FN = {
     const data = renderData(p);
     const { duration, start, segments } = data;
     const audioCfg = getSettings().audio;
-    log(p, 'render', `${duration.toFixed(2)} s${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
+    log(p, 'render', `${duration.toFixed(2)} s${E.sequence ? ` · custom order: ${segments.filter((x) => !isHold(x)).length} parts, ${segments.filter(isHold).length} pause(s)` : `${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''}`} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
     const tmpVideo = path.join(dir, 'frames.mp4');
     const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
     let lastEmit = 0;
@@ -623,8 +623,8 @@ export function renderData(p) {
   const full = Math.max(p.voice?.duration || 0, lastEnd + 0.3) + 0.6;
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
-  let segments = keptSegments(start, end, E.cuts);
-  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a cut list that removes everything is ignored
+  let segments = E.sequence ? sequenceToSegments(E.sequence) : keptSegments(start, end, E.cuts); // custom order wins
+  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a list that removes everything is ignored
   const sc = p.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,

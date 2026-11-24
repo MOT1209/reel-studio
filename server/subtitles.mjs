@@ -1,5 +1,5 @@
 // Subtitle cues from the aligned words, and SRT / WebVTT export.
-import { srcToOut } from './timeline.mjs';
+import { srcToOut, isHold } from './timeline.mjs';
 // Cues follow the same rules as the burned-in captions (≤ 6 words, break on a new script line or a sentence end,
 // ≤ 42 characters) so the exported file matches what the video shows.
 
@@ -36,7 +36,9 @@ function mapCues(cues, segs, words, digits) {
   const out = [];
   for (const c of cues) {
     const [a, b] = c.src;
-    for (const [s0, s1] of segs) {
+    for (const sg of segs) {
+      if (isHold(sg)) continue;
+      const [s0, s1] = sg;
       const x = Math.max(a, s0), y = Math.min(b, s1);
       if (y - x < 0.08) continue;
       // only the words actually spoken inside this kept part (a word counts where most of it is)
@@ -47,7 +49,7 @@ function mapCues(cues, segs, words, digits) {
       out.push({ start: +srcToOut(x, segs).toFixed(3), end: +srcToOut(y, segs).toFixed(3), text });
     }
   }
-  return out;
+  return out.sort((p, q) => p.start - q.start); // reordered parts come out in output order
 }
 
 export function toArabicDigits(s) { return String(s).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d))); }

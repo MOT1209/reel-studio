@@ -193,6 +193,30 @@ await test('cut from the middle + clip sound: video, audio and subtitles all los
   for (const w of cutWords) assert.ok(!srt.includes(w) || before.words.filter((x) => x.text === w).length > 1, `cut word «${w}» still in subtitles`);
 });
 
+await test('custom order: the second half plays first, then a 1.5 s pause, then the first half', async () => {
+  const before = await api(`/api/projects/${id}/render-data`);
+  const split = before.words[Math.floor(before.words.length / 2)].start;
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { cuts: [], overlays: [], export: { aspect: '9:16', resolution: 720, quality: 'draft', fps: 30 },
+    sequence: [{ start: split, end: before.full }, { hold: 1.5, at: split }, { start: 0, end: split }] } }) });
+  const d = await api(`/api/projects/${id}/render-data`);
+  assert.ok(Math.abs(d.duration - (before.full + 1.5)) < 0.01, `duration ${d.duration}`);
+  await api(`/api/projects/${id}/run`, { method: 'POST' });
+  const done = await waitStage(id, 'render', 'done');
+  assert.match(done.stages.render.log.join('\n'), /custom order: 2 parts, 1 pause/);
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  assert.ok(Math.abs(Number(probe(f).format.duration) - d.duration) < 0.15);
+  // the pause is silent (voice gone, no music in this edit) while the parts around it are not
+  const vol = (t0, t1) => Number(spawnSync(FFMPEG, ['-hide_banner', '-ss', String(t0), '-t', String(t1 - t0), '-i', f, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr.match(/mean_volume:\s*(-?[\d.]+)/)?.[1]);
+  const pauseAt = before.full - split;
+  const quiet = vol(pauseAt + 0.25, pauseAt + 1.25), loud = vol(0.3, 1.3);
+  assert.ok(quiet < loud - 25, `pause ${quiet} dB vs speech ${loud} dB`);
+  const srt = await (await fetch(`${BASE}/api/projects/${id}/subtitles.srt`)).text();
+  const first = srt.split('\n')[2].replace(/‏/g, '');
+  const firstLate = before.words.find((w) => w.start >= split - 0.01).text;
+  assert.ok(first.startsWith(firstLate), `first subtitle «${first}» should start with «${firstLate}»`);
+  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { sequence: null } }) });
+});
+
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

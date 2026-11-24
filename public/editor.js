@@ -27,6 +27,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   E().typography = E().typography || {};
   E().trim = E().trim || { start: 0, end: null };
   E().cuts = E().cuts || [];
+  E().sequence = E().sequence || null;
   let mark = { in: null, out: null }; // I / O marks for cutting a range out of the middle
 
   el.innerHTML = `
@@ -57,6 +58,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     <div class="etimeline" dir="ltr">
       <div class="tl-labels">
         <div class="tl-lab ruler-l">الوقت</div>
+        <div class="tl-lab">الترتيب <span><button class="small" id="addPause" title="سكوت ثانية عند المؤشر">＋⏸</button><button class="small" id="seqReset" title="رجّع الترتيب الأصلي" hidden>↺</button></span></div>
         <div class="tl-lab">المشاهد</div>
         <div class="tl-lab">صور/فيديو <button class="small" id="addMedia" title="إضافة صورة أو فيديو عند المؤشر">＋</button></div>
         <div class="tl-lab">نصوص <button class="small" id="addText" title="إضافة نص عند المؤشر">＋</button></div>
@@ -90,6 +92,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (sel?.kind === 'overlay' && !E().overlays.some((o) => o.id === sel.id)) sel = null;
     if (sel?.kind === 'music' && !E().audio.music) sel = null;
     if (sel?.kind === 'cut' && !E().cuts[sel.i]) sel = null;
+    if (sel?.kind === 'seg' && !derivedSegs()[sel.i]) sel = null;
     if (sel?.kind === 'overlays') { sel.ids = sel.ids.filter((x) => E().overlays.some((o) => o.id === x)); if (sel.ids.length < 2) sel = sel.ids.length ? { kind: 'overlay', id: sel.ids[0] } : null; }
   }
   function status(txt, cls = '') { const s = $('#edStatus', el); s.textContent = txt; s.className = 'hint ' + cls; }
@@ -144,12 +147,16 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     for (let s = 0; s <= full; s += tickEvery) h += `<span class="tick" style="left:${X(s)}px">${fmtTime(s).replace(/\.0$/, '')}</span>`;
     if (tr.start > 0) h += `<div class="trimshade" style="left:0;width:${X(tr.start)}px"></div>`;
     if (tr.end) h += `<div class="trimshade" style="left:${X(tr.end)}px;width:${X(full - tr.end)}px"></div>`;
-    h += `<div class="trimh" data-drag="trimStart" style="left:${X(tr.start || 0)}px" title="بداية القص"></div><div class="trimh end" data-drag="trimEnd" style="left:${X(tr.end || full)}px" title="نهاية القص"></div>`;
+    if (!E().sequence?.length) h += `<div class="trimh" data-drag="trimStart" style="left:${X(tr.start || 0)}px" title="بداية القص"></div><div class="trimh end" data-drag="trimEnd" style="left:${X(tr.end || full)}px" title="نهاية القص"></div>`;
     E().cuts.forEach((c, k) => { h += `<div class="cutblk ${sel?.kind === 'cut' && sel.i === k ? 'sel' : ''}" data-cut="${k}" style="left:${X(c.start)}px;width:${Math.max(3, X(c.end - c.start))}px" title="مقطع محذوف ${c.start.toFixed(2)}–${c.end.toFixed(2)} — دوس عشان ترجّعه"></div>`; });
     if (mark.in != null) h += `<div class="markh in" style="left:${X(mark.in)}px" title="بداية المقطع"></div>`;
     if (mark.out != null) h += `<div class="markh out" style="left:${X(mark.out)}px" title="نهاية المقطع"></div>`;
     if (mark.in != null && mark.out != null && mark.out > mark.in) h += `<div class="markrange" style="left:${X(mark.in)}px;width:${X(mark.out - mark.in)}px"></div>`;
     h += `</div>`;
+    // output order: what the export plays, left to right (drag to reorder; ⏸ = pause)
+    { let acc = 0; const custom = !!E().sequence?.length;
+      h += `<div class="tl-row seqrow ${custom ? 'custom' : ''}" data-seekout>${derivedSegs().map((sg, i) => { const l = segLen(sg), x0 = acc; acc += l;
+        return `<div class="blk seg ${isHold(sg) ? 'hold' : ''} ${sel?.kind === 'seg' && sel.i === i ? 'sel' : ''}" draggable="true" data-seg="${i}" style="left:${X(x0)}px;width:${Math.max(6, X(l) - 2)}px" title="${isHold(sg) ? `سكوت ${l.toFixed(1)} ث` : `${sg[0].toFixed(2)}–${sg[1].toFixed(2)} ث من الصوت`}"><span>${isHold(sg) ? `⏸ ${l.toFixed(1)}` : `${i + 1}`}</span></div>`; }).join('')}<div class="outhead" id="tlOutHead"></div></div>`; }
     h += `<div class="tl-row" data-seek>${S.storyboard.scenes.map((sc, i) => `<div class="blk scene ${sel?.kind === 'scene' && sel.i === i ? 'sel' : ''}" draggable="true" data-scene="${i}" style="left:${X(st[i].start)}px;width:${Math.max(4, X(st[i].end - st[i].start) - 2)}px">
       ${i > 0 ? `<i class="h l" data-drag="sceneStart" data-i="${i}"></i>` : ''}<span>${i + 1}. ${esc(TPL_AR[sc.template] || sc.template)}${sc.image ? ' 🖼' : ''} · ${esc(sc.title)}</span></div>`).join('')}</div>`;
     const ovRow = (kinds) => E().overlays.filter((o) => kinds.includes(o.kind)).map((o) => `<div class="blk ov ${o.kind} ${isSelOv(o.id) ? 'sel' : ''}" data-ov="${esc(o.id)}" data-drag="ovMove" style="left:${X(o.start)}px;width:${Math.max(6, X(o.end - o.start))}px">
@@ -167,12 +174,33 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     drawWave();
   }
 
+  // ---------- output order (segments) ----------
+  const isHold = (sg) => sg.length === 3;
+  const segLen = (sg) => (isHold(sg) ? sg[2] : sg[1] - sg[0]);
+  function derivedSegs() {
+    if (E().sequence?.length) return E().sequence.map((x) => (x.hold !== undefined ? [x.at, x.at, x.hold] : [x.start, x.end]));
+    const a = E().trim?.start || 0, b = E().trim?.end || full, segs = [];
+    let cur = a;
+    for (const c of [...E().cuts].sort((x, y) => x.start - y.start)) { if (c.end <= cur || c.start >= b) continue; if (c.start > cur) segs.push([cur, Math.min(c.start, b)]); cur = Math.max(cur, c.end); }
+    if (cur < b) segs.push([cur, b]);
+    return segs;
+  }
+  const toSeq = (segs) => segs.map((sg) => (isHold(sg) ? { hold: sg[2], at: sg[0] } : { start: +sg[0].toFixed(3), end: +sg[1].toFixed(3) }));
+  function outOf(tSrc) { let acc = 0; for (const sg of derivedSegs()) { if (!isHold(sg) && tSrc >= sg[0] && tSrc <= sg[1]) return acc + tSrc - sg[0]; acc += segLen(sg); } return null; }
+  function srcOf(tau) { let acc = 0; for (const sg of derivedSegs()) { const l = segLen(sg); if (tau < acc + l) return isHold(sg) ? sg[0] : sg[0] + tau - acc; acc += l; } return full; }
+  /** Insert a pause at the playhead: the part that contains it is split in two around the pause. */
+  function addPause() {
+    const segs = derivedSegs();
+    const k = segs.findIndex((sg) => !isHold(sg) && t >= sg[0] && t <= sg[1]);
+    if (k < 0) { toast('حط المؤشر على جزء من الصوت الأول', 'bad'); return; }
+    const [a, b] = segs[k];
+    const parts = [t - a >= 0.1 ? [a, t] : null, [t, t, 1], b - t >= 0.1 ? [t, b] : null].filter(Boolean);
+    change(() => { segs.splice(k, 1, ...parts); E().sequence = toSeq(segs); sel = { kind: 'seg', i: k + (parts[0] && !isHold(parts[0]) ? 1 : 0) }; });
+  }
+
   const isSelOv = (oid) => (sel?.kind === 'overlay' && sel.id === oid) || (sel?.kind === 'overlays' && sel.ids.includes(oid));
   const selOvIds = () => (sel?.kind === 'overlay' ? [sel.id] : sel?.kind === 'overlays' ? sel.ids : []);
-  function outLen() {
-    const a = E().trim?.start || 0, b = E().trim?.end || full;
-    return Math.max(0, b - a - E().cuts.reduce((s2, c) => s2 + Math.max(0, Math.min(b, c.end) - Math.max(a, c.start)), 0));
-  }
+  const outLen = () => derivedSegs().reduce((a, sg) => a + segLen(sg), 0);
 
   // ---------- inspector ----------
   const opt = (list, cur, labels = {}) => list.map((v) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(labels[v] || v)}</option>`).join('');
@@ -226,6 +254,15 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       box.innerHTML = `<h4>مقطع محذوف</h4><p class="hint">الجزء ده مش هيظهر في الفيديو ولا الصوت ولا الترجمة، والباقي بيتلم على بعضه.</p>
         <div class="two"><label>من <input type="number" step="0.05" data-c="start" value="${c.start}"></label><label>لحد <input type="number" step="0.05" data-c="end" value="${c.end}"></label></div>
         <div class="tools"><button class="small primary" id="cutUndo">↺ رجّع المقطع</button></div>`;
+    } else if (sel.kind === 'seg') {
+      const sg = derivedSegs()[sel.i];
+      box.innerHTML = isHold(sg) ? `<h4>سكوت</h4><p class="hint">الصورة بتقف على اللحظة دي، وصوت الراوي ساكت. الموسيقى والمؤثرات بيكمّلوا.</p>
+          <label>المدة (ث) <input type="number" min="0.1" max="10" step="0.1" data-sg="hold" value="${sg[2]}"></label>
+          <div class="tools"><button class="small danger" id="sgDel">حذف السكوت</button></div>`
+        : `<h4>جزء ${sel.i + 1} من الصوت</h4><p class="hint">اسحبه في صف «الترتيب» عشان يتعرض قبل أو بعد جزء تاني.</p>
+          <div class="two"><label>من <input type="number" step="0.05" data-sg="start" value="${sg[0]}"></label><label>لحد <input type="number" step="0.05" data-sg="end" value="${sg[1]}"></label></div>
+          <div class="tools"><button class="small danger" id="sgDel">شيل الجزء ده</button></div>`;
+      box.innerHTML += E().sequence?.length ? `<div class="tools"><button class="small" id="sgReset">↺ الترتيب الأصلي</button></div>` : '';
     } else if (sel.kind === 'overlays') {
       box.innerHTML = `<h4>${sel.ids.length} عناصر محددة</h4><p class="hint">اسحب أي واحد منهم وكلهم هيتحركوا مع بعض. Shift + ضغطة عشان تضيف أو تشيل من التحديد.</p>
         <div class="tools"><button class="small" id="ovAlign">ابدأهم كلهم عند المؤشر</button><button class="small danger" id="ovDelAll">حذف الكل (Delete)</button></div>`;
@@ -279,6 +316,19 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       $$('[data-c]', box).forEach((i) => i.addEventListener('change', () => change(() => { c[i.dataset.c] = Number(i.value); if (c.end < c.start + 0.1) c.end = c.start + 0.1; normCuts(); })));
       $('#cutUndo', box).addEventListener('click', () => change(() => { E().cuts.splice(sel.i, 1); sel = null; }));
     }
+    if (sel?.kind === 'seg') {
+      $$('[data-sg]', box).forEach((i) => i.addEventListener('change', () => change(() => {
+        const segs = derivedSegs(), sg = segs[sel.i], v = Number(i.value);
+        if (i.dataset.sg === 'hold') sg[2] = Math.max(0.1, Math.min(10, v)); else if (i.dataset.sg === 'start') sg[0] = Math.max(0, Math.min(sg[1] - 0.1, v)); else sg[1] = Math.min(full, Math.max(sg[0] + 0.1, v));
+        E().sequence = toSeq(segs);
+      })));
+      $('#sgDel', box).addEventListener('click', () => {
+        const segs = derivedSegs();
+        if (segs.filter((x) => !isHold(x)).length === 1 && !isHold(segs[sel.i])) { toast('لازم يفضل جزء واحد على الأقل من الصوت', 'bad'); return; }
+        change(() => { segs.splice(sel.i, 1); E().sequence = toSeq(segs); sel = null; });
+      });
+      $('#sgReset', box)?.addEventListener('click', () => change(() => { E().sequence = null; sel = null; }));
+    }
     if (sel?.kind === 'overlays') {
       $('#ovDelAll', box).addEventListener('click', removeSelected);
       $('#ovAlign', box).addEventListener('click', () => change(() => { for (const o of E().overlays) if (sel.ids.includes(o.id)) { const len = o.end - o.start; o.start = +t.toFixed(2); o.end = +Math.min(full, t + len).toFixed(2); } }));
@@ -317,7 +367,12 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (!(mark.in != null && mark.out != null && mark.out - mark.in >= 0.1)) { toast('حدّد بداية ونهاية المقطع الأول (I و O)', 'bad'); return; }
     const a = mark.in, b = mark.out;
     if (outLen() - (b - a) < 1) { toast('مش هينفع تحذف الفيديو كله', 'bad'); return; }
-    change(() => { E().cuts.push({ start: a, end: b }); normCuts(); sel = { kind: 'cut', i: E().cuts.findIndex((c) => c.start <= a && c.end >= b) }; });
+    if (E().sequence?.length) {
+      change(() => {
+        const segs = derivedSegs().flatMap((sg) => (isHold(sg) || sg[1] <= a || sg[0] >= b ? [sg] : [[sg[0], a], [b, sg[1]]].filter(([x, y]) => y - x >= 0.1)));
+        E().sequence = toSeq(segs); sel = null;
+      });
+    } else change(() => { E().cuts.push({ start: a, end: b }); normCuts(); sel = { kind: 'cut', i: E().cuts.findIndex((c) => c.start <= a && c.end >= b) }; });
     mark = { in: null, out: null };
     toast(`اتحذف ${(b - a).toFixed(1)} ث — الفيديو بقى ${outLen().toFixed(1)} ث`);
   }
@@ -336,6 +391,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (a) change(() => { E().audio.music = { ...(E().audio.music || { volume: 0.25, duck: true, fadeIn: 1, fadeOut: 1.5 }), asset: a.id, name: a.name }; sel = { kind: 'music' }; });
   }
   $('#addMedia', el).addEventListener('click', addMedia);
+  $('#addPause', el).addEventListener('click', addPause);
+  $('#seqReset', el).addEventListener('click', () => change(() => { E().sequence = null; sel = null; }));
   $('#markIn', el).addEventListener('click', () => setMark('in'));
   $('#markOut', el).addEventListener('click', () => setMark('out'));
   $('#cutRange', el).addEventListener('click', cutRange);
@@ -346,10 +403,19 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   const inner = $('#tlInner', el), scroller = $('#tlScroll', el);
   const timeOf = (e) => T(e.clientX - inner.getBoundingClientRect().left);
   let lastSeek = 0;
+  function seekOut(tau) { t = srcOf(tau); lastSeek = performance.now(); post({ type: 'reel:seekOut', tau }); updateHead(); }
   function seek(sec) { t = Math.max(0, Math.min(full, sec)); lastSeek = performance.now(); post({ type: 'reel:seek', t }); updateHead(); }
-  function updateHead() { const h = $('#tlHead', el); if (h) h.style.left = X(t) + 'px'; $('#edTime', el).textContent = fmtTime(t); }
+  function updateHead(tau) {
+    const h = $('#tlHead', el); if (h) h.style.left = X(t) + 'px';
+    const o = tau ?? outOf(t), oh = $('#tlOutHead', el);
+    if (oh) { oh.style.display = o === null ? 'none' : 'block'; if (o !== null) oh.style.left = X(o) + 'px'; }
+    $('#edTime', el).textContent = fmtTime(t) + (o !== null && Math.abs(o - t) > 0.05 ? ` · ناتج ${fmtTime(o)}` : '');
+  }
   inner.addEventListener('pointerdown', (e) => {
     const d = e.target.closest('[data-drag]');
+    const segEl = e.target.closest('[data-seg]');
+    if (segEl) { sel = { kind: 'seg', i: Number(segEl.dataset.seg) }; seekOut(timeOf(e)); renderAll(); return; }
+    if (e.target.closest('[data-seekout]')) { sel = null; seekOut(timeOf(e)); renderAll(); return; }
     const blk = e.target.closest('[data-scene],[data-ov],[data-word],[data-music],[data-voice],[data-cut]');
     if (blk) {
       const s0 = sel;
@@ -413,9 +479,25 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   inner.addEventListener('pointerup', endDrag);
   inner.addEventListener('pointercancel', endDrag);
   // drag a scene onto another → swap what they show (times stay with the narration)
-  inner.addEventListener('dragstart', (e) => { const b = e.target.closest('[data-scene]'); if (!b || dragging) { e.preventDefault(); return; } e.dataTransfer.setData('text/scene', b.dataset.scene); });
-  inner.addEventListener('dragover', (e) => { if (e.target.closest('[data-scene]')) e.preventDefault(); });
+  inner.addEventListener('dragstart', (e) => {
+    const sgEl = e.target.closest('[data-seg]');
+    if (sgEl && !dragging) { e.dataTransfer.setData('text/seg', sgEl.dataset.seg); return; }
+    const b = e.target.closest('[data-scene]'); if (!b || dragging) { e.preventDefault(); return; } e.dataTransfer.setData('text/scene', b.dataset.scene);
+  });
+  inner.addEventListener('dragover', (e) => { if (e.target.closest('[data-scene],[data-seg],[data-seekout]')) e.preventDefault(); });
   inner.addEventListener('drop', (e) => {
+    const fromSeg = e.dataTransfer.getData('text/seg');
+    if (fromSeg !== '' && e.target.closest('[data-seekout]')) {
+      e.preventDefault();
+      const segs = derivedSegs(), from = Number(fromSeg);
+      // drop position (output time) → index to insert before
+      const tau = timeOf(e); let acc = 0, to = segs.length;
+      for (let k = 0; k < segs.length; k++) { const l = segLen(segs[k]); if (tau < acc + l / 2) { to = k; break; } acc += l; }
+      if (to === from || to === from + 1) return;
+      change(() => { const [m] = segs.splice(from, 1); segs.splice(to > from ? to - 1 : to, 0, m); E().sequence = toSeq(segs); sel = { kind: 'seg', i: to > from ? to - 1 : to }; });
+      toast('اتغيّر الترتيب — الفيديو هيتعرض بالترتيب الجديد');
+      return;
+    }
     const b = e.target.closest('[data-scene]'); const from = Number(e.dataTransfer.getData('text/scene'));
     if (!b || Number.isNaN(from)) return;
     e.preventDefault();
@@ -456,7 +538,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (e.origin !== location.origin || e.data?.type !== 'reel:time' || e.source !== frame.contentWindow) return;
     // a time report sent before the preview handled our seek would jump the playhead back: ignore it briefly
     if (!e.data.playing && performance.now() - lastSeek < 400) return;
-    if (!dragging) { t = e.data.t; updateHead(); if (e.data.playing) { const h = X(t); if (h < scroller.scrollLeft || h > scroller.scrollLeft + scroller.clientWidth - 40) scroller.scrollLeft = h - 60; } }
+    if (!dragging) { t = e.data.t; updateHead(e.data.tau); if (e.data.playing) { const h = X(t); if (h < scroller.scrollLeft || h > scroller.scrollLeft + scroller.clientWidth - 40) scroller.scrollLeft = h - 60; } }
     if (playing !== e.data.playing) { playing = e.data.playing; $('#edPlay', el).textContent = playing ? '❚❚' : '▶'; }
   };
   window.addEventListener('message', onMsg);
@@ -478,7 +560,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   function renderAll() {
     $('#edUndo', el).disabled = !hist.undo.length; $('#edRedo', el).disabled = !hist.redo.length;
     $('#cutRange', el).disabled = !(mark.in != null && mark.out != null && mark.out - mark.in >= 0.1);
-    $('#edDur', el).textContent = `الفيديو: ${outLen().toFixed(1)} ث${E().cuts.length ? ` · ${E().cuts.length} مقطع محذوف` : ''}`;
+    $('#edDur', el).textContent = `الفيديو: ${outLen().toFixed(1)} ث${E().sequence?.length ? ' · ترتيب مخصص' : E().cuts.length ? ` · ${E().cuts.length} مقطع محذوف` : ''}`;
+    $('#seqReset', el).hidden = !E().sequence?.length;
     renderTimeline(); renderInspector(); updateHead();
   }
   renderAll();

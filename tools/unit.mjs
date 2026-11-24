@@ -177,4 +177,22 @@ test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue sp
   assert.deepEqual(split, ['واحد', 'تلاتة.']);
 });
 
+test('sequence: reordered parts + a pause map both ways; overlap and empty lists are refused', () => {
+  const seq = TL.cleanSequence([{ start: 6, end: 9 }, { hold: 1.5, at: 6 }, { start: 0, end: 4 }], 10);
+  const segs = TL.sequenceToSegments(seq);
+  assert.deepEqual(segs, [[6, 9], [6, 6, 1.5], [0, 4]]);
+  assert.equal(TL.outDuration(segs), 8.5);
+  assert.equal(TL.outToSrc(1, segs), 7);
+  assert.equal(TL.outToSrc(3.7, segs), 6, 'inside the pause the frame is held');
+  assert.equal(TL.outToSrc(4.5, segs), 0);
+  assert.equal(TL.srcToOut(0, segs), 4.5); assert.equal(TL.srcToOut(8, segs), 2); assert.equal(TL.srcToOut(5, segs), null);
+  assert.throws(() => TL.cleanSequence([{ start: 0, end: 5 }, { start: 4, end: 6 }], 10), /same moment/);
+  assert.throws(() => TL.cleanSequence([{ hold: 1, at: 0 }], 10), /at least one part/);
+  assert.throws(() => TL.cleanSequence([{ start: 0, end: 2 }, { hold: 30, at: 0 }], 10), /0.1–10/);
+  const words = tokenize('أول جملة هنا.\nتاني جملة هنا').map((t, i) => ({ ...t, start: i, end: i + 0.8 }));
+  const cues = buildCues(words, { segments: [[3, 6], [3, 3, 1], [0, 3]] });
+  assert.deepEqual(cues.map((c) => c.text), ['تاني جملة هنا', 'أول جملة هنا.'], 'subtitles come out in the new order');
+  assert.equal(cues[1].start, 4, 'after the 3 s part and the 1 s pause');
+});
+
 console.log(`\n${n} unit tests passed`);

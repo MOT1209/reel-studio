@@ -171,6 +171,25 @@ try {
     await shot('editor-cut');
   });
 
+  await test('editor: insert a pause, drag a part to the end, restore the original order', async () => {
+    const r = await page.$('.tl-row.ruler'); await r.scrollIntoViewIfNeeded();
+    const b = await r.boundingBox();
+    await page.mouse.click(b.x + 5 * 70 + 1, b.y + 22);
+    await page.click('#addPause');
+    await until('pause saved', async () => (await saved()).edit.sequence?.some((x) => x.hold === 1));
+    const seq0 = (await saved()).edit.sequence;
+    const segs = await page.$$('#tlInner .blk.seg');
+    assert.equal(segs.length, seq0.length);
+    const row = await (await page.$('.tl-row.seqrow')).boundingBox();
+    await page.dragAndDrop('#tlInner .blk.seg[data-seg="0"]', '.tl-row.seqrow', { targetPosition: { x: row.width - 5, y: 10 } });
+    await until('order changed', async () => { const q = (await saved()).edit.sequence; return q && JSON.stringify(q[q.length - 1]) === JSON.stringify(seq0[0]); });
+    const d = await api(`/api/projects/${proj.id}/render-data`);
+    assert.equal(d.segments.length, seq0.length);
+    await shot('editor-sequence');
+    await page.click('#seqReset');
+    await until('order reset', async () => (await saved()).edit.sequence === null);
+  });
+
   await test('editor: shift-click selects several overlays; Delete removes them together', async () => {
     const n0 = (await saved()).edit.overlays.length;
     const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();

@@ -7,7 +7,7 @@ import { getSettings, ASPECTS, QUALITIES } from './settings.mjs';
 import { cleanTypography } from './fonts.mjs';
 import { getAsset, assetFile, validAssetId } from './assets.mjs';
 import { run } from './render.mjs';
-import { cleanCuts } from './timeline.mjs';
+import { cleanCuts, cleanSequence } from './timeline.mjs';
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 export const TRANSITIONS = ['push', 'fade', 'zoom', 'slide', 'none'];
@@ -27,6 +27,7 @@ export function effectiveEdit(e = {}) {
     },
     trim: { start: Math.max(0, Number(e.trim?.start) || 0), end: Number(e.trim?.end) > 0 ? Number(e.trim.end) : null },
     cuts: Array.isArray(e.cuts) ? e.cuts : [],
+    sequence: Array.isArray(e.sequence) && e.sequence.length ? e.sequence : null,
     audio: {
       voiceVolume: num(e.audio?.voiceVolume, 0, 2, s.audio.voiceVolume ?? 1),
       sfxVolume: num(e.audio?.sfxVolume, 0, 1, s.audio.sfxVolume ?? 0.6),
@@ -69,6 +70,7 @@ export function cleanEdit(e, { duration = Infinity } = {}) {
     }
   }
   if (Array.isArray(e.cuts)) out.cuts = cleanCuts(e.cuts, duration);
+  if (e.sequence === null || Array.isArray(e.sequence)) out.sequence = e.sequence?.length ? cleanSequence(e.sequence, duration) : null;
   if (TRANSITIONS.includes(e.transition)) out.transition = e.transition;
   if (e.typography && typeof e.typography === 'object') out.typography = cleanTypography(e.typography);
   if (Array.isArray(e.overlays)) {
