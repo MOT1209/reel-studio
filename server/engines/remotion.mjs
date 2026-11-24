@@ -133,6 +133,7 @@ export const remotionEngine = {
     const onAbort = () => cancel();
     ctx.signal?.addEventListener('abort', onAbort, { once: true });
     let emitErr = null;
+    const pending = [];
     try {
       await R.renderFrames({
         composition: ctx.composition, serveUrl: ctx.serveUrl, inputProps: ctx.inputProps, puppeteerInstance: ctx.rBrowser,
@@ -141,9 +142,12 @@ export const remotionEngine = {
         onStart: () => {}, onFrameUpdate: () => {},
         onBrowserLog: (l) => { if (l.type === 'error' && !/favicon/.test(l.text)) ctx.browserErrors.push(l.text); },
         // the frame index is absolute (frameRange keeps composition numbering)
-        onFrameBuffer: async (buf, frame) => {
+        // never block Remotion on our encoder: if Remotion waits for this callback while the encoder waits for an
+        // earlier frame still inside Remotion, both would wait forever. The encoder re-orders; the segment (≤ 300
+        // frames) bounds the memory; all hand-offs are awaited after renderFrames.
+        onFrameBuffer: (buf, frame) => {
           if (emitErr) return;
-          try { await emit(frame, buf); } catch (e) { emitErr = e; cancel(); }
+          pending.push(emit(frame, buf).catch((e) => { emitErr = emitErr || e; cancel(); }));
         },
       });
     } catch (e) {
@@ -154,6 +158,7 @@ export const remotionEngine = {
     } finally {
       ctx.signal?.removeEventListener('abort', onAbort);
     }
+    await Promise.all(pending);
     if (emitErr) throw emitErr;
   },
   async cleanup(ctx) {

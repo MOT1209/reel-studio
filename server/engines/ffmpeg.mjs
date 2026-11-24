@@ -195,6 +195,23 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
   ff.stdin.on('error', () => {});
   const ready = new Map();
   let written = i0, waiting = [];
+  // Watchdog: an engine that stops producing frames (a hung page, a deadlock, a stuck browser) would otherwise keep the
+  // render — and the queue slot — forever. No frame written for RS_STALL_SEC (default 120) fails the segment with a
+  // clear error; the engine gets an aborted signal, and the manager falls back to the legacy engine.
+  const stallMs = (() => { const v = Number(process.env.RS_STALL_SEC); return (Number.isFinite(v) && v >= 1 && v <= 3600 ? v : 120) * 1000; })();
+  const stallCtl = new AbortController();
+  let lastProgress = Date.now(), onStall;
+  const stalled = new Promise((_, rej) => { onStall = rej; });
+  stalled.catch(() => {});
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastProgress < stallMs || failed) return;
+    failed = new Error(`engine ${engine.id} stalled: no frame for ${Math.round(stallMs / 1000)} s (waiting for frame ${written})`);
+    stallCtl.abort(failed); wakeAll(); onStall(failed);
+  }, Math.min(5000, Math.max(200, stallMs / 4)));
+  watchdog.unref?.();
+  // the engine sees one signal: the user's cancel OR the watchdog (own property over the shared engine context)
+  const segCtx = Object.create(ctx);
+  segCtx.signal = signal ? AbortSignal.any([signal, stallCtl.signal]) : stallCtl.signal;
   const wakeAll = () => { const w = waiting; waiting = []; w.forEach((r) => r()); };
   const check = () => { if (signal?.aborted) throw new Error('cancelled'); if (failed) throw failed; };
   // writer: drains `ready` in order; emit() applies back-pressure so at most ~48 frames wait in memory
@@ -208,6 +225,7 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
       }
       onFrame(written, total, written % 15 === 0 || written === total - 1 ? jpg : null);
       written++;
+      lastProgress = Date.now();
       wakeAll();
     }
   };
@@ -221,8 +239,9 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
     await flushing;
   };
   try {
-    try { await engine.produce(i0, i1, emit, ctx); }
-    catch (e) { failed = failed || e; throw e; }
+    // racing the watchdog: an engine that ignores its signal cannot hold the render either (cleanup closes its browser)
+    try { await Promise.race([engine.produce(i0, i1, emit, segCtx), stalled]); }
+    catch (e) { failed = failed || e; throw failed; }
     await flushing;
     check();
     if (written !== i1) throw new Error(`engine ${engine.id} delivered ${written - i0} of ${i1 - i0} frames`);
@@ -230,6 +249,7 @@ async function encodeSegment({ engine, ctx, i0, i1, total, fps, width, height, q
     await ffDone;
     fs.renameSync(tmp, out);
   } finally {
+    clearInterval(watchdog);
     if (ff.exitCode === null && (signal?.aborted || failed || !ff.stdin.writableEnded)) ff.kill('SIGKILL');
     fs.rmSync(tmp, { force: true });
   }

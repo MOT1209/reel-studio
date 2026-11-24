@@ -32,7 +32,11 @@ async function waitStage(id, stage, status, ms = 240000) {
     const err = Object.entries(p.stages).find(([, s]) => s.status === 'error');
     if (err) throw new Error(`${err[0]}: ${err[1].error}`);
     if (p.stages[stage].status === status) return p;
-    if (Date.now() - t0 > ms) throw new Error(`timeout waiting for ${stage}=${status}`);
+    if (Date.now() - t0 > ms) {
+      // say what the render was doing — a bare timeout says nothing on CI
+      const jobs = await api('/api/render-jobs').catch(() => ({ jobs: [] }));
+      throw new Error(`timeout waiting for ${stage}=${status} (now ${p.stages[stage].status})\n  log: ${(p.stages[stage].log || []).slice(-8).join('\n       ')}\n  job: ${JSON.stringify(jobs.jobs?.at(-1) || null)}`);
+    }
     await sleep(400);
   }
 }

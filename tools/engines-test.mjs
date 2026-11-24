@@ -199,6 +199,32 @@ await t('H.265 output when this ffmpeg has libx265 (checked with ffprobe), bitra
   if (codecs.h265) assert.equal(p.video, 'hevc'); else { assert.equal(j.codec, 'h264'); console.log('   (libx265 not in this ffmpeg — fell back to h264)'); }
 });
 
+await t('watchdog: an engine that stops producing frames is failed after RS_STALL_SEC and the job falls back to legacy', async () => {
+  process.env.RS_STALL_SEC = '2';
+  try {
+    // respects its signal: produces 40 frames, then waits for an abort that only the watchdog can send
+    const stuck = { ...fake('remotion'), async produce(i0, i1, emit, ctx) {
+      for (let i = i0; i < i0 + 40; i++) await emit(i, JPG[colorOf(i)]);
+      await new Promise((_, rej) => ctx.signal.addEventListener('abort', () => rej(new Error('cancelled')), { once: true }));
+    } };
+    EM.registerEngine(stuck); EM.registerEngine(fake('legacy'));
+    const logs = [], t0 = Date.now(), o = job({ total: 60 });
+    const j = await EM.renderVideo({ ...o, engine: 'remotion', log: (l) => logs.push(l) });
+    assert.equal(j.engine, 'legacy'); assert.equal(j.fallbackFrom, 'remotion');
+    assert.match(j.fallbackReason, /stalled: no frame for 2 s \(waiting for frame 40\)/);
+    assert.ok(Date.now() - t0 < 15000, 'did not hang');
+    assert.equal(await frameCount(o.out), 60);
+    // ignores its signal entirely: the race against the watchdog still ends the segment
+    const deaf = { ...fake('remotion'), async produce() { await new Promise(() => {}); } };
+    EM.registerEngine(deaf);
+    const j2 = await EM.renderVideo({ ...job({ total: 30 }), engine: 'remotion' });
+    assert.equal(j2.engine, 'legacy'); assert.match(j2.fallbackReason, /stalled/);
+    // with fallback off, the stall is the reported error (not a silent hang, not "cancelled")
+    await assert.rejects(EM.renderVideo({ ...job({ total: 30 }), engine: 'remotion', fallback: false }), /stalled/);
+    assert.equal(EM.listJobs().at(-1).status, 'error');
+  } finally { delete process.env.RS_STALL_SEC; }
+});
+
 await t('validateOutput rejects a wrong size, fps, duration, codec or a missing audio track', async () => {
   const f = shared.out;
   await assert.rejects(validateOutput(f, { width: 1080, height: H, fps: FPS }), /width 320 ≠ 1080/);
