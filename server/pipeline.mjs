@@ -627,7 +627,8 @@ export function renderData(p) {
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
   let segments = E.sequence ? sequenceToSegments(E.sequence) : keptSegments(start, end, E.cuts); // custom order wins
-  if (outDuration(segments) < 0.5) segments = [[start, end]]; // a list that removes everything is ignored
+  // only the default trim/cut path falls back; a custom sequence is validated (cleanSequence) and kept as is
+  if (!E.sequence && outDuration(segments) < 0.5) segments = [[start, end]];
   const sc = p.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,

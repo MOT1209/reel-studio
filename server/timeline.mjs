@@ -44,6 +44,7 @@ export function cleanSequence(seq, full) {
   const ranges = out.filter((x) => x.hold === undefined).sort((x, y) => x.start - y.start);
   for (let i = 1; i < ranges.length; i++) if (ranges[i].start < ranges[i - 1].end - 1e-6) throw Object.assign(new Error('sequence: two parts use the same moment of the voice'), { status: 400 });
   if (!ranges.length) throw Object.assign(new Error('sequence needs at least one part of the voice'), { status: 400 });
+  if (out.reduce((a, x) => a + (x.hold !== undefined ? x.hold : x.end - x.start), 0) < 0.5) throw Object.assign(new Error('the video would be shorter than half a second'), { status: 400 });
   return out;
 }
 export const sequenceToSegments = (seq) => seq.map((x) => (x.hold !== undefined ? [x.at, x.at, x.hold] : [x.start, x.end]));
@@ -72,9 +73,17 @@ export function outToSrc(tau, segs) {
   return last ? (isHold(last) ? last[0] : last[1]) : 0;
 }
 
-/** Source time → output time, or null when that instant was cut out / trimmed away. */
+/**
+ * Source time → output time for a point event (word onset, scene change, tick), or null when that instant was
+ * cut out / trimmed away. Ranges are half-open [a, b): an instant on a boundary belongs to the part that starts
+ * there — so after an inserted pause it lands where the narration resumes. Only the very end of a part that no
+ * other part continues maps to that part's end.
+ */
 export function srcToOut(t, segs) {
-  let acc = 0;
-  for (const s of segs) { if (!isHold(s) && t >= s[0] && t <= s[1]) return acc + (t - s[0]); acc += segLen(s); }
-  return null;
+  let acc = 0, end = null;
+  for (const s of segs) {
+    if (!isHold(s)) { if (t >= s[0] && t < s[1]) return acc + (t - s[0]); if (t === s[1] && end === null) end = acc + (t - s[0]); }
+    acc += segLen(s);
+  }
+  return end;
 }

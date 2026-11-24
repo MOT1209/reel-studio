@@ -553,6 +553,7 @@
   const CUR = new Map(); // render only: clip ref → decoded frame image for the current t
   const FRAME_CACHE = new Map(); // url → Promise<Image>
   let PREVIEW = false;
+  let HOLD = false; // preview: the output is inside a pause
   function loadImage(src) {
     if (FRAME_CACHE.has(src)) return FRAME_CACHE.get(src);
     const pr = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image failed: ' + src)); im.src = src; });
@@ -584,7 +585,9 @@
     if (!v) return null;
     const want = offset + (m.duration ? local % Math.max(0.1, m.duration - offset) : local);
     if (Math.abs(v.currentTime - want) > 0.25) { try { v.currentTime = want; } catch {} }
-    if (PLAYING && v.paused) v.play().catch(() => {}); else if (!PLAYING && !v.paused) v.pause();
+    // during a pause in the order the frame is held: clips stand still (the output clock and music keep going)
+    const run = PLAYING && !HOLD;
+    if (run && v.paused) v.play().catch(() => {}); else if (!run && !v.paused) v.pause();
     return v.readyState >= 2 ? v : null;
   }
   const dims = (img) => [img.videoWidth || img.naturalWidth || img.width, img.videoHeight || img.naturalHeight || img.height];
@@ -1104,12 +1107,16 @@
       if (PLAYING && music.paused) { music.currentTime = tau % (music.duration || 1e9); music.play().catch(() => {}); }
       if (!PLAYING && !music.paused) music.pause();
     };
-    const placeAudio = () => {
+    let placedK = -1;
+    const placeAudio = (exact = false) => {
+      HOLD = !!cur.hold;
       if (!PLAYING || cur.hold || cur.end) { audio.pause(); return; }
-      if (Math.abs(audio.currentTime - cur.t) > 0.12) audio.currentTime = cur.t;
+      // entering another part (or an explicit seek) positions the voice exactly; within a part only drift is corrected
+      if (exact || cur.k !== placedK || Math.abs(audio.currentTime - cur.t) > 0.12) audio.currentTime = cur.t;
+      placedK = cur.k;
       if (audio.paused) audio.play().catch(() => {});
     };
-    const goTo = (x) => { tau = Math.max(0, Math.min(D.duration, x)); cur = srcAt(tau); if (music) music.currentTime = tau % (music.duration || 1e9); placeAudio(); };
+    const goTo = (x, exact = false) => { tau = Math.max(0, Math.min(D.duration, x)); cur = srcAt(tau); if (music) music.currentTime = tau % (music.duration || 1e9); placeAudio(exact); };
     const setPlaying = (on) => {
       PLAYING = on; btn.textContent = on ? '❚❚' : '▶';
       if (on && tau >= D.duration - 0.05) goTo(0);
@@ -1137,13 +1144,13 @@
       requestAnimationFrame(loop);
     };
     btn.onclick = () => setPlaying(!PLAYING);
-    seek.oninput = () => goTo((Number(seek.value) / 1000) * D.duration);
+    seek.oninput = () => goTo((Number(seek.value) / 1000) * D.duration, true);
     // editor ↔ preview: seek (source time, or output time) / play / pause / reload (after an autosave)
     window.addEventListener('message', async (e) => {
       if (e.origin !== location.origin || !e.data?.type) return;
       const m = e.data;
-      if (m.type === 'reel:seek') goTo(outT(Math.max(0, Number(m.t) || 0)));
-      if (m.type === 'reel:seekOut') goTo(Number(m.tau) || 0);
+      if (m.type === 'reel:seek') goTo(outT(Math.max(0, Number(m.t) || 0)), true);
+      if (m.type === 'reel:seekOut') goTo(Number(m.tau) || 0, true);
       if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);

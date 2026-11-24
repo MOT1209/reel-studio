@@ -1,5 +1,5 @@
 // Subtitle cues from the aligned words, and SRT / WebVTT export.
-import { srcToOut, isHold } from './timeline.mjs';
+import { isHold, segLen } from './timeline.mjs';
 // Cues follow the same rules as the burned-in captions (≤ 6 words, break on a new script line or a sentence end,
 // ≤ 42 characters) so the exported file matches what the video shows.
 
@@ -36,7 +36,10 @@ function mapCues(cues, segs, words, digits) {
   const out = [];
   for (const c of cues) {
     const [a, b] = c.src;
+    let offset = 0; // output time where the current part starts
     for (const sg of segs) {
+      const base = offset;
+      offset += segLen(sg);
       if (isHold(sg)) continue;
       const [s0, s1] = sg;
       const x = Math.max(a, s0), y = Math.min(b, s1);
@@ -46,7 +49,7 @@ function mapCues(cues, segs, words, digits) {
       if (!kept.length) continue;
       let text = kept.map((i) => words[i].text).join(' ');
       if (digits === 'arabic') text = toArabicDigits(text);
-      out.push({ start: +srcToOut(x, segs).toFixed(3), end: +srcToOut(y, segs).toFixed(3), text });
+      out.push({ start: +(base + (x - s0)).toFixed(3), end: +(base + (y - s0)).toFixed(3), text });
     }
   }
   return out.sort((p, q) => p.start - q.start); // reordered parts come out in output order

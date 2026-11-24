@@ -141,7 +141,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   }
   function renderTimeline() {
     const inner = $('#tlInner', el);
-    const W = Math.ceil(X(full)) + 60;
+    const W = Math.ceil(X(Math.max(full, outLen()))) + 60; // room for an output longer than the voice
     const st = sceneTimes();
     const tr = E().trim || {};
     const tickEvery = pps >= 50 ? 1 : pps >= 25 ? 2 : 5;
@@ -321,7 +321,15 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (sel?.kind === 'seg') {
       $$('[data-sg]', box).forEach((i) => i.addEventListener('change', () => change(() => {
         const segs = derivedSegs(), sg = segs[sel.i], v = Number(i.value);
-        if (i.dataset.sg === 'hold') sg[2] = Math.max(0.1, Math.min(10, v)); else if (i.dataset.sg === 'start') sg[0] = Math.max(0, Math.min(sg[1] - 0.1, v)); else sg[1] = Math.min(full, Math.max(sg[0] + 0.1, v));
+        if (i.dataset.sg === 'hold') sg[2] = Math.max(0.1, Math.min(10, v));
+        else {
+          // a range can grow only up to its neighbours in the voice: two parts must never use the same moment
+          const others = segs.filter((x, k) => k !== sel.i && !isHold(x));
+          const lo = Math.max(0, ...others.filter((x) => x[1] <= sg[0] + 1e-6).map((x) => x[1]));
+          const hi = Math.min(full, ...others.filter((x) => x[0] >= sg[1] - 1e-6).map((x) => x[0]));
+          if (i.dataset.sg === 'start') sg[0] = Math.max(lo, Math.min(sg[1] - 0.1, v)); else sg[1] = Math.min(hi, Math.max(sg[0] + 0.1, v));
+          if (sg[0] !== v && sg[1] !== v) toast('الحد اتظبط عشان الجزء ما يدخلش على جزء تاني', 'bad');
+        }
         E().sequence = toSeq(segs);
       })));
       $('#sgDel', box).addEventListener('click', () => {
@@ -370,10 +378,9 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     const a = mark.in, b = mark.out;
     if (outLen() - (b - a) < 1) { toast('مش هينفع تحذف الفيديو كله', 'bad'); return; }
     if (E().sequence?.length) {
-      change(() => {
-        const segs = derivedSegs().flatMap((sg) => (isHold(sg) || sg[1] <= a || sg[0] >= b ? [sg] : [[sg[0], a], [b, sg[1]]].filter(([x, y]) => y - x >= 0.1)));
-        E().sequence = toSeq(segs); sel = null;
-      });
+      const segs = derivedSegs().flatMap((sg) => (isHold(sg) || sg[1] <= a || sg[0] >= b ? [sg] : [[sg[0], a], [b, sg[1]]].filter(([x, y]) => y - x >= 0.1)));
+      if (!segs.some((x) => !isHold(x))) { toast('القص ده هيشيل الصوت كله — لازم يفضل جزء واحد على الأقل', 'bad'); return; }
+      change(() => { E().sequence = toSeq(segs); sel = null; });
     } else change(() => { E().cuts.push({ start: a, end: b }); normCuts(); sel = { kind: 'cut', i: E().cuts.findIndex((c) => c.start <= a && c.end >= b) }; });
     mark = { in: null, out: null };
     toast(`اتحذف ${(b - a).toFixed(1)} ث — الفيديو بقى ${outLen().toFixed(1)} ث`);
@@ -404,6 +411,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   // ---------- pointer interactions ----------
   const inner = $('#tlInner', el), scroller = $('#tlScroll', el);
   const timeOf = (e) => T(e.clientX - inner.getBoundingClientRect().left);
+  // the order row is in OUTPUT time, which can be longer than the voice (pauses): bounded by the output length
+  const outTimeOf = (e) => Math.max(0, Math.min(outLen(), (e.clientX - inner.getBoundingClientRect().left) / pps));
   let lastSeek = 0;
   function seekOut(tau) { t = srcOf(tau); lastSeek = performance.now(); post({ type: 'reel:seekOut', tau }); updateHead(); }
   function seek(sec) { t = Math.max(0, Math.min(full, sec)); lastSeek = performance.now(); post({ type: 'reel:seek', t }); updateHead(); }
@@ -416,8 +425,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   inner.addEventListener('pointerdown', (e) => {
     const d = e.target.closest('[data-drag]');
     const segEl = e.target.closest('[data-seg]');
-    if (segEl) { sel = { kind: 'seg', i: Number(segEl.dataset.seg) }; seekOut(timeOf(e)); renderAll(); return; }
-    if (e.target.closest('[data-seekout]')) { sel = null; seekOut(timeOf(e)); renderAll(); return; }
+    if (segEl) { sel = { kind: 'seg', i: Number(segEl.dataset.seg) }; seekOut(outTimeOf(e)); renderAll(); return; }
+    if (e.target.closest('[data-seekout]')) { sel = null; seekOut(outTimeOf(e)); renderAll(); return; }
     const blk = e.target.closest('[data-scene],[data-ov],[data-word],[data-music],[data-voice],[data-cut]');
     if (blk) {
       const s0 = sel;
@@ -493,7 +502,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       e.preventDefault();
       const segs = derivedSegs(), from = Number(fromSeg);
       // drop position (output time) → index to insert before
-      const tau = timeOf(e); let acc = 0, to = segs.length;
+      const tau = outTimeOf(e); let acc = 0, to = segs.length;
       for (let k = 0; k < segs.length; k++) { const l = segLen(segs[k]); if (tau < acc + l / 2) { to = k; break; } acc += l; }
       if (to === from || to === from + 1) return;
       change(() => { const [m] = segs.splice(from, 1); segs.splice(to > from ? to - 1 : to, 0, m); E().sequence = toSeq(segs); sel = { kind: 'seg', i: to > from ? to - 1 : to }; });

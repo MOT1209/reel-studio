@@ -22,15 +22,21 @@ export async function speechIntervals(file, { signal, noise = -32, minSilence = 
 
 /** Script words → [{text,start,end,confidence:0}] estimated on the audio. */
 export async function estimateWords(script, file, opts = {}) {
-  const tokens = tokenize(script).filter((t) => normWord(t.text));
   const { speech } = await speechIntervals(file, opts);
+  return allocateWords(script, speech);
+}
+
+/** Pure part: script words spread over the given speech intervals [[a,b],…]. */
+export function allocateWords(script, speech) {
+  const tokens = tokenize(script).filter((t) => normWord(t.text));
   const weight = tokens.map((t) => normWord(t.text).length + 1);
   const totalW = weight.reduce((a, b) => a + b, 0) || 1;
   const speechLen = speech.reduce((a, [x, y]) => a + (y - x), 0);
   // speech clock → real time (skips the pauses)
-  const real = (c) => { let acc = 0; for (const [x, y] of speech) { if (c <= acc + (y - x)) return x + (c - acc); acc += y - x; } return speech[speech.length - 1][1]; };
+  // half-open: a clock position on an interval's end belongs to the next interval (speech resumes there)
+  const real = (c) => { let acc = 0; for (const [x, y] of speech) { if (c < acc + (y - x)) return x + (c - acc); acc += y - x; } return speech[speech.length - 1][1]; };
   // snap each new script line to the start of the nearest speech interval when that keeps the order
-  let clock = 0;
+  let clock = 0, remW = totalW;
   const out = tokens.map((t, i) => {
     let start = clock;
     if (i > 0 && t.line !== tokens[i - 1].line) {
@@ -38,7 +44,9 @@ export async function estimateWords(script, file, opts = {}) {
       for (const [x, y] of speech) { if (Math.abs(acc - clock) < 0.6 && acc >= clock - 0.6) { best = acc; break; } acc += y - x; }
       if (best !== null && best > clock) start = best;
     }
-    const len = (weight[i] / totalW) * speechLen;
+    // share of the speech time still left (equal to the plain proportion when no line snapped forward)
+    const len = (weight[i] / remW) * Math.max(0, speechLen - start);
+    remW -= weight[i];
     clock = start + len;
     return { text: t.text, start: +real(start).toFixed(3), end: +real(Math.min(speechLen, clock) - 0.02).toFixed(3), confidence: 0 };
   });
