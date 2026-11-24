@@ -193,6 +193,61 @@ await test('cut from the middle + clip sound: video, audio and subtitles all los
   for (const w of cutWords) assert.ok(!srt.includes(w) || before.words.filter((x) => x.text === w).length > 1, `cut word «${w}» still in subtitles`);
 });
 
+// ---- keyframes, layer order, independent audio tracks (rendered + measured) -----------------------------------------
+const solid = (name, color) => { const f = path.join(TMP, name); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:s=400x400`, '-frames:v', '1', f]); return f; };
+const [magA, grnA] = [await add(solid('mag.png', 'magenta'), 'img'), await add(solid('grn.png', 'lime'), 'img')];
+function frameRgb(file, t, w, h) { // raw RGB of the frame at t seconds
+  return spawnSync(FFMPEG, ['-v', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 28 }).stdout;
+}
+const centroid = (buf, w, h, test) => { let sx = 0, sy = 0, c = 0; for (let y = Math.round(h * 0.36); y < Math.round(h * 0.64); y += 2) for (let x = 0; x < w; x += 2) { const i = (y * w + x) * 3; if (test(buf[i], buf[i + 1], buf[i + 2])) { sx += x; sy += y; c++; } } return c ? { x: sx / c, y: sy / c, n: c } : null; };
+const isMag = (r, g, b) => r > 200 && g < 70 && b > 200, isGrn = (r, g, b) => g > 200 && r < 90 && b < 90;
+const base720 = { export: { aspect: '9:16', resolution: 720, quality: 'draft', fps: 30 }, trim: { start: 0, end: null }, cuts: [] };
+
+await test('keyframes: an overlay really moves across the rendered video (x −0.25 → +0.25 of the frame width)', async () => {
+  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, audio: { tracks: [] }, overlays: [
+    { kind: 'image', asset: magA.id, start: 1, end: 5, pos: 'center', scale: 0.3, anim: 'none', keyframes: [{ t: 0, x: -0.25, ease: 'linear' }, { t: 4, x: 0.25 }] }] } }) });
+  assert.equal(r.project.edit.overlays[0].keyframes.length, 2);
+  await api(`/api/projects/${id}/run`, { method: 'POST' });
+  await waitStage(id, 'render', 'done');
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  fs.copyFileSync(f, path.join(OUT, 'keyframes.mp4'));
+  const a = centroid(frameRgb(f, 1.1, 720, 1280), 720, 1280, isMag), b = centroid(frameRgb(f, 3.1, 720, 1280), 720, 1280, isMag), m = centroid(frameRgb(f, 2.1, 720, 1280), 720, 1280, isMag);
+  assert.ok(a && b && m, 'magenta overlay not found in the frames');
+  assert.ok(Math.abs(b.x - a.x - 180) < 25, `the overlay moved ${(b.x - a.x).toFixed(0)} px between 1.1 s and 3.1 s, expected ≈ 180 (0.125 × 720 px per second)`);
+  assert.ok(Math.abs(m.x - (a.x + b.x) / 2) < 25, `mid-point ${m.x.toFixed(0)} is not halfway between ${a.x.toFixed(0)} and ${b.x.toFixed(0)}`);
+  assert.ok(Math.abs(a.y - b.y) < 6, 'y must not change');
+});
+await test('keyframes: out-of-range values are clamped and bad entries dropped by the server', async () => {
+  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { overlays: [
+    { kind: 'image', asset: magA.id, start: 1, end: 3, keyframes: [{ t: 99, x: 5, opacity: -3, rot: 9999 }, { t: 'x', x: 1 }, { t: 1 }, null, { t: 0.5, scale: 0.01, ease: 'bogus' }] }] } }) });
+  const k = r.project.edit.overlays[0].keyframes;
+  assert.deepEqual(k.map((x) => x.t), [0.5, 2]); assert.equal(k[1].x, 1); assert.equal(k[1].opacity, 0); assert.equal(k[1].rot, 360); assert.equal(k[0].scale, 0.05); assert.equal(k[0].ease, undefined);
+});
+await test('layer order: the later overlay is drawn in front; reversing the array reverses what is on top', async () => {
+  const ov = (a) => ({ kind: 'image', asset: a.id, start: 1, end: 5, pos: 'center', scale: 0.3, anim: 'none' });
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  const topAt = async (order) => {
+    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, overlays: order.map(ov) } }) });
+    await api(`/api/projects/${id}/run`, { method: 'POST' }); await waitStage(id, 'render', 'done');
+    const buf = frameRgb(f, 2, 720, 1280), i = ((Math.round(1280 * 0.5)) * 720 + 360) * 3; // centre of the frame
+    return [buf[i], buf[i + 1], buf[i + 2]];
+  };
+  const a = await topAt([grnA, magA]); assert.ok(isMag(...a), `expected magenta in front, got rgb(${a})`);
+  const b = await topAt([magA, grnA]); assert.ok(isGrn(...b), `expected green in front, got rgb(${b})`);
+});
+await test('audio tracks: an independent track is mixed at its start time (and not elsewhere); fades and invalid assets are handled', async () => {
+  const beep = path.join(TMP, 'beep.mp3'); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=1000:d=2', beep]);
+  const bA = await add(beep, 'sfx');
+  await assert.rejects(api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { audio: { tracks: [{ asset: iA.id, start: 1 }] } } }) }), /400/);
+  const r = await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, overlays: [], audio: { tracks: [{ asset: bA.id, start: 6, end: 8, volume: 1, fadeOut: 0.3 }] } } }) });
+  assert.equal(r.project.edit.audio.tracks.length, 1);
+  await api(`/api/projects/${id}/run`, { method: 'POST' }); const done = await waitStage(id, 'render', 'done');
+  const f = path.join(DATA, 'projects', id, 'video.mp4');
+  assert.match(done.stages.render.log.join('\n'), /1 clip sound/);
+  const inT = toneDb(f, 6.2, 7.5), outT = toneDb(f, 1.0, 2.5);
+  assert.ok(inT > outT + 12, `track window ${inT} dB vs elsewhere ${outT} dB`);
+});
+
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

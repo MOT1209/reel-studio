@@ -177,4 +177,40 @@ test('subtitles follow cuts: cut words vanish, later cues move earlier, a cue sp
   assert.deepEqual(split, ['واحد', 'تلاتة.']);
 });
 
+// ---- animation + snapping (public/anim.js is shared by the renderer and the editor) -----------------------------------
+const animCtx = {}; (await import('node:vm')).runInNewContext(fs.readFileSync(new URL('../public/anim.js', import.meta.url), 'utf8'), animCtx);
+const ANIM = { ...animCtx.ReelAnim, sample: (o, t) => ({ ...animCtx.ReelAnim.sample(o, t) }) }; // plain objects (the vm context has its own Object prototype)
+const { cleanKeyframes } = await import('../server/edit.mjs');
+test('keyframes: no keyframes → base values; before/after hold; linear midpoint; eases; hold', () => {
+  const o = { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 };
+  assert.deepEqual(ANIM.sample(o, 3), { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 });
+  const k = { ...o, keyframes: [{ t: 1, x: 0, ease: 'linear' }, { t: 3, x: 1 }] };
+  assert.equal(ANIM.sample(k, 0).x, 0); assert.equal(ANIM.sample(k, 1).x, 0); assert.equal(ANIM.sample(k, 2).x, 0.5); assert.equal(ANIM.sample(k, 3).x, 1); assert.equal(ANIM.sample(k, 9).x, 1);
+  assert.equal(ANIM.sample(k, 2).scale, 0.5, 'a property without keyframes keeps its base value');
+  const e = { keyframes: [{ t: 0, opacity: 0, ease: 'in' }, { t: 2, opacity: 1 }] };
+  assert.equal(ANIM.sample(e, 1).opacity, 0.25); // ease-in: 0.5² = 0.25
+  const h = { keyframes: [{ t: 0, rot: 0, ease: 'hold' }, { t: 2, rot: 90 }] };
+  assert.equal(ANIM.sample(h, 1.99).rot, 0); assert.equal(ANIM.sample(h, 2).rot, 90);
+  const un = { keyframes: [{ t: 2, x: 1 }, { t: 0, x: 0 }] }; // unsorted input
+  assert.equal(ANIM.sample(un, 1).x, 0.5);
+});
+test('keyframes: sampling is deterministic (same input → identical output) for 1000 random times', () => {
+  const o = { scale: 0.6, keyframes: [{ t: 0, x: -0.3, scale: 0.3, ease: 'inOut' }, { t: 1.5, x: 0.2, scale: 0.9, ease: 'out' }, { t: 4, x: 0, scale: 0.4 }] };
+  let s = 1; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 1000; i++) { const t = rnd() * 5; assert.deepEqual(ANIM.sample(o, t), ANIM.sample(structuredClone(o), t)); const v = ANIM.sample(o, t); assert.ok(v.scale >= 0.3 - 1e-9 && v.scale <= 0.9 + 1e-9); }
+});
+test('snapping: nearest point inside the threshold wins; outside → null; intervals align the closer edge', () => {
+  assert.equal(ANIM.snapTime(1.04, [0, 1, 2], 0.1), 1); assert.equal(ANIM.snapTime(1.5, [0, 1, 2], 0.1), null);
+  assert.equal(ANIM.snapTime(1.43, [1.4, 1.5], 0.1), 1.4); assert.equal(ANIM.snapTime(1.48, [1.4, 1.5], 0.1), 1.5);
+  assert.ok(Math.abs(ANIM.snapShift(0.96, 2.5, [1, 4], 0.1) - 0.04) < 1e-9, 'start edge is 0.04 from 1');
+  assert.ok(Math.abs(ANIM.snapShift(0.5, 1.97, [1, 2], 0.1) - 0.03) < 1e-9, 'end edge is 0.03 from 2');
+  assert.equal(ANIM.snapShift(0.5, 1.5, [3], 0.1), 0);
+});
+test('server keyframe cleaning: sorted, clamped to the overlay length, capped at 24, junk dropped', () => {
+  const r = cleanKeyframes([{ t: 5, x: 2 }, { t: -1, opacity: 5 }, { t: 1, scale: 0 }, { t: 'a', x: 1 }, { t: 1 }, null, 7], 3);
+  assert.deepEqual(r, [{ t: 0, opacity: 1 }, { t: 1, scale: 0.05 }, { t: 3, x: 1 }]);
+  assert.equal(cleanKeyframes(Array.from({ length: 100 }, (_, i) => ({ t: i / 40, x: 0.1 })), 5).length, 24);
+  assert.deepEqual(cleanKeyframes('nope', 3), []);
+});
+
 console.log(`\n${n} unit tests passed`);
