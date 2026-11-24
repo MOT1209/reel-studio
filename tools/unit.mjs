@@ -345,6 +345,8 @@ test('editor model: an overlay without an id gets a real one (regex.test(undefin
   const { cleanEdit } = await import('../server/edit.mjs');
   const e = cleanEdit({ overlays: [{ kind: 'text', text: 'a', start: 0, end: 1 }, { kind: 'text', text: 'b', start: 0, end: 1, id: 'abcd1234' }] }, { duration: 10 });
   assert.match(e.overlays[0].id, /^[0-9a-f]{8}$/); assert.equal(e.overlays[1].id, 'abcd1234');
+  const d = cleanEdit({ overlays: ['dup12345', 'dup12345', 'dup12345'].map((id) => ({ kind: 'text', text: 'x', start: 0, end: 1, id })) }, { duration: 10 });
+  assert.equal(new Set(d.overlays.map((o) => o.id)).size, 3, 'duplicate ids are replaced'); assert.equal(d.overlays[0].id, 'dup12345');
 });
 
 for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }

@@ -165,8 +165,9 @@ export const remotionEngine = {
     if (ctx.rBrowser) {
       // untracked only once close() has settled: a close that hangs leaves it tracked, so the shutdown closes it again
       const b = ctx.rBrowser;
-      const closed = await Promise.race([b.close({ silent: true }).then(() => true, () => true), new Promise((r) => setTimeout(() => r(false), 5000))]);
-      if (closed) untrackBrowser(b);
+      // untrack on success whenever it comes (also after the 5 s wait); a close that never completes stays tracked
+      const closing = b.close({ silent: true }).then(() => untrackBrowser(b), () => {});
+      await Promise.race([closing, new Promise((r) => setTimeout(r, 5000))]);
     }
     ctx.rBrowser = null;
   },
