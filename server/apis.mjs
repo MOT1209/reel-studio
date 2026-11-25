@@ -190,7 +190,7 @@ export async function ttsWithTimestamps(settings, text, { signal } = {}) {
 
 // ---- Deepgram ----------------------------------------------------------------
 /** Word timings for an uploaded voice-over. Returns [{text,start,end,confidence}]. */
-export async function transcribeWords(settings, audioBuf, mime, { signal } = {}) {
+export async function transcribeWords(settings, audioBuf, mime, { signal, timeout = 300000 } = {}) {
   const { baseUrl, apiKey, model, language } = settings.deepgram;
   if (!apiKey) throw new Error('Deepgram API key is missing (Settings).');
   const q = new URLSearchParams({ model: model || 'nova-3', language: language || 'ar', punctuate: 'true' });
@@ -198,7 +198,7 @@ export async function transcribeWords(settings, audioBuf, mime, { signal } = {})
     method: 'POST', signal,
     headers: { Authorization: `Token ${apiKey}`, 'Content-Type': mime || 'audio/mpeg' },
     body: audioBuf,
-  }, { timeout: 300000, retries: 2, label: 'Deepgram', idempotent: false }); // billed per minute
+  }, { timeout, retries: 2, label: 'Deepgram', idempotent: false }); // billed per minute
   if (!res.ok) throw new Error(`Deepgram ${await failText(res)}`);
   const j = await res.json();
   const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];

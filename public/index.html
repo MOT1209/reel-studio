@@ -31,7 +31,11 @@
 <div class="layout view" data-view="projects">
   <aside class="side">
     <form id="newForm" class="panel">
-      <h3>ريل جديد</h3>
+      <h3>فيديو جديد</h3>
+      <label>نوع الإنتاج
+        <select id="profile"><option value="short">ريل / شورت</option></select>
+      </label>
+      <p class="hint" id="profileHint"></p>
       <label>الموضوع
         <textarea id="topic" rows="2" required placeholder="مثلاً: ليه بنتاوب لما حد يتاوب؟"></textarea>
       </label>
@@ -40,8 +44,17 @@
           <option value="10">10 ثواني</option><option value="20">20 ثانية</option><option value="30" selected>30 ثانية</option>
           <option value="45">45 ثانية</option><option value="60">60 ثانية</option>
           <option value="auto">أوتو — الـ LLM يحدد</option>
+          <optgroup label="فيديو طويل (بفصول)">
+            <option value="120">دقيقتين</option><option value="180">3 دقايق</option><option value="300">5 دقايق</option>
+            <option value="600">10 دقايق</option><option value="900">15 دقيقة</option><option value="1200">20 دقيقة</option><option value="1800">30 دقيقة</option>
+          </optgroup>
+          <option value="custom">مدة مخصصة…</option>
         </select>
       </label>
+      <label id="customRow" hidden>المدة بالدقايق (0.2 – 30)
+        <input id="customMin" type="number" min="0.2" max="30" step="0.5" value="8">
+      </label>
+      <p class="hint" id="durationHint"></p>
       <div class="two">
         <label>اللغة
           <select id="dialect"><option value="egyptian">عامية مصرية</option><option value="msa">فصحى مبسطة</option><option value="levantine">شامي</option><option value="gulf">خليجي</option></select>

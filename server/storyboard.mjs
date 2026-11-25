@@ -20,9 +20,18 @@ const ALT = {
 const TEMPLATE_ALIAS = { image: 'photo', picture: 'photo', video: 'photo', footage: 'photo', text: 'type', quote: 'type', typography: 'type', headline: 'type', news: 'type', compare: 'cards', versus: 'cards', card: 'cards', bars: 'chart', bar: 'chart', gauge: 'meter', organ: 'body', anatomy: 'body', macro: 'zoom', micro: 'zoom', steps: 'flow', process: 'flow', loop: 'cycle', stack: 'layers', history: 'timeline' };
 const MIN_SCENE_SEC = 1.2;
 
-export function storyboardMessages({ title, words, duration, forceTemplate }) {
+/**
+ * Full-storyboard prompt. Long-form passes one window of a chapter: `window` = { first, chapter } (the window is not the
+ * start of the video unless `first`), plus the profile's pace (`sceneSeconds`), visual direction and preferred templates.
+ * With none of those options the prompt is exactly the short-reel prompt.
+ */
+export function storyboardMessages({ title, words, duration, forceTemplate, sceneSeconds = 3.2, maxScenes = 12, window = null, visual = '', templates = [] }) {
   const wordList = words.map((w) => `${w.i}:${w.text}@${w.start.toFixed(2)}`).join(' ');
-  const target = Math.max(2, Math.min(12, Math.round(duration / 3.2)));
+  const target = Math.max(2, Math.min(maxScenes, Math.round(duration / sceneSeconds)));
+  const opening = !window || window.first
+    ? 'The first scene is type "intro" at 0.'
+    : `This is one part of a longer video (chapter "${window.chapter}"): the first scene starts at word ${words[0].i}; do NOT use type "intro".`;
+  const direction = `${visual ? `\n- Visual direction: ${visual}` : ''}${templates.length ? `\n- Prefer these templates when they fit: ${templates.join(', ')}.` : ''}`;
   return [
     { role: 'system', content: `[[TASK:STORYBOARD]]
 You are the motion designer of a faceless science-explainer reel (dark technical illustrations, one illustration card per scene).
@@ -45,13 +54,13 @@ Templates (pick the one that best SHOWS what is being said):
 - type: animated typography — the title and up to 3 short phrases appear big (a definition, a quote, a key sentence, a news-style headline).
 Every scene also has "query": 2–4 English keywords to find a matching stock photo or video for it.
 Rules:
-- About ${target} scenes for ${duration.toFixed(1)} s. Each scene lasts at least ${MIN_SCENE_SEC}s. The first scene is type "intro" at 0.
+- About ${target} scenes for ${duration.toFixed(1)} s. Each scene lasts at least ${MIN_SCENE_SEC}s. ${opening}
 - "at" = index of the word where the scene starts — the word that introduces what the scene shows. Sorted ascending.
 - item "at" = word index where that item should pop in (inside the scene), or null.
 - Never use the same template three scenes in a row. Vary templates.
 - Icons are simple, concrete English nouns (heart, sun, cell, virus, water, clock, brain). One or two words.
 - Labels are Egyptian Arabic and short; keep English science terms in English (DNA, oxygen).
-- accents: 2–6 key words. tones: accent (main term), blue (secondary term), success (good/positive), warning (danger only), underline (the key number or the answer).${forceTemplate ? `\n- TEST MODE: use template "${forceTemplate}" for every scene.` : ''}` },
+- accents: 2–6 key words. tones: accent (main term), blue (secondary term), success (good/positive), warning (danger only), underline (the key number or the answer).${direction}${forceTemplate ? `\n- TEST MODE: use template "${forceTemplate}" for every scene.` : ''}` },
     { role: 'user', content: `TITLE: ${title}\nDURATION: ${duration.toFixed(2)}s\nWORDS (index:word@startSeconds):\n${wordList}` },
   ];
 }

@@ -20,6 +20,8 @@ import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
 import { keptSegments, outDuration, srcToOut, outToSrc, sequenceToSegments, isHold } from './timeline.mjs';
 import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
+import { PROFILES, profileOf, MIN_SECONDS, MAX_SECONDS, durationCategory } from './profiles.mjs';
+import * as LF from './longform.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -76,7 +78,14 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
   topic = String(topic || '').trim().slice(0, 300);
   if (!topic) throw httpError(400, 'topic is required');
   seconds = seconds === 'auto' ? 'auto' : Number(seconds);
-  if (!LENGTHS.includes(seconds)) throw httpError(400, `length must be one of ${LENGTHS.join(', ')}`);
+  // the classic reel lengths, or any whole number of seconds up to 30 minutes (long-form: chapters)
+  if (!LENGTHS.includes(seconds) && !(Number.isInteger(seconds) && seconds >= MIN_SECONDS && seconds <= MAX_SECONDS)) {
+    throw httpError(400, `length must be one of ${LENGTHS.join(', ')} or a whole number of seconds from ${MIN_SECONDS} to ${MAX_SECONDS}`);
+  }
+  const profile = PROFILES[options.profile] ? options.profile : 'short';
+  // a long video with no platform chosen goes to landscape YouTube, not a 9:16 Short
+  if (!options.platform && !options.aspect && typeof seconds === 'number' && seconds > 180) options = { ...options, platform: profileOf(profile).platform === 'youtube-shorts' ? 'youtube' : profileOf(profile).platform };
+  else if (!options.platform && !options.aspect && profile !== 'short') options = { ...options, platform: profileOf(profile).platform };
   const id = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
   const p = {
     id, topic, seconds, createdAt: new Date().toISOString(), updatedAt: null,
@@ -85,7 +94,10 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     options: {
       forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish,
       dialect: ['msa', 'levantine', 'gulf'].includes(options.dialect) ? options.dialect : 'egyptian', research: options.research !== false,
+      profile,
     },
+    category: durationCategory(seconds),
+    outline: null, chapters: null, storyboardDrafts: null,
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
@@ -208,6 +220,7 @@ export async function approve(id, stage) {
   if (!p) throw httpError(404, 'project not found');
   if (p.stages[stage]?.status !== 'review') throw httpError(409, `${stage} is not waiting for approval`);
   p.stages[stage].status = 'done';
+  if (stage === 'script' && p.chapters) p.chapters.forEach((c) => { c.approved = true; });
   log(p, stage, '✔ approved');
   save(p);
   runPipeline(id);
@@ -221,6 +234,9 @@ export async function rerun(id, stage) {
   const firstMissing = STAGES.find((s) => p.stages[s].status !== 'done');
   if (STAGES.indexOf(stage) > STAGES.indexOf(firstMissing ?? 'render') && firstMissing) throw httpError(409, `finish ${firstMissing} first`);
   resetFrom(p, stage);
+  // re-running the script of a long-form project means a new outline and new chapters (resume is "▶ continue")
+  if (stage === 'script' && LF.isLongform(p)) { p.outline = null; p.chapters = null; }
+  if (stage === 'script' || stage === 'storyboard') p.storyboardDrafts = null;
   log(p, stage, '↻ re-run requested');
   save(p);
   runPipeline(id);
@@ -266,6 +282,8 @@ export async function editStage(id, stage, body) {
 
 function validateEdit(p, stage, body) {
   if (stage === 'script' && !String(body?.text ?? '').trim()) throw httpError(400, 'script text is empty');
+  // long-form: the narration is the chapters; a free edit of the joined text would silently lose the chapter boundaries
+  if (stage === 'script' && p.chapters?.length && String(body.text).trim() !== LF.joinChapters(p.chapters)) throw httpError(409, 'this is a long-form project: edit the chapters one by one (the title and sources can be edited here)');
   if (stage === 'timing' && (!Array.isArray(body?.words) || !p.words || body.words.length !== p.words.length)) throw httpError(400, 'words must be an array with the same length');
   if (stage === 'storyboard') {
     if (!p.words?.length) throw httpError(409, 'timing is not done yet');
@@ -334,8 +352,10 @@ const STAGE_FN = {
     const target = auto ? null : Math.round(p.seconds * WORDS_PER_SECOND);
     log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`} · ${{ msa: 'فصحى', levantine: 'شامي', gulf: 'خليجي' }[p.options?.dialect] || 'عامية مصرية'}`);
     bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', reset: true } });
-    p.research = null;
-    if (p.options?.research !== false) {
+    // a long-form script interrupted half-way keeps its research and written chapters (resume, not restart)
+    const resuming = LF.isLongform(p) && p.chapters?.some((c) => c.status === 'written');
+    if (!resuming) p.research = null;
+    if (!resuming && p.options?.research !== false) {
       // research pass: notes for the writer, shown to the user as UNVERIFIED (a failure only skips it)
       try {
         const r = await chatStream(s, researchMessages(p.topic), { signal, temperature: 0.2, maxTokens: 1500 });
@@ -351,7 +371,8 @@ const STAGE_FN = {
         log(p, 'script', `⚠ research pass skipped (${e.message})`);
       }
     }
-    const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds, { dialect: p.options?.dialect, research: p.research }), {
+    if (LF.isLongform(p)) return longScript(p, signal, s);
+    const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds, { dialect: p.options?.dialect, research: p.research, brief: profileOf(p.options?.profile).writer }), {
       signal, onDelta: (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', delta: d } }),
     });
     const parsed = parseScript(text);
@@ -376,6 +397,8 @@ const STAGE_FN = {
     }
     const s = getSettings();
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
+    const provider = s.tts?.provider === 'openai' ? 'openai' : 'elevenlabs';
+    if (spoken.text.length > TTS_MAX_CHARS[provider]) return voiceInParts(p, signal, { s, provider, text: spoken.text, out, fixed: spoken.text !== p.script.text });
     if (s.tts?.provider === 'openai') {
       log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
       fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
@@ -407,7 +430,8 @@ const STAGE_FN = {
       const s = s0;
       log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on the ${p.voice.source === 'upload' ? 'uploaded' : 'generated'} voice`);
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
-      const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
+      // long narration: Deepgram needs longer than the default 5 minutes to answer for a 30-minute file
+      const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal, timeout: Math.max(300000, Math.round((p.voice.duration || 0) * 1000)) });
       if (!dw.length) throw new Error('Deepgram returned no words');
       fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
       timed = wordsWithChars(dw);
@@ -428,8 +452,10 @@ const STAGE_FN = {
 
   async storyboard(p, signal) {
     const s = getSettings();
+    if (p.chapters?.length) return longStoryboard(p, signal, s);
     const duration = p.voice.duration;
-    const ctx = { title: p.script.title, words: p.words, duration, forceTemplate: p.options.forceTemplate };
+    const pr = profileOf(p.options?.profile);
+    const ctx = { title: p.script.title, words: p.words, duration, forceTemplate: p.options.forceTemplate, ...(p.options?.profile && p.options.profile !== 'short' ? { visual: pr.visual, templates: pr.templates } : {}) };
     const emit = (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', delta: d } });
     bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', reset: true } });
     const first = await chatStream(s, storyboardMessages(ctx), { signal, onDelta: emit, temperature: 0.6 });
@@ -537,7 +563,9 @@ const STAGE_FN = {
       file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
       width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
       engine: job.engine, fallbackFrom: job.fallbackFrom, codec: job.codec, bitrate: E.export.bitrate, renderSeconds: job.seconds, job: job.id,
+      chapters: renderChapters(p, toOut),
     };
+    if (p.render.chapters) log(p, 'render', `chapters: ${p.render.chapters.map((c) => `${c.start.toFixed(1)} s ${c.title}`).join(' · ')}`);
     const outDir = getSettings().render.outputDir;
     if (outDir) {
       try {
@@ -552,6 +580,276 @@ const STAGE_FN = {
   },
 };
 
+// ---- long-form ------------------------------------------------------------------------
+/**
+ * Long-form storyboard: every chapter is designed in windows of ≈ 2 minutes (one LLM call each, ≤ 16 scenes, so the
+ * reply stays inside the token limit). Each window's draft is saved under a hash of its words: a resume, or a new
+ * storyboard after editing one chapter, only asks the LLM for windows whose words changed. The merged drafts go
+ * through the same repair and scene-schema validation as a short storyboard.
+ */
+async function longStoryboard(p, signal, s) {
+  const pr = profileOf(p.options?.profile);
+  const ranges = LF.chapterRanges(p.chapters);
+  const windows = LF.storyboardWindows(ranges, p.words, { windowSec: Math.min(120, pr.sceneSeconds * 15) });
+  const cache = p.storyboardDrafts || {};
+  const drafts = [];
+  let asked = 0;
+  log(p, 'storyboard', `long-form: ${ranges.length} chapters → ${windows.length} storyboard windows · ~${pr.sceneSeconds} s per scene`);
+  bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', reset: true } });
+  const emit = (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', delta: d } });
+  for (const w of windows) {
+    if (signal.aborted) throw new Error('cancelled');
+    if (cache[w.key]) { drafts.push(cache[w.key]); continue; }
+    emit(`\n\n— ${w.title} (${w.start.toFixed(0)}–${w.end.toFixed(0)} s) —\n`);
+    const ctx = {
+      title: `${p.script.title} — ${w.title}`, words: p.words.slice(w.w0, w.w1), duration: w.end - w.start, forceTemplate: p.options.forceTemplate,
+      sceneSeconds: pr.sceneSeconds, maxScenes: 16, window: { first: w.w0 === 0, chapter: w.title }, visual: pr.visual, templates: pr.templates,
+    };
+    const r = await chatStream(s, storyboardMessages(ctx), { signal, onDelta: emit, temperature: 0.6, maxTokens: 6000 });
+    let raw;
+    try { raw = extractJson(r.text); } catch (e) { log(p, 'storyboard', `⚠ window ${w.k + 1} (${w.title}): ${e.message} — one title scene instead`); raw = { scenes: [] }; }
+    cache[w.key] = { scenes: Array.isArray(raw.scenes) ? raw.scenes : [], accents: Array.isArray(raw.accents) ? raw.accents : [] };
+    drafts.push(cache[w.key]);
+    asked++;
+    p.storyboardDrafts = cache;
+    log(p, 'storyboard', `window ${w.k + 1}/${windows.length} (${w.title}): ${cache[w.key].scenes.length} scenes drafted`);
+    save(p); // checkpoint
+  }
+  // keep only the drafts the current words still use
+  p.storyboardDrafts = Object.fromEntries(windows.map((w) => [w.key, cache[w.key]]));
+  const merged = LF.mergeWindowDrafts(windows, drafts);
+  const r = repairStoryboard(merged, p.words, { forceTemplate: p.options.forceTemplate });
+  log(p, 'storyboard', `${r.storyboard.scenes.length} scenes · ${r.fixes.length} repairs · ${asked} windows asked, ${windows.length - asked} reused`);
+  r.fixes.slice(0, 40).forEach((f) => log(p, 'storyboard', `  fix: ${f}`));
+  if (r.fixes.length > 40) log(p, 'storyboard', `  … ${r.fixes.length - 40} more repairs`);
+  assertStoryboard(r.storyboard, { words: p.words });
+  log(p, 'storyboard', `scene JSON valid (schema ${r.storyboard.scenes.length} scenes)`);
+  p.storyboard = r.storyboard;
+  p.storyboardFixes = r.fixes;
+  await autoVisuals(p, signal);
+  p.icons = iconsFor(storyboardNouns(r.storyboard));
+  const count = {};
+  r.storyboard.scenes.forEach((sc) => { count[sc.template] = (count[sc.template] || 0) + 1; });
+  log(p, 'storyboard', `templates: ${Object.entries(count).map(([t, n]) => `${t}×${n}`).join(' · ')}`);
+}
+
+/**
+ * Chapter start times in the finished video (output time: trims, cuts and re-ordering applied). A chapter whose first
+ * word was cut out starts at its first surviving word; a chapter cut out entirely is dropped. null for short videos.
+ */
+function renderChapters(p, toOut) {
+  if (!p.chapters?.length || !p.words?.length) return null;
+  const ranges = LF.chapterRanges(p.chapters);
+  if (ranges.at(-1)?.w1 !== p.words.length) return null; // words are not from these chapters (should not happen)
+  const out = [];
+  for (const r of ranges) {
+    let t = null;
+    for (let i = r.w0; i < r.w1 && t === null; i++) t = toOut(p.words[i].start);
+    if (t !== null && !(out.length && t <= out.at(-1).start)) out.push({ id: r.id, title: r.title, start: out.length ? +t.toFixed(3) : 0 });
+  }
+  return out;
+}
+
+/** Exact length of a PCM WAV from its "data" chunk (ffmpeg may add a LIST chunk before it). */
+function wavSeconds(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const h = Buffer.alloc(4096); const n = fs.readSync(fd, h, 0, h.length, 0);
+    const rate = h.readUInt32LE(24), block = h.readUInt16LE(32);
+    for (let o = 12; o + 8 <= n;) {
+      const id = h.toString('ascii', o, o + 4), size = h.readUInt32LE(o + 4);
+      if (id === 'data') return Math.min(size, fs.fstatSync(fd).size - o - 8) / (rate * block);
+      o += 8 + size + (size & 1);
+    }
+  } finally { fs.closeSync(fd); }
+  throw new Error(`no audio data in ${path.basename(file)}`);
+}
+
+/** Longest text sent in one TTS request (below the providers' per-request limits). */
+const TTS_MAX_CHARS = { elevenlabs: 4500, openai: 4000 };
+{ // RS_TTS_MAX_CHARS: a lower per-request limit (200–4000), e.g. for a provider plan with a smaller limit, or tests
+  const v = Number(process.env.RS_TTS_MAX_CHARS);
+  if (Number.isInteger(v) && v >= 200 && v <= 4000) { TTS_MAX_CHARS.elevenlabs = v; TTS_MAX_CHARS.openai = v; }
+}
+
+/**
+ * Narration longer than one TTS request: split at line breaks, voice each part (cached on disk by its text + voice
+ * settings, so a resume or an edit of one chapter only pays for the parts that changed), decode every part to PCM,
+ * place the parts back to back with exact sample offsets, and encode one voice.mp3. ElevenLabs character times are
+ * shifted by each part's offset, so the timing stage sees one continuous alignment.
+ */
+async function voiceInParts(p, signal, { s, provider, text, out, fixed }) {
+  const dir = projectDir(p.id), pdir = path.join(dir, 'voice-parts');
+  fs.mkdirSync(pdir, { recursive: true });
+  const parts = LF.splitForTts(text, TTS_MAX_CHARS[provider]);
+  const cfg = provider === 'openai'
+    ? { baseUrl: s.openaiTts.baseUrl, model: s.openaiTts.model, voice: s.openaiTts.voice, speed: s.openaiTts.speed }
+    : { voiceId: s.elevenlabs.voiceId, modelId: s.elevenlabs.modelId, stability: s.elevenlabs.stability, style: s.elevenlabs.style, speed: s.elevenlabs.speed };
+  log(p, 'voice', `${provider === 'openai' ? `OpenAI-compatible TTS ${cfg.model} · voice ${cfg.voice}` : `ElevenLabs voice ${cfg.voiceId || '(none)'} · ${cfg.modelId}`} · ${text.length} characters in ${parts.length} parts${fixed ? ' · pronunciation fixes applied' : ''}`);
+  const FF = process.env.FFMPEG_PATH || 'ffmpeg';
+  const keep = new Set();
+  const chars = [];
+  const list = [];
+  let offset = 0, reused = 0;
+  for (const [k, part] of parts.entries()) {
+    if (signal.aborted) throw new Error('cancelled');
+    const key = crypto.createHash('sha256').update(JSON.stringify({ provider, cfg, text: part.text, v: 1 })).digest('hex').slice(0, 20);
+    const mp3 = path.join(pdir, `${key}.mp3`), meta = path.join(pdir, `${key}.json`), wav = path.join(pdir, `${key}.wav`);
+    keep.add(`${key}.mp3`); keep.add(`${key}.json`);
+    let m = null;
+    try { if (fs.existsSync(mp3)) m = JSON.parse(fs.readFileSync(meta, 'utf8')); } catch { m = null; }
+    if (m) reused++;
+    else {
+      if (provider === 'openai') { writeFileAtomic(mp3, await ttsOpenAI(s, part.text, { signal })); m = { chars: null }; }
+      else { const r = await ttsWithTimestamps(s, part.text, { signal }); writeFileAtomic(mp3, r.audio); m = { chars: r.chars }; }
+      writeFileAtomic(meta, JSON.stringify(m)); // written last: a part only counts as done once both files exist
+      log(p, 'voice', `part ${k + 1}/${parts.length}: ${part.text.length} characters voiced`);
+    }
+    // decode → PCM: the exact sample count is the part's real length (mp3 frame padding would drift over 30 minutes)
+    await run(FF, ['-hide_banner', '-loglevel', 'error', '-y', '-i', mp3, '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', wav], { signal });
+    const dur = wavSeconds(wav);
+    if (m.chars) {
+      for (const c of m.chars) chars.push({ c: c.c, start: +(c.start + offset).toFixed(4), end: +(c.end + offset).toFixed(4) });
+      chars.push({ c: part.sep === ' ' ? ' ' : '\n', start: +(offset + dur).toFixed(4), end: +(offset + dur).toFixed(4) });
+    }
+    list.push(`file '${wav.replace(/'/g, "'\\''")}'`);
+    offset += dur;
+  }
+  const listFile = path.join(pdir, 'concat.txt');
+  fs.writeFileSync(listFile, list.join('\n') + '\n');
+  await run(FF, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'libmp3lame', '-b:a', '192k', `${out}.part.mp3`], { signal });
+  fs.renameSync(`${out}.part.mp3`, out);
+  // the decoded parts are temporary; the mp3 parts stay as the cache (parts no longer in the script are removed)
+  for (const f of fs.readdirSync(pdir)) if (!keep.has(f)) fs.rmSync(path.join(pdir, f), { force: true });
+  if (provider === 'elevenlabs') {
+    const timed = charsToWords(chars);
+    writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', parts: parts.length, chars, words: timed.map(({ chars: _c, ...w }) => w) }));
+    p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length, parts: parts.length, reusedParts: reused };
+  } else {
+    fs.rmSync(path.join(dir, 'voice-timing.json'), { force: true });
+    p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out), parts: parts.length, reusedParts: reused };
+  }
+  log(p, 'voice', `voice.mp3 ${(p.voice.duration / 60).toFixed(1)} min (${p.voice.duration.toFixed(1)} s) · ${parts.length} parts, ${reused} reused from cache · sum of parts ${offset.toFixed(2)} s`);
+}
+
+/** Plans the chapters (once), then writes every chapter that is not written yet; saves after each one. */
+async function longScript(p, signal, s) {
+  const profile = p.options?.profile || 'short';
+  const emit = (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', delta: d } });
+  if (!p.chapters?.length) {
+    const count = LF.chapterCount(p.seconds, profile);
+    log(p, 'script', `long-form ${profileOf(profile).en}: ${Math.round(p.seconds / 60)} min · planning ${count} chapters`);
+    const r = await chatStream(s, LF.outlineMessages({ topic: p.topic, seconds: p.seconds, profile, dialect: p.options?.dialect, research: p.research, count }), { signal, onDelta: emit, temperature: 0.5, maxTokens: 3000 });
+    const o = LF.parseOutline(extractJson(r.text), { seconds: p.seconds, count, topic: p.topic });
+    o.fixes.forEach((f) => log(p, 'script', `  outline fix: ${f}`));
+    p.outline = { title: o.title, sources: o.sources, model: r.model || s.llm.model, at: new Date().toISOString() };
+    p.chapters = o.chapters;
+    log(p, 'script', `outline: "${o.title}" — ${o.chapters.map((c, i) => `${i + 1}. ${c.title} (${c.seconds} s)`).join(' · ')}`);
+    save(p);
+  } else log(p, 'script', `resuming: ${p.chapters.filter((c) => c.status === 'written').length}/${p.chapters.length} chapters already written`);
+  for (let k = 0; k < p.chapters.length; k++) {
+    const c = p.chapters[k];
+    if (c.status === 'written' && c.text) continue;
+    if (signal.aborted) throw new Error('cancelled');
+    emit(`\n\n— ${k + 1}. ${c.title} —\n`);
+    await writeChapter(p, k, { signal, s, onDelta: emit });
+    save(p); // checkpoint: a crash or cancel resumes at the next chapter
+  }
+  syncScriptFromChapters(p, { model: p.outline?.model });
+  const target = Math.round(p.seconds * WORDS_PER_SECOND);
+  log(p, 'script', `"${p.script.title}" — ${p.chapters.length} chapters · ${p.script.words} words ≈ ${(p.script.words / WORDS_PER_SECOND / 60).toFixed(1)} min (target ${target})`);
+  if (Math.abs(p.script.words - target) > target * 0.25) log(p, 'script', `⚠ word count is ${p.script.words > target ? 'above' : 'below'} target by ${Math.abs(p.script.words - target)}`);
+}
+
+async function writeChapter(p, k, { signal, s = getSettings(), onDelta = () => {}, hint = '' }) {
+  const c = p.chapters[k];
+  const r = await chatStream(s, LF.chapterMessages({ topic: p.topic, title: p.outline?.title || p.topic, chapters: p.chapters, k, profile: p.options?.profile, dialect: p.options?.dialect, research: p.research, hint }), { signal, onDelta, maxTokens: 4096 });
+  c.text = LF.parseChapter(r.text);
+  LF.touchChapter(c);
+  c.status = 'written'; c.approved = false; c.edited = false; c.model = r.model || s.llm.model;
+  log(p, 'script', `chapter ${k + 1} "${c.title}": ${c.words} words ≈ ${(c.words / WORDS_PER_SECOND).toFixed(0)} s (planned ${c.seconds} s)`);
+}
+
+/** p.script is always the chapters joined: the voice, timing and captions see one continuous narration. */
+function syncScriptFromChapters(p, extra = {}) {
+  const text = LF.joinChapters(p.chapters);
+  p.script = { ...(p.script || {}), title: p.script?.edited && p.script?.title ? p.script.title : (p.outline?.title || p.topic), text, sources: p.script?.sources?.length && p.script?.edited ? p.script.sources : (p.outline?.sources || []), words: countWords(text), chapters: p.chapters.length, ...extra };
+}
+
+/**
+ * Chapter operations (long-form): rename, edit text, move, delete, add, approve, regenerate.
+ * Anything that changes the narration invalidates the voice and later stages — but the voice is generated per part
+ * and cached by text, so only the changed chapters are voiced again.
+ */
+export async function chapterOp(id, k, op, body = {}) {
+  const p = getProject(id);
+  if (!p) throw httpError(404, 'project not found');
+  if (!p.chapters?.length && op !== 'add') throw httpError(409, 'this project has no chapters (long-form projects only)');
+  // a long-form project can also be written by hand: the first "add" creates the chapter list (no outline, no LLM)
+  if (op === 'add' && !p.chapters && LF.isLongform(p) && !p.script) p.chapters = [];
+  const n = p.chapters?.length || 0;
+  const idx = op === 'add' ? null : Number(k);
+  if (op !== 'add' && !(Number.isInteger(idx) && idx >= 0 && idx < n)) throw httpError(400, `chapter must be 0…${n - 1}`);
+  if (op === 'add' && !p.chapters) throw httpError(409, 'this project has no chapters (long-form projects only)');
+  const c = idx === null ? null : p.chapters[idx];
+  let narration = true;
+  if (op === 'rename') {
+    const title = String(body.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!title) throw httpError(400, 'title is required');
+    c.title = title; narration = false;
+  } else if (op === 'approve') {
+    c.approved = body.approved !== false; narration = false;
+  } else if (op === 'edit') {
+    const text = String(body.text ?? '').trim();
+    if (!text) throw httpError(400, 'chapter text is empty — delete the chapter instead');
+    if (typeof body.title === 'string' && body.title.trim()) c.title = body.title.replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (typeof body.goal === 'string') c.goal = body.goal.trim().slice(0, 400);
+    c.text = text; LF.touchChapter(c); c.status = 'written'; c.edited = true; c.approved = false;
+  } else if (op === 'move') {
+    const to = Number(body.to);
+    if (!(Number.isInteger(to) && to >= 0 && to < n)) throw httpError(400, `to must be 0…${n - 1}`);
+    if (to === idx) narration = false;
+    p.chapters.splice(to, 0, p.chapters.splice(idx, 1)[0]);
+  } else if (op === 'delete') {
+    if (n <= 1) throw httpError(409, 'a video needs at least one chapter');
+    p.chapters.splice(idx, 1);
+  } else if (op === 'add') {
+    if (n >= LF.MAX_CHAPTERS) throw httpError(409, `at most ${LF.MAX_CHAPTERS} chapters`);
+    const at = body.after === undefined ? n : Math.max(0, Math.min(n, Number(body.after) + 1));
+    const ch = { id: LF.newChapterId(), title: String(body.title || `الفصل ${at + 1}`).trim().slice(0, 60), goal: String(body.goal || '').trim().slice(0, 400), seconds: Math.max(20, Math.min(600, Number(body.seconds) || 120)), text: String(body.text || '').trim(), words: 0, status: 'pending', approved: false, edited: false };
+    if (ch.text) { LF.touchChapter(ch); ch.status = 'written'; ch.edited = true; }
+    p.chapters.splice(at, 0, ch);
+  } else if (op === 'regenerate') {
+    await stopForEdit(p, `chapter ${idx + 1} regenerated`);
+    const ctl = new AbortController();
+    await writeChapter(p, idx, { signal: ctl.signal, hint: String(body.hint || '').slice(0, 300) });
+  } else throw httpError(400, `unknown chapter operation "${op}"`);
+  if (narration) {
+    if (op !== 'regenerate') await stopForEdit(p, `chapter ${op}`);
+    const written = p.chapters.every((x) => x.status === 'written' && x.text);
+    if (written) {
+      syncScriptFromChapters(p);
+      log(p, 'script', `✎ chapter ${op}${c ? ` "${c.title}"` : ''} → ${p.chapters.length} chapters · ${p.script.words} words`);
+      if (p.stages.script.status === 'idle' || p.stages.script.status === 'error') p.stages.script.status = p.approvals.script === 'wait' ? 'review' : 'done';
+      resetFrom(p, 'voice');
+    } else {
+      // a new empty chapter: the script stage writes it on the next run
+      log(p, 'script', `✎ chapter ${op} — ${p.chapters.filter((x) => x.status !== 'written').length} chapter(s) still to write`);
+      resetFrom(p, 'script');
+    }
+  } else log(p, 'script', `✎ chapter ${idx + 1} ${op === 'approve' ? (c.approved ? 'approved' : 'approval removed') : `renamed to "${c.title}"`}`);
+  // approving the last chapter approves the stage
+  if (op === 'approve' && p.stages.script.status === 'review' && p.chapters.every((x) => x.approved)) {
+    p.stages.script.status = 'done';
+    log(p, 'script', '✔ all chapters approved');
+    save(p);
+    runPipeline(id);
+    return publicProject(p);
+  }
+  save(p);
+  return publicProject(p);
+}
+
 /**
  * Automatic visual selection: every "photo" scene without an image gets the best stock result for its query from the
  * first configured provider (Pexels → Pixabay → Unsplash), imported with its licence. Without a provider, or when the
@@ -561,19 +859,24 @@ async function autoVisuals(p, signal) {
   const status = PV.providerStatus();
   const provider = ['pexels', 'pixabay', 'unsplash'].find((k) => status[k].configured);
   const orientation = { '9:16': 'portrait', '1:1': 'square', '16:9': 'landscape' }[effectiveEdit(p.edit).export.aspect];
+  // after 3 failed searches in a row (rate limit, outage) the remaining photo scenes fall back without more requests
+  let failures = 0;
   for (const [k, sc] of p.storyboard.scenes.entries()) {
     if (sc.template !== 'photo' || sc.image) continue;
     if (signal?.aborted) throw new Error('cancelled');
     const q = sc.query || sc.items.map((it) => it.icon).filter(Boolean).join(' ') || sc.title;
     try {
       if (!provider) throw new Error('مفيش مكتبة صور متوصلة (الإعدادات ← المكتبات)');
+      if (failures >= 3) throw new Error('المكتبة فشلت 3 مرات ورا بعض — باقي المشاهد بالرسوم');
       const r = await PV.search(provider, q, { kind: 'image', orientation, per: 5 });
       if (!r.items.length) throw new Error(`مفيش نتايج لـ "${r.queryUsed}"`);
       const a = await PV.importResult(provider, r.items[0], { folder: `project-${p.id}` });
       sc.image = a.id;
+      failures = 0;
       log(p, 'storyboard', `visual: scene ${k + 1} ← ${status[provider].name} "${r.queryUsed}" (${a.license.name}${a.source.author ? ', ' + a.source.author : ''})`);
     } catch (e) {
       if (signal?.aborted) throw e;
+      if (provider) failures++;
       sc.template = 'cards';
       if (!sc.items.length) sc.items.push({ label: sc.title || '…', icon: sc.query?.split(' ')[0] || 'cell', value: null, at: null });
       log(p, 'storyboard', `⚠ scene ${k + 1}: photo → cards (${e.message})`);

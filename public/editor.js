@@ -24,7 +24,8 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   const full = Math.max(project.voice?.duration || 0, project.words[project.words.length - 1].end + 0.3) + 0.6;
   const hist = { undo: [], redo: [] };
   let sel = null; // {kind:'scene'|'overlay'|'word'|'music'|'voice', i|id}
-  let pps = 70, t = 0, playing = false, dragging = null, saveTimer = null, saving = Promise.resolve(), dirty = false;
+  // long videos open zoomed out (a 30-minute timeline at 70 px/s would be 126 000 px wide)
+  let pps = Math.max(2, Math.min(70, Math.round(3600 / Math.max(1, full)))), t = 0, playing = false, dragging = null, saveTimer = null, saving = Promise.resolve(), dirty = false;
   const E = () => S.edit;
   E().export = E().export || {};
   E().audio = E().audio || {};
@@ -42,7 +43,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     <div class="etool">
       <button class="small" id="edUndo" title="تراجع (Ctrl+Z)">↶</button><button class="small" id="edRedo" title="إعادة (Ctrl+Y)">↷</button>
       <button class="small primary" id="edPlay" title="تشغيل (مسافة)">▶</button><span class="mono" id="edTime">0:00.0</span>
-      <label class="inl">زووم <input type="range" id="edZoom" min="20" max="240" value="70"></label>
+      <label class="inl">زووم <input type="range" id="edZoom" min="1" max="240" value="70"></label>
       <label class="inl" title="التقاط الحواف: الكلمات والمشاهد والعناصر والمؤشر"><input type="checkbox" id="snapOn" checked> مغناطيس</label>
       <select id="gridSel" title="شبكة زمنية"><option value="0">بدون شبكة</option><option value="0.25">شبكة 0.25 ث</option><option value="0.5">شبكة 0.5 ث</option><option value="1">شبكة 1 ث</option></select>
       <span class="sep"></span>
@@ -148,17 +149,18 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   }
   function drawWave() {
     const c = $('#tlWave', el); if (!c || !peaks) return;
-    const w = Math.min(30000, Math.ceil(X(full))), h = 44; c.width = w; c.height = h;
+    // canvases have a maximum width: past it, draw at a lower resolution and let CSS stretch it to the full length
+    const wFull = Math.ceil(X(full)), w = Math.min(30000, wFull), h = 44, k = wFull / w; c.width = w; c.height = h; c.style.width = `${wFull}px`;
     const g = c.getContext('2d'); g.fillStyle = 'rgba(39,184,199,.55)';
     const vv = E().audio.voiceVolume ?? 1;
-    for (let x = 0; x < w; x++) { const p = peaks[Math.floor((x / pps) * 100)] || 0; const ph = Math.min(h, p * h * vv * 1.6); g.fillRect(x, (h - ph) / 2, 1, Math.max(1, ph)); }
+    for (let x = 0; x < w; x++) { const p = peaks[Math.floor(((x * k) / pps) * 100)] || 0; const ph = Math.min(h, p * h * vv * 1.6); g.fillRect(x, (h - ph) / 2, 1, Math.max(1, ph)); }
   }
   function renderTimeline() {
     const inner = $('#tlInner', el);
     const W = Math.ceil(X(Math.max(full, outLen()))) + 60; // room for an output longer than the voice
     const st = sceneTimes();
     const tr = E().trim || {};
-    const tickEvery = pps >= 50 ? 1 : pps >= 25 ? 2 : 5;
+    const tickEvery = pps >= 50 ? 1 : pps >= 25 ? 2 : pps >= 10 ? 5 : pps >= 4 ? 15 : pps >= 2 ? 30 : 60;
     let h = `<div class="tl-row ruler" data-seek>`;
     for (let s = 0; s <= full; s += tickEvery) h += `<span class="tick" style="left:${X(s)}px">${fmtTime(s).replace(/\.0$/, '')}</span>`;
     if (tr.start > 0) h += `<div class="trimshade" style="left:0;width:${X(tr.start)}px"></div>`;
@@ -686,6 +688,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   $('#edBitrate', el).addEventListener('change', (e) => change(() => { E().export = { ...E().export, bitrate: e.target.value ? Number(e.target.value) : null }; }));
   $('#edUndo', el).addEventListener('click', undo);
   $('#edRedo', el).addEventListener('click', redo);
+  $('#edZoom', el).value = String(pps);
   $('#edZoom', el).addEventListener('input', (e) => { pps = Number(e.target.value); renderTimeline(); });
   const togglePlay = () => { playing = !playing; post({ type: playing ? 'reel:play' : 'reel:pause' }); $('#edPlay', el).textContent = playing ? '❚❚' : '▶'; };
   $('#edPlay', el).addEventListener('click', togglePlay);

@@ -23,6 +23,7 @@ import * as PV from './providers.mjs';
 import * as SK from './skills.mjs';
 import * as MCP from './mcp.mjs';
 import { PLATFORMS } from './platforms.mjs';
+import { publicProfiles } from './profiles.mjs';
 
 const HOST = '127.0.0.1';
 // Upload limit for a voice-over (MB). RS_MAX_UPLOAD_MB must be an integer 1–2000.
@@ -228,6 +229,7 @@ async function route(req, res) {
       if (id && b === 'call' && m === 'POST') { const body = await readJson(req); return json(res, 200, await MCP.callTool(id, body.tool, body.arguments || {})); }
     }
     if (a === 'platforms' && m === 'GET') return json(res, 200, { platforms: PLATFORMS });
+    if (a === 'profiles' && m === 'GET') return json(res, 200, publicProfiles());
     if (a === 'logs' && m === 'GET') {
       let lines = [];
       try { lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-Math.min(1000, Number(url.searchParams.get('tail')) || 200)); } catch {}
@@ -302,6 +304,14 @@ async function route(req, res) {
         return res.end('\uFEFF' + (vtt ? toVtt(cues) : toSrt(cues)));
       }
       if (b === 'files' && stage && FILE_RE.test(stage)) return sendFile(req, res, path.join(P.projectDir(id), stage));
+      // long-form chapters: POST /chapters (add) · PUT /chapters/<k> (edit text/title) ·
+      // POST /chapters/<k>/{rename,approve,move,delete,regenerate}
+      if (b === 'chapters') {
+        const CH_OPS = ['rename', 'approve', 'move', 'delete', 'regenerate'];
+        if (stage === undefined && m === 'POST') return json(res, 200, await P.chapterOp(id, null, 'add', await readJson(req)));
+        if (stage !== undefined && !action && m === 'PUT') return json(res, 200, await P.chapterOp(id, stage, 'edit', await readJson(req)));
+        if (stage !== undefined && CH_OPS.includes(action) && m === 'POST') return json(res, 200, await P.chapterOp(id, stage, action, await readJson(req)));
+      }
       if (b === 'stages' && P.STAGES.includes(stage)) {
         if (action === 'approve' && m === 'POST') { await P.approve(id, stage); return json(res, 200, { ok: true }); }
         if (action === 'rerun' && m === 'POST') { await P.rerun(id, stage); return json(res, 200, { ok: true }); }

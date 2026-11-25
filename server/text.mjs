@@ -43,7 +43,7 @@ Rules: 4–8 facts. Never invent sources, studies or numbers — use null when u
   ];
 }
 
-export function scriptMessages(topic, seconds, { dialect = 'egyptian', research = null } = {}) {
+export function scriptMessages(topic, seconds, { dialect = 'egyptian', research = null, brief = '' } = {}) {
   const style = fs.readFileSync(STYLE_FILE, 'utf8');
   const examples = readExamples();
   const ex = examples.length
@@ -53,7 +53,7 @@ export function scriptMessages(topic, seconds, { dialect = 'egyptian', research 
     ? `LENGTH_SECONDS: auto — choose what the topic needs, between 20 and 60 s\nTARGET_WORDS: auto (≈ 2.6 words per second of your chosen length; usually 50–130)`
     : `LENGTH_SECONDS: ${seconds}\nTARGET_WORDS: ${Math.round(seconds * WORDS_PER_SECOND)} (stay within ±10%; count only the SCRIPT words)`;
   return [
-    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}${DIALECT_RULE[dialect] || ''}` },
+    { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}${DIALECT_RULE[dialect] || ''}${brief ? `\n\n## Production profile\n${brief}\nKeep the output format and the length rules above.` : ''}` },
     { role: 'user', content: `TOPIC: ${topic}\n${length}${researchBlock(research)}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
   ];
 }
@@ -124,6 +124,61 @@ export function wordsWithChars(words) {
   });
 }
 
+/** Above this many cells (script chars × audio chars) one LCS table is too big; long scripts are aligned in windows. */
+export const ALIGN_DIRECT_MAX = 4e7;
+const ALIGN_CHUNK = 1500; // script chars per window
+
+/** Exact LCS of S[s0,s1) against T[t0,t1); writes matches (absolute T indices) into match[]. Returns the last matched T index or -1. */
+function lcsInto(S, s0, s1, T, t0, t1, match) {
+  const n = s1 - s0, m = t1 - t0;
+  if (!n || !m) return -1;
+  const W = m + 1;
+  const L = new Uint16Array((n + 1) * W);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      L[i * W + j] = S[s0 + i].ch === T[t0 + j].ch ? L[(i + 1) * W + j + 1] + 1 : Math.max(L[(i + 1) * W + j], L[i * W + j + 1]);
+    }
+  }
+  let i = 0, j = 0, last = -1;
+  while (i < n && j < m) {
+    if (S[s0 + i].ch === T[t0 + j].ch) { match[s0 + i] = t0 + j; last = t0 + j; i++; j++; }
+    else if (L[(i + 1) * W + j] >= L[i * W + j + 1]) i++;
+    else j++;
+  }
+  return last;
+}
+
+/**
+ * Long-form alignment: the script is cut into ~1500-char windows (at word boundaries); each window is aligned against
+ * the audio characters that follow the previous window's last match, with a margin for TTS that drops or adds letters.
+ * Every window costs a bounded table, so 30 minutes of narration aligns in linear time and bounded memory.
+ * Windows are anchored on the previous match, so matches stay monotonic across the whole script.
+ */
+function alignWindowed(S, T, match) {
+  const n = S.length, m = T.length;
+  const ratio = m / n; // audio chars per script char (pronunciation fixes, numbers read out…)
+  const wordStart = (i) => { while (i < n && i > 0 && S[i].w === S[i - 1].w) i++; return i; }; // never split a word
+  let s0 = 0, t0 = 0;
+  while (s0 < n) {
+    const s1 = wordStart(Math.min(n, s0 + ALIGN_CHUNK));
+    const span = Math.ceil((s1 - s0) * ratio * 1.25) + 120;
+    const t1 = s1 >= n ? m : Math.min(m, t0 + span);
+    lcsInto(S, s0, s1, T, t0, t1, match);
+    if (s1 >= n) break;
+    // The end of a window is the least reliable part: its last letters may have matched look-alike letters in the
+    // search margin. Commit only the first 80% and align the rest again as the start of the next window, anchored
+    // after the last committed match (otherwise one bad tail shifts every following window).
+    let sc = wordStart(s0 + Math.floor((s1 - s0) * 0.8));
+    if (sc <= s0) sc = s1;
+    let last = -1;
+    for (let i = s0; i < sc; i++) if (match[i] >= 0) last = match[i];
+    for (let i = sc; i < s1; i++) match[i] = -1;
+    // with no match at all, advance proportionally
+    t0 = last >= 0 ? last + 1 : Math.min(m, t0 + Math.round((sc - s0) * ratio));
+    s0 = sc;
+  }
+}
+
 /**
  * Aligns timed words onto the script tokens with a character-level LCS over normalised text,
  * so captions keep the script's own spelling. Returns [{i,text,line,start,end,weak,match}].
@@ -142,20 +197,9 @@ export function alignWords(tokens, timedWords) {
   const n = S.length, m = T.length;
   const match = new Int32Array(n).fill(-1);
   if (n && m) {
-    if (n * m > 4e7) throw new Error(`Alignment too large (${n}×${m} chars)`);
-    const W = m + 1;
-    const L = new Uint16Array((n + 1) * W);
-    for (let i = n - 1; i >= 0; i--) {
-      for (let j = m - 1; j >= 0; j--) {
-        L[i * W + j] = S[i].ch === T[j].ch ? L[(i + 1) * W + j + 1] + 1 : Math.max(L[(i + 1) * W + j], L[i * W + j + 1]);
-      }
-    }
-    let i = 0, j = 0;
-    while (i < n && j < m) {
-      if (S[i].ch === T[j].ch) { match[i] = j; i++; j++; }
-      else if (L[(i + 1) * W + j] >= L[i * W + j + 1]) i++;
-      else j++;
-    }
+    // short scripts: one exact LCS. Long-form (minutes of narration): anchored windows, linear in the length.
+    if (n * m <= ALIGN_DIRECT_MAX) lcsInto(S, 0, n, T, 0, m, match);
+    else alignWindowed(S, T, match);
   }
   // Per-word timing from matched chars
   const out = tokens.map((t, w) => ({ i: w, text: t.text, line: t.line, start: null, end: null, weak: false, match: 0 }));

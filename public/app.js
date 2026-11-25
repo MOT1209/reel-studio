@@ -41,6 +41,47 @@ async function health() {
 }
 
 // ---------- new project ----------
+let PROFILES = null; // GET /api/profiles
+/** "30 ث" for reels, "3 د" / "2.5 د" from 2 minutes on (long-form). */
+const durLabel = (sec) => (sec === 'auto' ? 'أوتو' : sec >= 120 ? `${+(sec / 60).toFixed(1)} د` : `${sec} ث`);
+function newSeconds() {
+  const v = $('#seconds').value;
+  if (v === 'auto') return 'auto';
+  if (v === 'custom') return Math.round(Math.min(30, Math.max(0.2, Number($('#customMin').value) || 0)) * 60);
+  return Number(v);
+}
+function updateDurationHint() {
+  $('#customRow').hidden = $('#seconds').value !== 'custom';
+  const sec = newSeconds();
+  const cat = PROFILES && sec !== 'auto' ? PROFILES.categories.find((c) => sec <= c.max) : null;
+  const long = PROFILES && sec !== 'auto' && sec >= PROFILES.longformFrom;
+  $('#durationHint').textContent = sec === 'auto' ? '' : `${cat ? cat.name : ''}${long ? ' · بيتكتب فصل فصل، وتقدر توافق على كل فصل وتعدّله لوحده' : ''}`;
+  // a long video on a vertical platform is almost always a mistake: suggest landscape YouTube
+  if (long && sec > 180 && ['youtube-shorts', 'instagram-reels', 'instagram-feed', 'square'].includes($('#newPlatform').value)) $('#newPlatform').value = 'youtube';
+}
+async function loadProfiles() {
+  try {
+    PROFILES = await api('/api/profiles');
+    $('#profile').innerHTML = Object.entries(PROFILES.profiles).map(([id, p]) => `<option value="${esc(id)}">${esc(p.name)} — ${esc(p.en)}</option>`).join('');
+    updateProfileHint();
+  } catch {}
+}
+function updateProfileHint() {
+  const pr = PROFILES?.profiles[$('#profile').value];
+  $('#profileHint').textContent = pr ? pr.description : '';
+}
+$('#profile').addEventListener('change', () => {
+  updateProfileHint();
+  const pr = PROFILES?.profiles[$('#profile').value];
+  if (!pr) return;
+  // the profile's usual length and platform (the user can still change both)
+  const opt = [...$('#seconds').options].find((o) => Number(o.value) === pr.defaultSeconds);
+  if (opt) $('#seconds').value = opt.value; else { $('#seconds').value = 'custom'; $('#customMin').value = +(pr.defaultSeconds / 60).toFixed(1); }
+  $('#newPlatform').value = pr.platform;
+  updateDurationHint();
+});
+$('#seconds').addEventListener('change', updateDurationHint);
+$('#customMin').addEventListener('input', updateDurationHint);
 function renderNewApprovals() {
   $('#newApprovals').innerHTML = STAGES.map((s) => `<label class="row"><input type="checkbox" data-appr="${s}" ${s === 'script' ? 'checked' : ''}> ${STAGE_AR[s]}</label>`).join('');
 }
@@ -55,7 +96,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (voiceMode === 'upload' && !file) { $('#newErr').textContent = 'اختار ملف الصوت الأول.'; return; }
   const approvals = Object.fromEntries([...document.querySelectorAll('[data-appr]')].map((c) => [c.dataset.appr, c.checked ? 'wait' : 'auto']));
   try {
-    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: $('#seconds').value === 'auto' ? 'auto' : Number($('#seconds').value), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked, dialect: $('#dialect').value, research: $('#research').checked, platform: $('#newPlatform').value } }) });
+    const p = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: $('#topic').value, seconds: newSeconds(), approvals, voiceMode, autostart: voiceMode !== 'upload', options: { publish: !!$('#newPublish')?.checked, dialect: $('#dialect').value, research: $('#research').checked, platform: $('#newPlatform').value, profile: $('#profile').value } }) });
     if (voiceMode === 'upload') {
       await api(`/api/projects/${p.id}/upload`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(file.name) } });
       await api(`/api/projects/${p.id}/run`, { method: 'POST' });
@@ -72,7 +113,7 @@ async function loadProjects() {
   $('#projects').innerHTML = projects.length ? projects.map((p) => `
     <li data-id="${esc(p.id)}" class="${current?.id === p.id ? 'active' : ''}">
       <div class="t">${esc(p.title || p.topic)}</div>
-      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${p.seconds === 'auto' ? 'أوتو' : p.seconds + ' ث'} · ${esc(p.createdAt.slice(0, 10))}</div>
+      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${durLabel(p.seconds)} · ${esc(p.createdAt.slice(0, 10))}</div>
     </li>`).join('') : '<li class="hint">لسه مفيش مشاريع.</li>';
   document.querySelectorAll('#projects li[data-id]').forEach((li) => li.addEventListener('click', () => openProject(li.dataset.id)));
 }
@@ -169,7 +210,7 @@ function render() {
     <div class="phead">
       <div>
         <h2>${esc(p.script?.title || p.topic)}</h2>
-        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds + ' ثانية'} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
+        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : durLabel(p.seconds)}${PROFILES?.profiles[p.options?.profile] && p.options.profile !== 'short' ? ` · ${esc(PROFILES.profiles[p.options.profile].name)}` : ''}${p.chapters ? ` · ${p.chapters.length} فصول` : ''} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
       </div>
       <div class="btns">
         <span id="runBtns">${runBtns(p)}</span>
@@ -234,7 +275,8 @@ function renderStagePanel() {
   let html = `<h3>${STAGE_AR[s]}</h3>${stageButtons(s)}`;
   if (s === 'script') {
     if (st.status === 'running' || (!p.script && live.llm.script)) html += `<div class="stream" id="stream-script">${esc(live.llm.script)}</div>`;
-    if (p.script) {
+    if (p.chapters) html += chaptersHtml(p);
+    else if (p.script) {
       html += `<label>العنوان <input id="edTitle" value="${esc(p.script.title)}"></label>
         <label>السكريبت (كل سطر = جملة كابشن) — ${p.script.words} كلمة ≈ ${(p.script.words / 2.6).toFixed(0)} ث
           <textarea id="edText" rows="10">${esc(p.script.text)}</textarea></label>
@@ -288,6 +330,7 @@ function renderStagePanel() {
         <div class="tools"><a href="${file('video.mp4')}" download="${esc(p.id)}.mp4"><button>⬇ تحميل MP4</button></a></div>
         <p class="hint">${fmt(p.render.duration)} ث · ${p.render.frames} فريم · ${p.render.width || 1080}×${p.render.height || 1920} (${esc(p.render.aspect || '9:16')}) · ${p.render.fps} fps · ${p.render.codec === 'h265' ? 'H.265' : 'H.264'}${p.render.bitrate ? ` ${p.render.bitrate / 1000} Mbps` : ''} · −14 LUFS${p.render.engine ? ` · محرك ${p.render.engine === 'remotion' ? 'Remotion' : 'كلاسيكي'}${p.render.fallbackFrom ? ` (بديل عن ${esc(p.render.fallbackFrom)})` : ''}${p.render.renderSeconds ? ` · ${p.render.renderSeconds} ث رندر` : ''}` : ''}${p.render.exported ? `<br>اتنسخ في: <span dir="ltr">${esc(p.render.exported)}</span>` : ''}</p>
         <div class="tools"><button data-goto="editor">✎ عدّل في المحرر</button><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.srt" download>SRT</a><a class="btnlink" href="/api/projects/${esc(p.id)}/subtitles.vtt" download>VTT</a></div>
+        ${p.render.chapters?.length ? `<div class="sources"><h4>فصول الفيديو (للوصف على يوتيوب)</h4><pre class="chapmarks" dir="auto">${esc(p.render.chapters.map((c) => `${tsLabel(c.start)} ${c.title}`).join('\n'))}</pre>${p.render.chapters.length < 3 ? '<p class="hint">يوتيوب بيعرض الفصول من 3 فصول وطالع، كل فصل 10 ثواني على الأقل.</p>' : ''}</div>` : ''}
         ${p.render.credits?.length ? `<div class="sources"><h4>حقوق الصور والموسيقى (أضفها للوصف)</h4>${p.render.credits.map((c) => `<div dir="auto">${esc(c)}</div>`).join('')}</div>` : ''}
         <h4>Contact sheet</h4><div class="preview"><img src="${file('contact.jpg')}" alt="contact sheet"></div>`;
     }
@@ -336,6 +379,7 @@ function renderStagePanel() {
     $('#arDiscard').addEventListener('click', () => { box.innerHTML = ''; });
   }));
   $('#saveScript')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/script`, { method: 'PUT', body: JSON.stringify({ title: $('#edTitle').value, text: $('#edText').value, sources: $('#edSources').value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
+  bindChapters(p);
   $('#saveTiming')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/timing`, { method: 'PUT', body: JSON.stringify({ words: p.words.map((w) => ({ start: Number($(`[data-w="${w.i}"]`).value) })) }) })));
   $('#saveSb')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/storyboard`, { method: 'PUT', body: JSON.stringify({ storyboard: $('#edSb').value }) })));
   document.querySelectorAll('input[name=vm]').forEach((r) => r.addEventListener('change', () => act(() => api(`/api/projects/${p.id}/voice-mode`, { method: 'PUT', body: JSON.stringify({ mode: r.value }) }))));
@@ -343,6 +387,59 @@ function renderStagePanel() {
     const f = e.target.files[0]; if (!f) return;
     act(() => api(`/api/projects/${p.id}/upload`, { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'audio/mpeg', 'X-Filename': encodeURIComponent(f.name) } }));
   });
+}
+
+// ---------- long-form chapters ----------
+const tsLabel = (t) => { t = Math.floor(t); const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60; return `${h ? `${h}:${String(m).padStart(2, '0')}` : m}:${String(x).padStart(2, '0')}`; };
+function chaptersHtml(p) {
+  const busy = !!p.running;
+  const total = p.chapters.reduce((a, c) => a + (c.words || 0), 0);
+  const approved = p.chapters.filter((c) => c.approved).length;
+  return `<div class="chapters">
+    <p class="hint">${p.chapters.length} فصول · ${total} كلمة ≈ ${(total / 2.6 / 60).toFixed(1)} دقيقة (المطلوب ${(p.seconds / 60).toFixed(1)}) · ${approved}/${p.chapters.length} متوافق عليهم.
+      أي تعديل في فصل بيعيد الصوت للفصل ده بس (الباقي محفوظ).</p>
+    ${p.outline?.title ? `<p><b>${esc(p.script?.title || p.outline.title)}</b></p>` : ''}
+    ${p.chapters.map((c, k) => `<details class="chapter ${c.approved ? 'ok' : ''}" ${c.status !== 'written' ? 'open' : ''}>
+      <summary><b>${k + 1}.</b> ${esc(c.title)} <span class="hint">· ${c.status === 'written' ? `${c.words} كلمة ≈ ${Math.round(c.words / 2.6)} ث` : 'لسه ماتكتبش'} (مخطط ${c.seconds} ث)${c.edited ? ' · متعدّل' : ''}${c.approved ? ' · ✔ متوافق عليه' : ''}</span></summary>
+      ${c.goal ? `<p class="hint" dir="auto">${esc(c.goal)}</p>` : ''}
+      <label>عنوان الفصل <input data-chtitle="${k}" value="${esc(c.title)}"></label>
+      <label>النص (كل سطر = جملة كابشن) <textarea data-chtext="${k}" rows="8">${esc(c.text || '')}</textarea></label>
+      <div class="tools">
+        <button class="small" data-chsave="${k}" ${busy ? 'disabled' : ''}>💾 حفظ</button>
+        <button class="small ${c.approved ? '' : 'primary'}" data-chapprove="${k}" ${c.status !== 'written' ? 'disabled' : ''}>${c.approved ? 'شيل الموافقة' : '✔ موافق على الفصل'}</button>
+        <button class="small ai" data-chregen="${k}" ${busy ? 'disabled' : ''}>✦ اكتبه تاني</button>
+        <input class="small" data-chhint="${k}" placeholder="توجيه (اختياري): أقصر، مثال أوضح…">
+        <button class="small" data-chmove="${k}" data-to="${k - 1}" ${k === 0 || busy ? 'disabled' : ''} title="لفوق">↑</button>
+        <button class="small" data-chmove="${k}" data-to="${k + 1}" ${k === p.chapters.length - 1 || busy ? 'disabled' : ''} title="لتحت">↓</button>
+        <button class="small danger" data-chdel="${k}" ${p.chapters.length <= 1 || busy ? 'disabled' : ''}>حذف</button>
+      </div></details>`).join('')}
+    <div class="tools"><button data-chadd ${busy ? 'disabled' : ''}>＋ فصل جديد في الآخر</button><span class="hint">الفصل الفاضي بيتكتب لما تدوس «كمّل».</span></div>
+    ${p.script ? `<label>المصادر (سطر لكل مصدر) <textarea id="edSources" rows="3" dir="auto">${esc((p.script.sources || []).join('\n'))}</textarea></label>
+      <div class="tools"><button id="saveSources" ${busy ? 'disabled' : ''}>💾 حفظ العنوان والمصادر</button> <input id="edTitle" value="${esc(p.script.title)}"></div>` : ''}
+  </div>`;
+}
+function bindChapters(p) {
+  if (!p.chapters) return;
+  const base = `/api/projects/${p.id}/chapters`;
+  const post = (path, body = {}) => act(() => api(`${base}/${path}`, { method: 'POST', body: JSON.stringify(body) }));
+  document.querySelectorAll('[data-chsave]').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.chsave, text = $(`[data-chtext="${k}"]`).value, title = $(`[data-chtitle="${k}"]`).value;
+    const c = p.chapters[k];
+    if (text.trim() === (c.text || '').trim()) return post(`${k}/rename`, { title });
+    act(() => api(`${base}/${k}`, { method: 'PUT', body: JSON.stringify({ text, title }) }));
+  }));
+  document.querySelectorAll('[data-chapprove]').forEach((b) => b.addEventListener('click', () => post(`${b.dataset.chapprove}/approve`, { approved: !p.chapters[b.dataset.chapprove].approved })));
+  document.querySelectorAll('[data-chregen]').forEach((b) => b.addEventListener('click', () => {
+    b.disabled = true; b.textContent = 'بيكتب…';
+    post(`${b.dataset.chregen}/regenerate`, { hint: $(`[data-chhint="${b.dataset.chregen}"]`).value });
+  }));
+  document.querySelectorAll('[data-chmove]').forEach((b) => b.addEventListener('click', () => post(`${b.dataset.chmove}/move`, { to: Number(b.dataset.to) })));
+  document.querySelectorAll('[data-chdel]').forEach((b) => b.addEventListener('click', () => { if (confirm('تحذف الفصل ده؟')) post(`${b.dataset.chdel}/delete`); }));
+  $('[data-chadd]')?.addEventListener('click', () => {
+    const title = prompt('عنوان الفصل الجديد:'); if (!title) return;
+    act(() => api(base, { method: 'POST', body: JSON.stringify({ title }) }));
+  });
+  $('#saveSources')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/stages/script`, { method: 'PUT', body: JSON.stringify({ title: $('#edTitle').value, text: p.script.text, sources: $('#edSources').value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
 }
 
 // ---------- settings ----------
@@ -526,6 +623,7 @@ async function applyDefaultApprovals() {
 document.querySelectorAll('[data-all]').forEach((b) => b.addEventListener('click', () => document.querySelectorAll('[data-appr]').forEach((c) => { c.checked = b.dataset.all === 'wait'; })));
 renderNewApprovals();
 applyDefaultApprovals();
+loadProfiles().then(updateDurationHint);
 loadYt().then(async () => { try { const st = await api('/api/settings'); if (YT.linked) $('#newPublish').checked = !!st.youtube?.autoPublish; } catch {} });
 health();
 route();

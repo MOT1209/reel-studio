@@ -40,6 +40,9 @@ child.stdout.resume();
 
 const planted = [];
 const proj = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: PAY, autostart: false }) }); planted.push(['project', proj.status]);
+// long-form: a hand-written chapter whose title and text are hostile (chapter list, editors, approval state)
+const lf = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: 'long', seconds: 300, autostart: false, options: { profile: 'documentary' } }) });
+const ch = await api(`/api/projects/${lf.body.id}/chapters`, { method: 'POST', body: JSON.stringify({ title: P1 + P2, goal: PAY, text: `${PAY}\nسطر عادي` }) }); planted.push(['chapter', ch.status]);
 const img = path.join(TMP, 'p.jpg'); execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=200x200', '-frames:v', '1', img]);
 const up = await fetch(`${BASE}/api/assets`, { method: 'POST', body: fs.readFileSync(img), headers: { Origin: BASE, 'x-filename': encodeURIComponent(PAY + '.jpg'), 'x-folder': encodeURIComponent(PAY), 'x-tags': encodeURIComponent(PAY), 'x-license-name': encodeURIComponent(PAY), 'x-license-attribution': encodeURIComponent(PAY), 'x-license-notes': encodeURIComponent(PAY) } });
 planted.push(['asset', up.status]);
@@ -49,7 +52,7 @@ const ex = await api('/api/style/examples', { method: 'POST', body: JSON.stringi
 const st = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ llm: { model: PAY }, elevenlabs: { voiceId: PAY }, pronunciation: PAY }) }); planted.push(['settings', st.status]);
 console.log('planted:', JSON.stringify(planted));
 for (const k of ['project', 'asset', 'skill', 'mcp']) assert.ok(planted.some(([x, s]) => x === k && s === 201), `${k} payload was not accepted — test would prove nothing`);
-for (const k of ['example', 'settings']) assert.ok(planted.some(([x, s]) => x === k && s >= 200 && s < 300), `${k} payload was not accepted — test would prove nothing`);
+for (const k of ['example', 'settings', 'chapter']) assert.ok(planted.some(([x, s]) => x === k && s >= 200 && s < 300), `${k} payload was not accepted — test would prove nothing`);
 assert.equal(fs.readdirSync(EXAMPLES).length, 1, 'the example was written to the temp examples folder');
 assert.equal(repoExamples(), repoBefore, 'nothing was written into references/examples');
 
@@ -81,6 +84,14 @@ try {
       await page.waitForSelector(`dialog#settings .tab[data-tab="${t}"]:not([hidden])`);
       await sleep(150);
     }
+    assert.deepEqual(await xss(), []); assert.deepEqual(dialogs, []);
+  });
+  await test('a long-form project with a hostile chapter title/goal/text renders its chapters without executing anything', async () => {
+    await page.goto(`${BASE}/?p=${encodeURIComponent(lf.body.id)}#/projects`);
+    await page.waitForSelector('.chapter');
+    await page.click('.chapter > summary');
+    const ta = await page.$eval('[data-chtext="0"]', (x) => x.value);
+    assert.ok(ta.includes('<script>'), 'the hostile text is in the chapter editor as text');
     assert.deepEqual(await xss(), []); assert.deepEqual(dialogs, []);
   });
   await test('the payload is stored and shown as text (the planted strings are really on the page)', async () => {

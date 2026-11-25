@@ -35,21 +35,40 @@ function tick() {
   return out;
 }
 
-/** Writes a mono 48 kHz 16-bit WAV with whooshes on scene cuts and soft ticks on pops. */
+/**
+ * Writes a mono 48 kHz 16-bit WAV with whooshes on scene cuts and soft ticks on pops.
+ * Streamed in 10 s blocks: memory stays flat whatever the duration (a 30-minute track used to need ~470 MB).
+ */
 export function writeSfx(file, duration, cuts, ticks, volume = 0.6) {
   const vol = Math.max(0, Math.min(1, Number(volume))) / 0.6; // 0.6 = the reference mix level
-  const n = Math.ceil(duration * SR), buf = new Float32Array(n);
-  const add = (sig, at, gain) => { const o = Math.round(at * SR); for (let i = 0; i < sig.length; i++) { const k = o + i; if (k >= 0 && k < n) buf[k] += sig[i] * gain; } };
-  cuts.forEach((t, i) => add(whoosh(i + 7), t - 0.36, 0.55 * vol)); // envelope peaks ~0.36 s in → lands on the cut
+  const n = Math.ceil(duration * SR);
+  // events in sample positions (same placement rules as before: whoosh peaks on the cut, ticks ≥ 0.25 s apart)
+  const events = [];
+  cuts.forEach((t, i) => events.push({ sig: whoosh(i + 7), at: Math.round((t - 0.36) * SR), gain: 0.55 * vol }));
   const tk = tick();
   let lastTick = -1;
-  for (const t of ticks) { if (t - lastTick < 0.25) continue; add(tk, t, 0.35 * vol); lastTick = t; }
-  const wav = Buffer.alloc(44 + n * 2);
-  wav.write('RIFF', 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write('WAVE', 8); wav.write('fmt ', 12);
-  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(SR, 24);
-  wav.writeUInt32LE(SR * 2, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(n * 2, 40);
-  for (let i = 0; i < n; i++) wav.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(buf[i] * 32767))), 44 + i * 2);
-  fs.writeFileSync(file, wav);
+  for (const t of ticks) { if (t - lastTick < 0.25) continue; events.push({ sig: tk, at: Math.round(t * SR), gain: 0.35 * vol }); lastTick = t; }
+  const head = Buffer.alloc(44);
+  head.write('RIFF', 0); head.writeUInt32LE(36 + n * 2, 4); head.write('WAVE', 8); head.write('fmt ', 12);
+  head.writeUInt32LE(16, 16); head.writeUInt16LE(1, 20); head.writeUInt16LE(1, 22); head.writeUInt32LE(SR, 24);
+  head.writeUInt32LE(SR * 2, 28); head.writeUInt16LE(2, 32); head.writeUInt16LE(16, 34); head.write('data', 36); head.writeUInt32LE(n * 2, 40);
+  const tmp = `${file}.part`;
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, head);
+    const BLOCK = SR * 10, buf = new Float32Array(BLOCK), pcm = Buffer.alloc(BLOCK * 2);
+    for (let b0 = 0; b0 < n; b0 += BLOCK) {
+      const len = Math.min(BLOCK, n - b0);
+      buf.fill(0, 0, len);
+      for (const e of events) {
+        const a = Math.max(b0, e.at), z = Math.min(b0 + len, e.at + e.sig.length);
+        for (let k = a; k < z; k++) buf[k - b0] += e.sig[k - e.at] * e.gain;
+      }
+      for (let i = 0; i < len; i++) pcm.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(buf[i] * 32767))), i * 2);
+      fs.writeSync(fd, pcm, 0, len * 2);
+    }
+  } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);
 }
 
 /**

@@ -13,6 +13,7 @@ const PORT = Number(process.env.MOCK_PORT || 4399);
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const SR = 44100;
 let lastTtsText = '';
+let ttsCalls = 0; // GET /_stats/tts — lets tests prove that cached voice parts are not paid for twice
 
 const HOOK = 'السما لونها أزرق… بس نور الشمس أبيض!';
 const QUESTION = 'عارف ليه؟';
@@ -54,6 +55,26 @@ const ITEMS = {
 };
 const TYPE_FOR = { body: 'concept', zoom: 'concept', flow: 'process', cycle: 'process', timeline: 'process', chart: 'stat', layers: 'concept', cards: 'compare', meter: 'stat' };
 
+// long-form: an outline with the requested chapter count, then chapters of about TARGET_WORDS words each
+function mockOutline(user) {
+  const count = Number((user.match(/CHAPTERS:\s*(\d+)/) || [])[1]) || 3;
+  const total = Number((user.match(/TOTAL_SECONDS:\s*(\d+)/) || [])[1]) || 180;
+  const titles = ['البداية', 'نور الشمس', 'التشتت', 'الغروب', 'البحر', 'العين', 'التجربة', 'الأرقام', 'الخلاصة'];
+  return '```json\n' + JSON.stringify({ title: 'رحلة لون السما', sources: ['NASA Space Place, "Why is the sky blue?"'],
+    chapters: Array.from({ length: count }, (_, k) => ({ title: `${titles[k % titles.length]} ${k + 1}`, goal: `Part ${k + 1} of the story`, seconds: Math.round(total / count) })) }) + '\n```';
+}
+const ORD = ['الأول', 'التاني', 'التالت', 'الرابع', 'الخامس', 'السادس', 'السابع', 'التامن', 'التاسع', 'العاشر', 'الحداشر', 'الاتناشر', 'التلتاشر', 'الاربعتاشر', 'الخمستاشر'];
+function mockChapter(user) {
+  const k = Number((user.match(/CHAPTER (\d+):/) || [])[1]) || 1;
+  const target = Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || 60;
+  const note = (user.match(/EDITOR NOTE: (.*)/) || [])[1];
+  const lines = [`ده الجزء ${ORD[(k - 1) % ORD.length]} من الحكاية.`];
+  if (note) lines.push('ودي نسخة جديدة من الفصل ده.');
+  let n = lines.reduce((a, l) => a + wc(l), 0), i = k;
+  while (n < target) { const l = MIDDLE[i++ % MIDDLE.length]; lines.push(l); n += wc(l); }
+  return `SCRIPT:\n${lines.join('\n')}`;
+}
+
 function mockStoryboard(userMsg, systemMsg) {
   const words = [...userMsg.matchAll(/(\d+):\S+@([\d.]+)/g)].map((m) => ({ i: +m[1], t: +m[2] }));
   const n = words.length;
@@ -64,15 +85,17 @@ function mockStoryboard(userMsg, systemMsg) {
   // first scene not an intro, and the same template three times in a row.
   const pool = force ? Array(count).fill(force) : ['zoom', 'cards', 'cards', 'cards', 'flow', 'meter', 'chart', 'body', 'cycle', 'layers', 'timeline'];
   const scenes = [];
+  // indices come from the word list itself: a long-form window starts at a word far from 0
+  const idx = (pos) => words[Math.max(0, Math.min(n - 1, pos))]?.i ?? pos;
   for (let k = 0; k < count; k++) {
-    const at = Math.round((k * n) / count);
+    const at = idx(Math.round((k * n) / count));
     const template = pool[k % pool.length];
-    const sc = { type: k === 0 ? 'concept' : k === count - 1 ? 'recap' : TYPE_FOR[template], template, at: k === 0 ? 1 : at, title: ['الفكرة', 'السر هنا', 'بالأرقام', 'إزاي؟', 'الخلاصة'][k % 5], ...ITEMS[template]() };
+    const sc = { type: k === 0 ? 'concept' : k === count - 1 ? 'recap' : TYPE_FOR[template], template, at: k === 0 ? idx(1) : at, title: ['الفكرة', 'السر هنا', 'بالأرقام', 'إزاي؟', 'الخلاصة'][k % 5], ...ITEMS[template]() };
     sc.items = sc.items.map((it, j) => ({ ...it, at: at + 1 + j }));
     scenes.push(sc);
   }
   if (scenes.length > 2) [scenes[1], scenes[2]] = [scenes[2], scenes[1]];
-  scenes.push({ type: 'stat', template: 'gauge', at: n + 50, items: [] });
+  scenes.push({ type: 'stat', template: 'gauge', at: idx(n - 1) + 50, items: [] });
   return JSON.stringify({ scenes, accents: [[2, 'accent'], [Math.min(n - 1, 6), 'underline'], [Math.min(n - 1, 11), 'blue'], [n + 3, 'accent']] });
 }
 
@@ -314,6 +337,8 @@ const server = http.createServer(async (req, res) => {
       if (sys.includes('[[TASK:SCRIPT]]')) {
         reply = mockScript((user.match(/TOPIC:\s*(.*)/) || [])[1] || '', Number((user.match(/TARGET_WORDS:\s*(\d+)/) || [])[1]) || (/TARGET_WORDS:\s*auto/.test(user) ? 52 : 26));
       } else if (sys.includes('[[TASK:STORYBOARD]]')) reply = mockStoryboard(user, sys);
+      else if (sys.includes('[[TASK:OUTLINE]]')) reply = mockOutline(user);
+      else if (sys.includes('[[TASK:CHAPTER]]')) reply = mockChapter(user);
       else if (sys.includes('[[TASK:REVIEW]]')) reply = mockReview(user);
       else if (sys.includes('[[TASK:SCENE]]')) {
         // a different template than the current one; the hint "chart" asks for numbers (a bad chart without them, to exercise repair)
@@ -337,6 +362,7 @@ const server = http.createServer(async (req, res) => {
       if (body.stream === false) return json(res, 200, { choices: [{ message: { role: 'assistant', content: reply } }], model: 'mock-llm' });
       return streamText(res, reply);
     }
+    if (url.pathname === '/_stats/tts') return json(res, 200, { calls: ttsCalls });
     if (url.pathname === '/mcp/_expire') { mcpState.expireNext = true; return json(res, 200, { ok: true }); }
     if (url.pathname === '/mcp/_stats') return json(res, 200, { initializes: mcpState.initializes });
     if (url.pathname === '/mcp-redirect' && req.method === 'POST') { res.writeHead(302, { Location: 'http://127.0.0.1:9/steal' }); return res.end(); }
@@ -359,7 +385,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && tts) {
       if (!req.headers['xi-api-key']) return json(res, 401, { detail: 'missing xi-api-key' });
       const { text } = JSON.parse((await readBody(req)).toString('utf8'));
-      lastTtsText = text;
+      lastTtsText = text; ttsCalls++;
       const { wav, chars } = synth(text);
       // encode to a real file so LAME writes its gapless header (encoder delay is then trimmed on decode)
       const tmp = path.join(os.tmpdir(), `mock-tts-${process.pid}-${Date.now()}.mp3`);
@@ -373,7 +399,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/audio/speech') { // OpenAI-compatible TTS: mp3, no timestamps
       const { input, model, voice } = JSON.parse((await readBody(req)).toString('utf8'));
       if (!input || !model || !voice) return json(res, 400, { error: { message: 'input, model and voice are required' } });
-      lastTtsText = input;
+      lastTtsText = input; ttsCalls++;
       const { wav } = synth(input);
       const tmp = path.join(os.tmpdir(), `mock-oai-${process.pid}-${Date.now()}.mp3`);
       await ff(['-hide_banner', '-loglevel', 'error', '-y', '-f', 'wav', '-i', 'pipe:0', '-c:a', 'libmp3lame', '-b:a', '128k', tmp], wav);

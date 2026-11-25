@@ -10,12 +10,12 @@
     "scenes": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 60,
+      "maxItems": 900,
       "items": { "$ref": "#/definitions/scene" }
     },
     "accents": {
       "type": "array",
-      "maxItems": 200,
+      "maxItems": 3000,
       "items": {
         "type": "array",
         "minItems": 2,

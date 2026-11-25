@@ -1,5 +1,6 @@
 // YouTube publishing: OAuth 2.0 (loopback redirect + PKCE) and resumable uploads (YouTube Data API v3).
 // Tokens live only in data/youtube-token.json and never reach the browser.
+import { youtubeChapters } from './longform.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -125,7 +126,10 @@ export function videoMetadata(p) {
   const tags = String(yt.tags || '').split(/[,،#\n]/).map((x) => x.trim()).filter(Boolean).slice(0, 15);
   const title = `${p.script?.title || p.topic}`.slice(0, 90) + (p.render?.duration <= 180 ? ' #shorts' : '');
   const sources = (p.script?.sources || []).length ? `\n\nالمصادر:\n${p.script.sources.map((s) => '• ' + s).join('\n')}` : '';
-  const description = `${(p.script?.text || '').trim()}${sources}\n\n${tags.map((t) => '#' + t.replace(/\s+/g, '_')).join(' ')}`.slice(0, 4900);
+  // long-form: chapter timestamps (YouTube turns "0:00 Title" lines into chapters) instead of the whole narration
+  const chapters = p.render?.chapters?.length ? youtubeChapters(p.render.chapters, p.render.duration) : '';
+  const body = p.chapters?.length ? `${p.script?.title || p.topic}${chapters ? `\n\n${chapters}` : ''}` : (p.script?.text || '').trim();
+  const description = `${body}${sources}\n\n${tags.map((t) => '#' + t.replace(/\s+/g, '_')).join(' ')}`.slice(0, 4900);
   return { title, description, tags, categoryId: String(yt.categoryId || '27') };
 }
 

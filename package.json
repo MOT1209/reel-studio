@@ -12,7 +12,7 @@
     "start": "node server/index.mjs",
     "mock": "node tools/mock-apis.mjs",
     "build-icons": "node tools/build-icons.mjs",
-    "test": "node tools/unit.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/vault-test.mjs && node tools/voice-test.mjs && node tools/engines-test.mjs && node tools/robustness.mjs && node tools/phase1-test.mjs",
+    "test": "node tools/unit.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/vault-test.mjs && node tools/voice-test.mjs && node tools/engines-test.mjs && node tools/robustness.mjs && node tools/phase1-test.mjs && node tools/longform-test.mjs --unit",
     "test:library": "node tools/library-test.mjs",
     "test:arabic": "node tools/arabic-test.mjs",
     "test:unit": "node tools/unit.mjs",
@@ -21,7 +21,7 @@
     "templates": "node tools/templates-test.mjs",
     "test:export": "node tools/export-test.mjs",
     "test:ui": "node tools/ui-test.mjs",
-    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:remotion && npm run test:ui && npm run test:xss && npm run test:arabic-video && npm run templates",
+    "test:all": "npm test && npm run e2e && npm run test:export && npm run test:remotion && npm run test:ui && npm run test:xss && npm run test:arabic-video && npm run test:longform && npm run templates",
     "test:skills": "node tools/skills-test.mjs",
     "test:vault": "node tools/vault-test.mjs",
     "test:voice": "node tools/voice-test.mjs",
@@ -29,7 +29,9 @@
     "test:remotion": "node tools/remotion-test.mjs",
     "test:phase1": "node tools/phase1-test.mjs",
     "test:xss": "node tools/xss-test.mjs",
-    "test:arabic-video": "node tools/arabic-video-test.mjs"
+    "test:arabic-video": "node tools/arabic-video-test.mjs",
+    "test:longform": "node tools/longform-test.mjs",
+    "bench:longform": "node tools/longform-bench.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.546",
