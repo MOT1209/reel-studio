@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
+import { ROOT, getSettings, getPublicSettings, updateSettings, deleteSecret, resolveFonts } from './settings.mjs';
 import { listVoices, testLlm, testElevenLabs, testDeepgram, testOpenAITts } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
 import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
@@ -108,6 +108,7 @@ async function route(req, res) {
       if (m === 'GET') return json(res, 200, getPublicSettings());
       if (m === 'PUT') { const out = updateSettings(await readJson(req)); applyMaxJobs(); return json(res, 200, out); }
     }
+    if (a === 'settings' && id === 'secrets' && b && m === 'DELETE') return json(res, 200, { ...deleteSecret(b), settings: getPublicSettings() });
     // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
     if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
     if (a === 'projects' && id && b === 'scenes' && stage !== undefined && action === 'regenerate' && m === 'POST') {

@@ -2,7 +2,7 @@
 
 Machine: 4 CPU, 15.7 GB RAM, Node 22.23.5, system ffmpeg, Playwright Chromium. Real pipeline (script → voice → timing → storyboard → render) against the offline mocks, so LLM/TTS time is ~0 and the numbers are **render-dominated**. Reproduce: `npm run test:perf`, `npm run test:lowmem`. Peak RSS = sum over the whole process tree (server + Chromium + ffmpeg); it double-counts shared pages, so the cgroup figure (real usage) is lower.
 
-> Numbers in the first table were measured on the audit branch (legacy engine). After merging `main` (default engine **Remotion**, legacy as fallback) the same test measured: small 24.2 s / 1637 MB, medium 62.3 s / 1662 MB, large 80.9 s / 2130 MB, queue of 3 → max 1 running; and the 1.5 GB low-memory run still passes (peak 1310 MB, 0 OOM kills). Remotion is slower here, consistent with `docs/RENDERING.md`.
+> Measured on the merged tree (`main` v3.1: default engine **Remotion**, legacy as fallback): small 21.4 s / 1630 MB, medium 53.7 s / 1650 MB, large 71.5 s / 2142 MB, queue of 3 → max 1 running (48.3 s total); the 1.5 GB low-memory run passes (peak 1309 MB, 0 OOM kills). The tables below were measured earlier on the legacy engine.
 
 ## Real projects, 1080×1920, 30 fps, "standard" quality, 3 parallel pages
 | Project | Video length | Stage wall time | Peak RSS (tree) |
@@ -14,7 +14,7 @@ Machine: 4 CPU, 15.7 GB RAM, Node 22.23.5, system ffmpeg, Playwright Chromium. R
 
 \* the mock LLM's "60 s" script is shorter than 60 s of speech; the video length is what the renderer actually produced. All outputs verified with ffprobe (h264 + aac, 1080×1920, frame count = duration × fps).
 
-Memory does not grow with length (see also `docs/REMOTION-EVALUATION.md` §4: 30 s → 90 s at 2 pages, 1765 → 1762 MB).
+Memory does not grow with length (an earlier synthetic run: 30 s → 90 s at 2 pages, 1765 → 1762 MB peak RAM).
 
 ## Low-memory behaviour (Linux memory cgroup around the whole server; `tools/lowmem-test.mjs`)
 | Limit | Result |
