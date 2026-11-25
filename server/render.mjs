@@ -5,10 +5,9 @@ import { encodeSegmented } from './engines/ffmpeg.mjs';
 import { legacyEngine } from './engines/legacy.mjs';
 import { outToSrc } from './timeline.mjs';
 
-export { run, probeDuration, checkFfmpeg, FFMPEG, FFPROBE, killAllChildren, activeProcessCount } from './proc.mjs';
-export { parseWorkers, availableMemory, MAX_WORKERS } from './memory.mjs';
-export { writeSfx, mixAudio, muxFinal, contactSheet, QUALITY, CODECS, validateOutput, encodeSegmented, countFrames } from './engines/ffmpeg.mjs';
-export { launchBrowser, workerCount } from './engines/legacy.mjs';
+export { run, probeDuration, checkFfmpeg, FFMPEG, FFPROBE, trackChild, killAllChildren, activeProcessCount } from './proc.mjs';
+export { writeSfx, mixAudio, muxFinal, contactSheet, QUALITY, CODECS, validateOutput, verifyVideo, countFrames, encodeSegmented } from './engines/ffmpeg.mjs';
+export { launchBrowser, workerCount, parseWorkers, MAX_WORKERS } from './engines/legacy.mjs';
 
 export const FPS = 30;
 export const W = 1080, H = 1920;

@@ -140,6 +140,20 @@ tree (server + browser + ffmpeg), sampled every 200 ms. Machine: 4 vCPU Xeon @ 2
   **Classic** in Settings → Render engine (or per project in the editor toolbar): about twice as fast, same video.
 - On an 8 GB machine both engines fit comfortably with 2 parallel pages (< 1.8 GB peak for the whole tree).
 
+**Legacy engine scaling** (synthetic scene, one run each; measured for v2.x audit):
+
+| Size | Duration | Pages | Wall | Peak RAM |
+|---|---|---|---|---|
+| 720×1280 | 10 s | 1 | 6.9 s | 1,233 MB |
+| 720×1280 | 10 s | 4 | 5.3 s | 1,749 MB |
+| 1080×1920 | 30 s | 1 | 31.2 s | 1,483 MB |
+| 1080×1920 | 30 s | 2 | 21.5 s | 1,765 MB |
+| 1080×1920 | 30 s | 4 | 20.3 s | 2,341 MB |
+| 1080×1920 | 90 s | 2 | 57.2 s | 1,762 MB |
+
+Peak RAM does not grow with the length of the video (segments are encoded and released every 10 s); 4 pages buy ~6 %
+over 2 at 1080p for +33 % RAM, which supports the conservative default.
+
 ## Memory on an 8 GB machine
 
 - One render at a time (`render.maxJobs = 1`). Parallel tabs/pages are capped by free memory (≈450 MB per Remotion tab,

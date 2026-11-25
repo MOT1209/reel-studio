@@ -14,7 +14,7 @@ import { redact, log as slog } from './logger.mjs';
 import { uploadVideo, videoMetadata, youtubeStatus } from './youtube.mjs';
 import { run, probeDuration, writeSfx, mixAudio, muxFinal, contactSheet, validateOutput } from './render.mjs';
 import { renderVideo } from './engines/manager.mjs';
-import { effectiveEdit, cleanEdit, layoutFor, prepareClip } from './edit.mjs';
+import { effectiveEdit, cleanEdit, layoutFor, prepareClip, checkRenderInputs } from './edit.mjs';
 import { facesFor, typographyFor } from './fonts.mjs';
 import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
@@ -24,6 +24,7 @@ import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
+
 
 const cache = new Map(); // id → project
 const buses = new Map(); // id → EventEmitter
@@ -140,6 +141,7 @@ export function runPipeline(id) {
         log(p, stage, `▶ ${stage} started`);
         save(p);
         try {
+          // the render stage queues inside the engine manager (render.maxJobs), where the heavy part runs
           await STAGE_FN[stage](p, entry.controller.signal);
           if (entry.controller.signal.aborted) throw new Error('cancelled');
           st.endedAt = new Date().toISOString();
@@ -170,9 +172,10 @@ export function runPipeline(id) {
 
 /** Stops every running pipeline and publish and waits for them (used by the graceful shutdown). */
 export async function shutdown() {
-  const ids = [...running.keys()];
-  for (const id of ids) cancelPublish(id);
-  await Promise.all(ids.map((id) => stopRun(id)));
+  // running stages AND uploads (auto-publish starts after the stage loop, manual ones are not in `running` at all)
+  const ids = [...new Set([...running.keys(), ...publishing.keys()])];
+  for (const id of publishing.keys()) cancelPublish(id);
+  await Promise.all([...ids.map((id) => stopRun(id)), ...[...publishDone.values()]]);
   for (const id of ids) { const p = cache.get(id); if (p) { try { save(p); } catch {} } }
   return ids.length;
 }
@@ -277,8 +280,8 @@ function validateEdit(p, stage, body) {
 export async function saveUpload(id, buf, filename, mime) {
   if (!buf?.length) throw httpError(400, 'empty upload');
   if (!looksLikeMedia(buf)) throw httpError(415, UPLOAD_BAD);
-  if (!getProject(id)) throw httpError(404, 'project not found');
   const tmp = path.join(projectDir(id), `.upload-${crypto.randomBytes(6).toString('hex')}`);
+  if (!getProject(id)) throw httpError(404, 'project not found');
   fs.writeFileSync(tmp, buf);
   return saveUploadFile(id, tmp, filename, mime);
 }
@@ -366,9 +369,7 @@ const STAGE_FN = {
     if (p.voiceMode === 'upload') {
       if (!p.upload) throw new Error('voice mode is "upload" but no file was uploaded');
       log(p, 'voice', `converting ${p.upload.file} → voice.mp3`);
-      const part = path.join(dir, 'voice.part.mp3'); // converted aside, then renamed: a crash never leaves a truncated voice.mp3
-      try { await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', part], { signal }); fs.renameSync(part, out); }
-      finally { fs.rmSync(part, { force: true }); }
+      await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
       p.voice = { file: 'voice.mp3', source: 'upload', duration: await probeDuration(out) };
       log(p, 'voice', `voice-over ${p.voice.duration.toFixed(2)} s`);
       return;
@@ -377,16 +378,16 @@ const STAGE_FN = {
     const spoken = applyPronunciation(p.script.text, s.pronunciation);
     if (s.tts?.provider === 'openai') {
       log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
-      writeFileAtomic(out, await ttsOpenAI(s, spoken.text, { signal }));
+      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
       p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
       log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
       return;
     }
     log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
     const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
-    writeFileAtomic(out, audio);
+    fs.writeFileSync(out, audio);
     const timed = charsToWords(chars);
-    writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
+    fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
     p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length };
     log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s · ${chars.length} timed characters → ${timed.length} words`);
   },
@@ -399,7 +400,7 @@ const STAGE_FN = {
       // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
       log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
       const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
-      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
       timed = wordsWithChars(dw);
       estimated = true;
     } else if (['upload', 'openai'].includes(p.voice?.source)) {
@@ -408,7 +409,7 @@ const STAGE_FN = {
       const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
       const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
       if (!dw.length) throw new Error('Deepgram returned no words');
-      writeFileAtomic(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
+      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
       timed = wordsWithChars(dw);
       log(p, 'timing', `Deepgram heard ${dw.length} words`);
     } else {
@@ -465,6 +466,11 @@ const STAGE_FN = {
     assertStoryboard(p.storyboard, { words: p.words });
     const E = effectiveEdit(p.edit);
     const L = layoutFor(E.export.aspect, E.export.resolution);
+    { // validation gate: never start a long render on input the renderer cannot use
+      const rd = renderData(p);
+      const problems = checkRenderInputs({ words: p.words, storyboard: p.storyboard, edit: E, voiceExists: fs.existsSync(path.join(dir, 'voice.mp3')), hasAsset: (id) => !!getAsset(id), duration: rd.duration });
+      if (problems.length) throw new Error(`render input check failed: ${problems.join('; ')}`);
+    }
     const FPS = E.export.fps;
     // video clips (scene media and overlays) → frames on disk at the output fps and size
     p.clips = {};
@@ -509,7 +515,7 @@ const STAGE_FN = {
     const ticks = [];
     data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
     // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
-    const vdur = total / FPS;
+    const vdur = Math.ceil(duration * FPS - 1e-9) / FPS;
     writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
@@ -518,11 +524,10 @@ const STAGE_FN = {
       clips: await clipSounds(E.overlays, E.audio.tracks || []),
       music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
     });
-    // a zero exit code proves nothing: size, fps, codec, audio, frame count and durations are checked on the file BEFORE it reaches its final path
-    const expect = { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec, frames: total };
-    await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal, expect });
-    const probe = await validateOutput(path.join(dir, 'video.mp4'), { width: L.width, height: L.height, fps: FPS, duration: total / FPS, codec: job.codec });
-    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
+    // mux into a temp file, prove it with ffprobe (size, fps, codec, EXACT frame count, audio, durations), then rename
+    const probe = await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal,
+      expect: { width: L.width, height: L.height, fps: FPS, frames: total, duration: vdur, codec: job.codec } });
+    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.frames} frames · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
     await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
     // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
     for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
@@ -656,6 +661,7 @@ export async function regenerateScene(id, k, { hint = '' } = {}) {
 
 // ---- publish (YouTube) ------------------------------------------------------------
 const publishing = new Map(); // id → AbortController
+const publishDone = new Map(); // id → promise of the running upload (the shutdown waits for it)
 function plog(p, line) {
   p.publish = p.publish || { status: 'idle', log: [] };
   const entry = `[${new Date().toISOString().slice(11, 19)}] ${redact(line)}`;
@@ -673,6 +679,7 @@ export async function publishProject(id, { privacy } = {}) {
   const priv = ['private', 'unlisted', 'public'].includes(privacy) ? privacy : getSettings().youtube.privacy || 'private';
   const ctl = new AbortController();
   publishing.set(id, ctl);
+  let finish; publishDone.set(id, new Promise((r) => { finish = r; }));
   p.publish = { ...(p.publish || {}), status: 'running', error: null, progress: 0, log: p.publish?.log || [] };
   const meta = videoMetadata(p);
   plog(p, `▶ رفع على قناة «${st.channel?.title || '?'}» (${priv}) — "${meta.title}"`);
@@ -694,7 +701,9 @@ export async function publishProject(id, { privacy } = {}) {
     plog(p, cancelled ? '■ النشر اتلغى' : `✖ ${e.message}`);
   } finally {
     publishing.delete(id);
+    publishDone.delete(id);
     save(p);
+    finish();
   }
   return p.publish;
 }
@@ -744,7 +753,6 @@ export function renderData(p) {
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
     id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
-    tracks: (E.audio.tracks || []).filter((x) => getAsset(x.asset)).map((x) => ({ id: x.id, src: `/api/assets/${x.asset}/file`, start: x.start, end: x.end, offset: x.offset || 0, volume: Math.min(1, x.volume), fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 })),
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,

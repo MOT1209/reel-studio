@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-remotion-'));
 const DATA = path.join(TMP, 'data');
-const MOCK_PORT = 4393, PORT = 4307, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
+const MOCK_PORT = 4397, PORT = 4317, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg', FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const OUT = path.join(ROOT, 'output', 'remotion-test'); fs.mkdirSync(OUT, { recursive: true });
 const procs = [];
@@ -33,7 +33,11 @@ async function waitStage(id, stage, status, ms = 300000) {
     const err = Object.entries(p.stages).find(([, s]) => s.status === 'error');
     if (err) throw new Error(`${err[0]}: ${err[1].error}\n${(err[1].log || []).slice(-6).join('\n')}`);
     if (p.stages[stage].status === status) return p;
-    if (Date.now() - t0 > ms) throw new Error(`timeout waiting for ${stage}=${status}`);
+    if (Date.now() - t0 > ms) {
+      // say what the render was doing — a bare timeout says nothing on CI
+      const jobs = await api('/api/render-jobs').catch(() => ({ jobs: [] }));
+      throw new Error(`timeout waiting for ${stage}=${status} (now ${p.stages[stage].status})\n  log: ${(p.stages[stage].log || []).slice(-8).join('\n       ')}\n  job: ${JSON.stringify(jobs.jobs?.at(-1) || null)}`);
+    }
     await sleep(400);
   }
 }
@@ -97,7 +101,7 @@ await test('remotion engine renders the same project: same size, fps, frame coun
   assert.equal(P.render.engine, 'remotion', `engine used: ${P.render.engine} · fallback from ${P.render.fallbackFrom}\n${log.slice(-800)}`);
   assert.equal(P.render.fallbackFrom, null);
   assert.match(log, /engine: Remotion/);
-  assert.match(log, /checked: 720×1280 · 30\/1 fps · h264\/aac/);
+  assert.match(log, /checked: 720×1280 · 30\/1 fps · 180 frames · h264\/aac/); // exact frame count (no -shortest loss)
   timing.remotion = P.render.renderSeconds;
   fs.copyFileSync(video, remotionOut);
   const [a, b] = [probe(legacyOut), probe(remotionOut)];

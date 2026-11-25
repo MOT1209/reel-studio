@@ -179,7 +179,7 @@ export async function ttsWithTimestamps(settings, text, { signal } = {}) {
       stability: settings.elevenlabs.stability ?? 0.45, similarity_boost: 0.8, style: settings.elevenlabs.style ?? 0.2, use_speaker_boost: true,
       ...(Number(settings.elevenlabs.speed) && Number(settings.elevenlabs.speed) !== 1 ? { speed: Number(settings.elevenlabs.speed) } : {}),
     } }),
-  }, { timeout: 180000, retries: 2, label: 'ElevenLabs' });
+  }, { timeout: 180000, retries: 2, label: 'ElevenLabs', idempotent: false }); // billed per character: never re-sent once it may have arrived
   if (!res.ok) throw new Error(`ElevenLabs ${await failText(res)}`);
   const j = await res.json();
   const al = j.alignment || j.normalized_alignment;
@@ -198,7 +198,7 @@ export async function transcribeWords(settings, audioBuf, mime, { signal } = {})
     method: 'POST', signal,
     headers: { Authorization: `Token ${apiKey}`, 'Content-Type': mime || 'audio/mpeg' },
     body: audioBuf,
-  }, { timeout: 300000, retries: 2, label: 'Deepgram' });
+  }, { timeout: 300000, retries: 2, label: 'Deepgram', idempotent: false }); // billed per minute
   if (!res.ok) throw new Error(`Deepgram ${await failText(res)}`);
   const j = await res.json();
   const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];

@@ -268,7 +268,7 @@ test('scene animation presets survive repair; unknown values fall back to the pr
 // ---- animation + snapping (public/anim.js is shared by the renderer and the editor) -----------------------------------
 const animCtx = {}; (await import('node:vm')).runInNewContext(fs.readFileSync(new URL('../public/anim.js', import.meta.url), 'utf8'), animCtx);
 const ANIM = { ...animCtx.ReelAnim, sample: (o, t) => ({ ...animCtx.ReelAnim.sample(o, t) }) }; // plain objects (the vm context has its own Object prototype)
-const { cleanKeyframes, checkRenderInputs, cleanCrop } = await import('../server/edit.mjs');
+const { cleanKeyframes, checkRenderInputs } = await import('../server/edit.mjs');
 test('keyframes: no keyframes → base values; before/after hold; linear midpoint; eases; hold', () => {
   const o = { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 };
   assert.deepEqual(ANIM.sample(o, 3), { x: 0.1, y: 0, scale: 0.5, opacity: 1, rot: 0 });
@@ -292,7 +292,8 @@ test('snapping: nearest point inside the threshold wins; outside → null; inter
   assert.equal(ANIM.snapTime(1.43, [1.4, 1.5], 0.1), 1.4); assert.equal(ANIM.snapTime(1.48, [1.4, 1.5], 0.1), 1.5);
   assert.ok(Math.abs(ANIM.snapShift(0.96, 2.5, [1, 4], 0.1) - 0.04) < 1e-9, 'start edge is 0.04 from 1');
   assert.ok(Math.abs(ANIM.snapShift(0.5, 1.97, [1, 2], 0.1) - 0.03) < 1e-9, 'end edge is 0.03 from 2');
-  assert.equal(ANIM.snapShift(0.5, 1.5, [3], 0.1), 0);
+  assert.equal(ANIM.snapShift(0.5, 1.5, [3], 0.1), null, 'nothing in reach');
+  assert.equal(ANIM.snapShift(1.1, 2.1, [1.1], 0.1), 0, 'already exactly on an edge: 0, not null — the grid must not move it');
 });
 test('server keyframe cleaning: sorted, clamped to the overlay length, capped at 24, junk dropped', () => {
   const r = cleanKeyframes([{ t: 5, x: 2 }, { t: -1, opacity: 5 }, { t: 1, scale: 0 }, { t: 'a', x: 1 }, { t: 1 }, null, 7], 3);
@@ -320,13 +321,33 @@ test('render input gate: accepts a valid project; names every kind of broken inp
   has({ duration: 0.4 }, /minimum 1 s/);
 });
 
-test('crop: clamped to the source, never empty, whole-frame/malformed → none', () => {
-  assert.deepEqual(cleanCrop({ x: 0.5, y: 0, w: 0.5, h: 1 }), { x: 0.5, y: 0, w: 0.5, h: 1 });
-  assert.deepEqual(cleanCrop({ x: 0.8, y: 0.9, w: 5, h: 5 }), { x: 0.8, y: 0.9, w: 0.2, h: 0.1 });
-  assert.deepEqual(cleanCrop({ x: -3, y: 0, w: 0, h: 1 }), { x: 0, y: 0, w: 0.05, h: 1 });
-  for (const bad of [null, undefined, 'x', {}, { x: 'a', y: 0, w: 1, h: 1 }, { x: 0, y: 0, w: 1, h: 1 }]) assert.equal(cleanCrop(bad), null);
+test('the Remotion composition loads exactly the scripts render.html loads, in the same order', () => {
+  // a script missing from remotion/Reel.jsx makes every Remotion render fail (it then falls back to the legacy engine)
+  const ROOT_ = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const html = fs.readFileSync(path.join(ROOT_, 'public', 'render.html'), 'utf8');
+  const page = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
+  const jsx = fs.readFileSync(path.join(ROOT_, 'remotion', 'Reel.jsx'), 'utf8');
+  const comp = JSON.parse(jsx.match(/const SCRIPTS = (\[[^\]]*\])/)[1].replace(/'/g, '"'));
+  assert.deepEqual(comp, page);
+});
+
+test('MCP private hosts: the whole fe80::/10 link-local block (fe80–febf), not fec0', async () => {
+  const { isPrivateHost } = await import('../server/mcp.mjs');
+  for (const h of ['fe80::1', 'fe81::1', 'febf::1', '[fe80::1]', '::ffff:7f00:1', '100.64.0.1']) assert.equal(isPrivateHost(h), true, h);
+  for (const h of ['fec0::1', '2001:db8::1', '8.8.8.8', 'example.com']) assert.equal(isPrivateHost(h), false, h);
+});
+test('render gate: an audio track whose file left the library stops the render', () => {
+  const p = checkRenderInputs({ words: [{ start: 0, end: 1 }], storyboard: { scenes: [{ at: 0, items: [] }] }, edit: { overlays: [], audio: { tracks: [{ asset: 'aaaaaaaaaaaa' }] } }, voiceExists: true, hasAsset: () => false, duration: 5 });
+  assert.match(p.join('|'), /audio track 1: asset aaaaaaaaaaaa is not in the library/);
+});
+
+test('editor model: an overlay without an id gets a real one (regex.test(undefined) matched "undefined")', async () => {
+  const { cleanEdit } = await import('../server/edit.mjs');
+  const e = cleanEdit({ overlays: [{ kind: 'text', text: 'a', start: 0, end: 1 }, { kind: 'text', text: 'b', start: 0, end: 1, id: 'abcd1234' }] }, { duration: 10 });
+  assert.match(e.overlays[0].id, /^[0-9a-f]{8}$/); assert.equal(e.overlays[1].id, 'abcd1234');
+  const d = cleanEdit({ overlays: ['dup12345', 'dup12345', 'dup12345'].map((id) => ({ kind: 'text', text: 'x', start: 0, end: 1, id })) }, { duration: 10 });
+  assert.equal(new Set(d.overlays.map((o) => o.id)).size, 3, 'duplicate ids are replaced'); assert.equal(d.overlays[0].id, 'dup12345');
 });
 
 for (const [name, fn] of queue) { await fn(); n++; console.log('✔', name); }
-
 console.log(`\n${n} unit tests passed`);

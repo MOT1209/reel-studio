@@ -32,7 +32,11 @@ async function waitStage(id, stage, status, ms = 240000) {
     const err = Object.entries(p.stages).find(([, s]) => s.status === 'error');
     if (err) throw new Error(`${err[0]}: ${err[1].error}`);
     if (p.stages[stage].status === status) return p;
-    if (Date.now() - t0 > ms) throw new Error(`timeout waiting for ${stage}=${status}`);
+    if (Date.now() - t0 > ms) {
+      // say what the render was doing — a bare timeout says nothing on CI
+      const jobs = await api('/api/render-jobs').catch(() => ({ jobs: [] }));
+      throw new Error(`timeout waiting for ${stage}=${status} (now ${p.stages[stage].status})\n  log: ${(p.stages[stage].log || []).slice(-8).join('\n       ')}\n  job: ${JSON.stringify(jobs.jobs?.at(-1) || null)}`);
+    }
     await sleep(400);
   }
 }
@@ -298,25 +302,6 @@ await test('audio tracks: an independent track is mixed at its start time (and n
   assert.match(done.stages.render.log.join('\n'), /1 clip sound/);
   const inT = toneDb(f, 6.2, 7.5), outT = toneDb(f, 1.0, 2.5);
   assert.ok(inT > outT + 12, `track window ${inT} dB vs elsewhere ${outT} dB`);
-});
-
-await test('crop: only the cropped half of a two-colour image is drawn; render-data carries the audio tracks for the live preview', async () => {
-  const two = path.join(TMP, 'two.png');
-  execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=magenta:s=200x400', '-f', 'lavfi', '-i', 'color=c=lime:s=200x400', '-filter_complex', 'hstack', '-frames:v', '1', two]);
-  const tA = await add(two, 'img');
-  const run = async (crop) => {
-    await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { ...base720, audio: { tracks: [] }, overlays: [{ kind: 'image', asset: tA.id, start: 1, end: 5, pos: 'center', scale: 0.4, anim: 'none', ...(crop ? { crop } : {}) }] } }) });
-    await api(`/api/projects/${id}/run`, { method: 'POST' }); await waitStage(id, 'render', 'done');
-    const buf = frameRgb(path.join(DATA, 'projects', id, 'video.mp4'), 2, 720, 1280);
-    return { mag: centroid(buf, 720, 1280, isMag)?.n || 0, grn: centroid(buf, 720, 1280, isGrn)?.n || 0 };
-  };
-  const full = await run(null), right = await run({ x: 0.5, y: 0, w: 0.5, h: 1 });
-  assert.ok(full.mag > 500 && full.grn > 500, `uncropped shows both colours: ${JSON.stringify(full)}`);
-  assert.ok(right.grn > 500 && right.mag < full.mag * 0.05, `cropped to the right half shows only green: ${JSON.stringify(right)}`);
-  const bA = await add(path.join(TMP, 'beep.mp3'), 'sfx');
-  await api(`/api/projects/${id}/edit`, { method: 'PUT', body: JSON.stringify({ edit: { audio: { tracks: [{ asset: bA.id, start: 2, end: 3, volume: 0.5, fadeIn: 0.2 }] } } }) });
-  const d = await api(`/api/projects/${id}/render-data`);
-  assert.equal(d.tracks.length, 1); assert.equal(d.tracks[0].start, 2); assert.equal(d.tracks[0].volume, 0.5); assert.match(d.tracks[0].src, /^\/api\/assets\/[a-f0-9]{12}\/file$/);
 });
 
 console.log(`\n${n} export tests passed${failed ? `, ${failed} FAILED` : ''} — frames in output/export-test/`);

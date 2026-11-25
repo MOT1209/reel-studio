@@ -9,12 +9,14 @@ export const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const children = new Set();
 const browsers = new Set();
 export function trackChild(p) { children.add(p); p.once('close', () => children.delete(p)); return p; }
-export function trackBrowser(b) { browsers.add(b); b.on?.('disconnected', () => browsers.delete(b)); return b; }
+/** Browsers (Playwright or Remotion) register here; close() must return a promise. */
+export function trackBrowser(b, onGone) { browsers.add(b); onGone?.(() => browsers.delete(b)); return b; }
+export function untrackBrowser(b) { browsers.delete(b); }
 export const activeProcessCount = () => children.size + browsers.size;
-/** Kills every ffmpeg/ffprobe child and closes every Chromium started by a render. */
+/** Kills every ffmpeg/ffprobe child and closes every browser (used by the graceful shutdown). */
 export async function killAllChildren() {
   for (const c of children) { try { c.kill('SIGKILL'); } catch {} }
-  await Promise.all([...browsers].map((b) => Promise.race([b.close().catch(() => {}), new Promise((r) => setTimeout(r, 2000))])));
+  await Promise.all([...browsers].map((b) => Promise.race([Promise.resolve().then(() => b.close({ silent: true })).catch(() => {}), new Promise((r) => setTimeout(r, 2000))])));
   browsers.clear();
 }
 
@@ -30,9 +32,10 @@ export function run(cmd, args, { signal, input, collect = true, timeoutMs } = {}
     let out = '', err = '';
     p.stdout.on('data', (d) => { if (collect) out += d; });
     p.stderr.on('data', (d) => { err += d; if (err.length > 200000) err = err.slice(-100000); });
+    if (input) { p.stdin.on('error', () => {}); p.stdin.end(input); }
     const onAbort = () => p.kill('SIGKILL');
     signal?.addEventListener('abort', onAbort, { once: true });
-    p.on('error', (e) => { clearTimeout(timer); reject(new Error(`${cmd}: ${e.message}`)); });
+    p.on('error', (e) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(new Error(`${cmd}: ${e.message}`)); });
     p.on('close', (code) => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
@@ -40,7 +43,6 @@ export function run(cmd, args, { signal, input, collect = true, timeoutMs } = {}
       if (signal?.aborted) return reject(new Error('cancelled'));
       code === 0 ? resolve({ out, err }) : reject(new Error(`${path.basename(cmd)} exited ${code}: ${err.slice(-800)}`));
     });
-    if (input) p.stdin.end(input);
   });
 }
 

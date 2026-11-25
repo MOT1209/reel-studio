@@ -7,6 +7,7 @@ import { AbsoluteFill, cancelRender, continueRender, delayRender, useCurrentFram
 import { outToSrc } from '../server/timeline.mjs';
 
 // the classic scripts are served by the Reel Studio server next to the bundle (same origin)
+// keep in the same order as public/render.html
 const SCRIPTS = ['/bidi.js', '/kashida.js', '/anim.js', '/render.js'];
 let scriptsReady = null;
 function loadScripts() {

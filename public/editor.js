@@ -9,6 +9,7 @@ const TPL_AR = { zoom: 'تكبير', flow: 'تسلسل', cycle: 'دورة', time
 const TYPES = ['intro', 'question', 'concept', 'process', 'compare', 'stat', 'recap'];
 const TYPE_AR = { intro: 'بداية', question: 'سؤال', concept: 'فكرة', process: 'خطوات', compare: 'مقارنة', stat: 'أرقام', recap: 'خلاصة' };
 const STYLE_AR = { boxed: 'مربع', karaoke: 'كاريوكي', minimal: 'بسيط', outline: 'إطار' };
+const MAX_TRACKS = 12, MAX_KEYFRAMES = 24; // = server/edit.mjs
 const VISUAL_KEYS = ['type', 'template', 'title', 'items', 'organ', 'value', 'max', 'unit', 'query', 'image', 'bg', 'imageOffset', 'transition', 'titleAnim'];
 const SCENE_TR = ['push', 'fade', 'zoom', 'slide', 'wipe', 'rise', 'none'];
 const TR_AR = { push: 'دفع', fade: 'تلاشي', zoom: 'زووم', slide: 'انزلاق', wipe: 'مسح', rise: 'طلوع', none: 'قطع مباشر' };
@@ -377,13 +378,22 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
       $('#lyUp', box).addEventListener('click', () => moveLayer((i, n) => Math.min(n, i + 1)));
       $('#lyDown', box).addEventListener('click', () => moveLayer((i) => Math.max(0, i - 1)));
       $('#lyBack', box).addEventListener('click', () => moveLayer(() => 0));
-      $('#kfAdd', box).addEventListener('click', () => change(() => {
+      $('#kfAdd', box).addEventListener('click', () => {
+        const relNow = +Math.max(0, Math.min(o.end - o.start, t - o.start)).toFixed(2);
+        // the server keeps at most MAX_KEYFRAMES: refuse here instead of letting the save drop one silently
+        if ((o.keyframes || []).length >= MAX_KEYFRAMES && !(o.keyframes || []).some((k) => k.t === relNow)) { toast(`الحد ${MAX_KEYFRAMES} كي فريم للعنصر`, 'bad'); return; }
+        change(() => {
         const rel = +Math.max(0, Math.min(o.end - o.start, t - o.start)).toFixed(2), v = ReelAnim.sample(o, rel);
         o.keyframes = [...(o.keyframes || []).filter((k) => k.t !== rel), { t: rel, x: +v.x.toFixed(3), y: +v.y.toFixed(3), scale: +v.scale.toFixed(3), opacity: +v.opacity.toFixed(3), rot: +v.rot.toFixed(1), ease: 'inOut' }].sort((a, b) => a.t - b.t);
-      }));
+        });
+      });
       $$('[data-kf]', box).forEach((i) => i.addEventListener('change', () => change(() => {
         const k = o.keyframes[Number(i.closest('[data-ki]').dataset.ki)], f = i.dataset.kf;
-        if (f === 'ease') k.ease = i.value; else if (i.value === '') delete k[f]; else k[f] = Number(i.value);
+        // same bounds as server/edit.mjs cleanKeyframes, so what is kept here is exactly what gets saved
+        const B = { t: [0, Math.max(0, o.end - o.start)], x: [-1, 1], y: [-1, 1], scale: [0.05, 2], opacity: [0, 1], rot: [-360, 360] };
+        if (f === 'ease') k.ease = i.value;
+        else if (i.value === '' && f !== 't') delete k[f];
+        else if (Number.isFinite(Number(i.value))) { const [lo, hi] = B[f] || [-Infinity, Infinity]; k[f] = Math.max(lo, Math.min(hi, Number(i.value))); i.value = String(k[f]); }
         o.keyframes.sort((a, b) => a.t - b.t);
       })));
       $$('[data-kfdel]', box).forEach((b) => b.addEventListener('click', () => change(() => { o.keyframes.splice(Number(b.dataset.kfdel), 1); if (!o.keyframes.length) delete o.keyframes; })));
@@ -489,6 +499,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     if (a) change(() => { E().audio.music = { ...(E().audio.music || { volume: 0.25, duck: true, fadeIn: 1, fadeOut: 1.5 }), asset: a.id, name: a.name }; sel = { kind: 'music' }; });
   }
   async function addTrack() {
+    if ((E().audio.tracks || []).length >= MAX_TRACKS) { toast(`الحد ${MAX_TRACKS} مسارات صوت`, 'bad'); return; } // the server would drop the extra one
     const a = await pickAsset({ kinds: ['audio'] });
     if (a) change(() => { const x = { id: uid(), asset: a.id, name: a.name, start: +t.toFixed(2), end: +Math.min(full, t + (a.duration || 5)).toFixed(2), offset: 0, volume: 1, fadeIn: 0, fadeOut: 0 }; E().audio.tracks.push(x); sel = { kind: 'track', id: x.id }; });
   }
@@ -567,13 +578,14 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
   /** Shift (seconds) that aligns the interval [a,b] — or a single time when a===b — to the nearest edge/grid line, or 0. */
   function snapBy(a, b, pts) {
     const thr = 8 / pps;
-    let shift = sn.on ? ReelAnim.snapShift(a, b, pts, thr) : 0;
-    if (!shift && sn.grid > 0) {
+    // an exact edge match (shift 0) wins over the grid; only "no edge in reach" (null) falls through to it
+    let shift = sn.on ? ReelAnim.snapShift(a, b, pts, thr) : null;
+    if (shift === null && sn.grid > 0) {
       const ga = Math.round(a / sn.grid) * sn.grid - a, gb = Math.round(b / sn.grid) * sn.grid - b;
       const g = Math.abs(ga) <= Math.abs(gb) ? ga : gb;
       if (Math.abs(g) < thr) shift = g;
     }
-    return shift;
+    return shift ?? 0;
   }
   let raf = 0;
   inner.addEventListener('pointermove', (e) => {
@@ -589,7 +601,7 @@ export function mountEditor(el, project, { fonts = [] } = {}) {
     else if (g.type === 'trimEnd') E().trim = { ...E().trim, end: +Math.min(full, Math.max((E().trim.start || 0) + 1, tts)).toFixed(2) };
     else if (g.trk) {
       const x = E().audio.tracks.find((y) => y.id === g.trk), len = g.o0.end - g.o0.start;
-      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); }
+      if (g.type === 'trkMove') { const s0 = g.o0.start + dx; x.start = +Math.max(0, Math.min(full, full + 30 - len, s0 + snapBy(s0, s0 + len, pts))).toFixed(2); x.end = +(x.start + len).toFixed(2); } // start ≤ full (server), end ≤ full + 30 (as trkEnd)
       if (g.type === 'trkStart') { const v = g.o0.start + dx; x.start = +Math.max(0, Math.min(x.end - 0.1, v + snapBy(v, v, pts))).toFixed(2); }
       if (g.type === 'trkEnd') { const v = g.o0.end + dx; x.end = +Math.min(full + 30, Math.max(x.start + 0.1, v + snapBy(v, v, pts))).toFixed(2); }
     }

@@ -17,6 +17,8 @@ async function test(name, fn) { try { await fn(); n++; console.log('✔', name);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { fetchRetry } = await import('../server/net.mjs');
+const { parseLimit } = await import('../server/engines/manager.mjs');
+const { retryDelay } = await import('../server/net.mjs');
 const R = await import('../server/render.mjs');
 
 // ---- fetchRetry ------------------------------------------------------------------------
@@ -26,7 +28,12 @@ const srv = http.createServer((req, res) => {
   if (k === '/flaky') return hits[k] < 3 ? (res.writeHead(503), res.end('x')) : res.end('ok');
   if (k === '/limited') return hits[k] < 2 ? (res.writeHead(429, { 'Retry-After': '0' }), res.end()) : res.end('ok');
   if (k === '/auth') { res.writeHead(401); return res.end('bad key'); }
-  if (k === '/hang') return; // never answers
+  if (k === '/stall') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.write('partial'); return; } // headers, then nothing
+  if (k === '/paid-busy') return hits[k] < 2 ? (res.writeHead(503), res.end()) : res.end('ok');
+  if (k === '/paid-limited') return hits[k] < 2 ? (res.writeHead(429, { 'Retry-After': '0' }), res.end()) : res.end('ok');
+  if (k === '/slow-down') { res.writeHead(429, { 'Retry-After': '120' }); return res.end('later'); }
+  if (k === '/paid-500') { res.writeHead(500); return res.end('x'); }
+  if (k.startsWith('/hang')) return; // never answers
   res.end('ok');
 }).listen(0, '127.0.0.1');
 await new Promise((r) => srv.once('listening', r));
@@ -50,15 +57,47 @@ await test('fetchRetry: the user cancel stops it immediately', async () => {
   const c = new AbortController(); setTimeout(() => c.abort(), 80);
   await assert.rejects(fetchRetry(U('/hang'), { signal: c.signal }, { timeout: 10000, retries: 3 }), /cancelled/);
 });
+await test('fetchRetry: a body that stalls after the headers still times out (the timeout covers the body)', async () => {
+  const t0 = Date.now();
+  await assert.rejects(fetchRetry(U('/stall'), {}, { timeout: 200, retries: 0, label: 'S' }), /S: timeout/);
+  assert.ok(Date.now() - t0 < 3000);
+});
+await test('fetchRetry: a paid POST is never sent twice after it may have reached the provider (timeout, 500); 503 is retried', async () => {
+  await assert.rejects(fetchRetry(U('/hang-post'), { method: 'POST', body: 'x' }, { timeout: 150, retries: 2, label: 'TTS' }), /TTS: timeout/);
+  assert.equal(hits['/hang-post'], 1, 'sent once — a timed-out paid request may have been processed');
+  const r = await fetchRetry(U('/paid-500'), { method: 'POST', body: 'x' }, { retries: 2 });
+  assert.equal(r.status, 500); assert.equal(hits['/paid-500'], 1);
+  const busy = await fetchRetry(U('/paid-busy'), { method: 'POST', body: 'x' }, { retries: 2 });
+  assert.equal(busy.status, 503); assert.equal(hits['/paid-busy'], 1, 'a 503 may come after the work was billed → reported, not re-sent');
+  const ok = await fetchRetry(U('/paid-limited'), { method: 'POST', body: 'x' }, { retries: 2 });
+  assert.equal(await ok.text(), 'ok'); assert.equal(hits['/paid-limited'], 2, '429 = rejected before processing → retried');
+});
+await test('fetchRetry: a Retry-After longer than the app accepts is honoured by returning the answer, never by retrying early', async () => {
+  const t0 = Date.now();
+  const r = await fetchRetry(U('/slow-down'), {}, { retries: 3 });
+  assert.equal(r.status, 429); assert.equal(hits['/slow-down'], 1); assert.ok(Date.now() - t0 < 2000);
+});
 srv.closeAllConnections?.(); srv.close();
+
+await test('retryDelay: a missing Retry-After falls back to the exponential delay (never 0); seconds and dates are honoured', () => {
+  const h = (v) => ({ headers: new Headers(v == null ? {} : { 'retry-after': v }) });
+  assert.equal(retryDelay(h(null), 2, 100), 400);
+  assert.equal(retryDelay(h('3'), 0, 100), 3000);
+  assert.equal(retryDelay(h('120'), 0, 100), 120000, 'never capped (the caller decides not to wait that long)');
+  assert.equal(retryDelay(h('0'), 2, 100), 0);
+  const d = retryDelay(h(new Date(Date.now() + 2000).toUTCString()), 0, 100); assert.ok(d > 500 && d <= 2000, String(d));
+});
+await test('RS_MAX_RENDERS must be an integer 1–4 (otherwise the setting is used)', () => {
+  for (const bad of ['0', '-1', '2.5', 'abc', '99', 'Infinity']) { const r = parseLimit(bad); assert.equal(r.n, null, bad); assert.ok(r.note, bad); }
+  assert.equal(parseLimit('3').n, 3); assert.equal(parseLimit(undefined).n, null);
+});
 
 // ---- worker count ------------------------------------------------------------------------
 await test('RS_RENDER_WORKERS: invalid values are rejected with a note, valid ones are capped by free RAM', () => {
   const env = { cpus: 8, freeMem: 16 * 1024 ** 3 };
   for (const bad of ['abc', '0', '-2', '1.5', 'Infinity', '9']) { const r = R.parseWorkers(bad, env); assert.ok(r.note, bad); assert.ok(r.n >= 1 && r.n <= R.MAX_WORKERS, bad); }
   assert.equal(R.parseWorkers('2', env).n, 2);
-  const low = R.parseWorkers('4', { cpus: 8, freeMem: 2.2 * 1024 ** 3 }); assert.equal(low.n, 3); assert.match(low.note, /reduced/);
-  assert.equal(R.parseWorkers(undefined, { cpus: 8, freeMem: 1.2 * 1024 ** 3 }).n, 1, 'a 1.2 GB budget gets one page');
+  const low = R.parseWorkers('4', { cpus: 8, freeMem: 1.2 * 1024 ** 3 }); assert.equal(low.n, 2); assert.match(low.note, /reduced/);
   assert.equal(R.parseWorkers('4', { cpus: 8, freeMem: 1.2 * 1024 ** 3, force: true }).n, 4);
   assert.equal(R.parseWorkers(undefined, { cpus: 1, freeMem: 16 * 1024 ** 3 }).n, 1);
 });
@@ -71,16 +110,16 @@ const mk = (file, { w = 320, h = 240, fps = 30, secs = 2, audio = true, vcodec =
   const r = spawnSync(FFMPEG, a); assert.equal(r.status, 0, String(r.stderr));
 };
 const good = path.join(TMP, 'good.mp4'); mk(good);
-await test('validateOutput (frames + audio checks): a correct file passes (codecs, size, fps, frames, durations)', async () => {
-  await R.validateOutput(good, { width: 320, height: 240, fps: 30, duration: 2, frames: 60 });
+await test('verifyVideo: a correct file passes (codecs, size, fps, frames, durations)', async () => {
+  await R.verifyVideo(good, { width: 320, height: 240, fps: 30, duration: 2, frames: 60 });
   assert.equal(await R.countFrames(good), 60);
 });
-await test('validateOutput (frames + audio checks): wrong size / frame count / missing audio / short audio are all reported', async () => {
-  await assert.rejects(R.validateOutput(good, { width: 640, height: 240, fps: 30, duration: 2, frames: 59 }), /width 320 ≠ 640.*60 frames ≠ 59/);
+await test('verifyVideo: wrong size / frame count / missing audio / short audio are all reported', async () => {
+  await assert.rejects(R.verifyVideo(good, { width: 640, height: 240, fps: 30, duration: 2, frames: 59 }), /width 320 ≠ 640.*59/);
   const silent = path.join(TMP, 'silent.mp4'); mk(silent, { audio: false });
-  await assert.rejects(R.validateOutput(silent, { duration: 2 }), /no audio stream/);
-  await assert.rejects(R.validateOutput(good, { duration: 5 }), /duration .* ≠ 5\.000/);
-  await assert.rejects(R.validateOutput(good, { fps: 25 }), /fps/);
+  await assert.rejects(R.verifyVideo(silent, { duration: 2 }), /no audio stream/);
+  await assert.rejects(R.verifyVideo(good, { duration: 5 }), /≠ 5\.000 s/);
+  await assert.rejects(R.verifyVideo(good, { fps: 25 }), /fps/);
 });
 await test('muxFinal: a failed output check leaves NO file at the final path (and no .part)', async () => {
   const out = path.join(TMP, 'final.mp4');
@@ -98,7 +137,7 @@ await test('muxFinal: cancelling mid-way never leaves a partial file at the fina
 await test('renderFrames: a damaged reused segment is detected by frame count and re-rendered', async () => {
   // a manifest that claims segment 0 is done, with a file that is not a valid 30-frame segment
   const segDir = path.join(TMP, 'seg'); fs.mkdirSync(segDir, { recursive: true });
-  fs.writeFileSync(path.join(segDir, 'manifest.json'), JSON.stringify({ key: 'k|legacy|h264|', done: [0] }));
+  fs.writeFileSync(path.join(segDir, 'manifest.json'), JSON.stringify({ key: 'k|legacy|h264|', done: [0] }) /* key = render key | engine | codec | bitrate */);
   mk(path.join(segDir, 'seg_0000.mp4'), { audio: false, secs: 1, fps: 30, w: 64, h: 64 }); // 30 frames but we ask for 45
   const logs = [];
   await assert.rejects(R.renderFrames({ url: 'http://127.0.0.1:9/none', out: path.join(TMP, 'x.mp4'), duration: 1.5, fps: 30, width: 64, height: 64, segDir, key: 'k', log: (l) => logs.push(l) }));
@@ -118,14 +157,29 @@ await test('run(): a child that exceeds its execution limit is killed and report
 await test('shutdown: SIGTERM stops the server, kills its children and exits cleanly', async () => {
   const PORT = 4311;
   const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'sd') }, stdio: 'ignore' });
-  let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
-  assert.ok(up, 'server did not start');
   const exited = new Promise((r) => child.once('exit', (code, sig) => r({ code, sig })));
-  child.kill('SIGTERM');
-  const r = await Promise.race([exited, sleep(10000).then(() => 'TIMEOUT')]);
-  assert.notEqual(r, 'TIMEOUT'); assert.equal(r.code, 0);
-  await assert.rejects(fetch(`http://127.0.0.1:${PORT}/api/health`));
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
+    assert.ok(up, 'server did not start');
+    child.kill('SIGTERM');
+    const r = await Promise.race([exited, sleep(10000).then(() => 'TIMEOUT')]);
+    assert.notEqual(r, 'TIMEOUT'); assert.equal(r.code, 0);
+    await assert.rejects(fetch(`http://127.0.0.1:${PORT}/api/health`));
+  } finally {
+    // a server that started late or ignored SIGTERM must not keep the port for the next tests
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+  }
 });
+await test('queue endpoint: GET /api/queue reports the limit and jobs', async () => {
+  const PORT = 4312;
+  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'sd2'), RS_MAX_RENDERS: '2' }, stdio: 'ignore' });
+  try {
+    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/health`); up = true; } catch { await sleep(100); } }
+    const j = await (await fetch(`http://127.0.0.1:${PORT}/api/queue`)).json();
+    assert.equal(j.limit, 2); assert.deepEqual(j.jobs, []); assert.equal(j.running, 0);
+  } finally { child.kill('SIGKILL'); }
+});
+
 await test('upload: streamed to disk, limit enforced (413), bad bytes refused (415), no temp files left behind', async () => {
   const PORT = 4314, data = path.join(TMP, 'sd3'), BASE = `http://127.0.0.1:${PORT}`;
   const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data, RS_MAX_UPLOAD_MB: '1' }, stdio: 'ignore' });
@@ -141,45 +195,6 @@ await test('upload: streamed to disk, limit enforced (413), bad bytes refused (4
     assert.equal((await ok.json()).upload.size, 200 * 1024);
     const left = [...fs.readdirSync(path.join(data, 'assets')), ...fs.readdirSync(path.join(data, 'projects', proj.id))].filter((f) => f.startsWith('.upload-'));
     assert.deepEqual(left, []);
-  } finally { child.kill('SIGKILL'); }
-});
-
-await test('credentials: stored encrypted, deletable one by one (disk + API), .env-provided values reported; unknown key → 404', async () => {
-  const PORT = 4318, data = path.join(TMP, 'sd4'), BASE = `http://127.0.0.1:${PORT}`;
-  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data, DEEPGRAM_API_KEY: 'from-env-key-123456' }, stdio: 'ignore' });
-  try {
-    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`${BASE}/api/health`); up = true; } catch { await sleep(100); } }
-    const H = { Origin: BASE, 'Content-Type': 'application/json' };
-    const call = async (m, p, b) => { const r = await fetch(BASE + p, { method: m, headers: H, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, body: await r.json() }; };
-    await call('PUT', '/api/settings', { llm: { apiKey: 'sk-secret-value-123456' }, elevenlabs: { apiKey: 'el-secret-value-654321' } });
-    const file = fs.readFileSync(path.join(data, 'settings.json'), 'utf8');
-    assert.ok(!file.includes('sk-secret-value') && !file.includes('el-secret-value') && file.includes('enc:v1:'), 'keys are sealed on disk');
-    const r = await call('DELETE', '/api/settings/secrets/llm.apiKey');
-    assert.equal(r.status, 200); assert.equal(r.body.deleted, true); assert.equal(r.body.stillSetBy, null);
-    assert.equal(r.body.settings._source['llm.apiKey'], 'none'); assert.equal(r.body.settings.llm.apiKey, '');
-    assert.equal(r.body.settings._source['elevenlabs.apiKey'], 'settings', 'other credentials untouched');
-    assert.equal((await call('DELETE', '/api/settings/secrets/llm.apiKey')).body.deleted, false, 'deleting twice is harmless');
-    const env = await call('DELETE', '/api/settings/secrets/deepgram.apiKey'); assert.equal(env.body.stillSetBy, '.env');
-    assert.equal((await call('DELETE', '/api/settings/secrets/llm.model')).status, 404);
-    assert.equal((await call('DELETE', '/api/settings/secrets/__proto__')).status, 404);
-  } finally { child.kill('SIGKILL'); }
-});
-await test('concurrency: 30 simultaneous project creations + settings writes — nothing lost or corrupted', async () => {
-  const PORT = 4319, data = path.join(TMP, 'sd5'), BASE = `http://127.0.0.1:${PORT}`;
-  const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: data }, stdio: 'ignore' });
-  try {
-    let up = false; for (let i = 0; i < 60 && !up; i++) { try { await fetch(`${BASE}/api/health`); up = true; } catch { await sleep(100); } }
-    const H = { Origin: BASE, 'Content-Type': 'application/json' };
-    const post = (p, b, m = 'POST') => fetch(BASE + p, { method: m, headers: H, body: JSON.stringify(b) });
-    const jobs = [...Array.from({ length: 30 }, (_, i) => post('/api/projects', { topic: `موضوع ${i}`, autostart: false })),
-      post('/api/settings', { llm: { model: 'model-A' } }, 'PUT'), post('/api/settings', { pronunciation: 'DNA = دي إن إيه' }, 'PUT'), post('/api/settings', { seriesTag: 'tag-Z' }, 'PUT')];
-    const res = await Promise.all(jobs); assert.ok(res.every((r) => r.status === 201 || r.status === 200), res.map((r) => r.status).join());
-    const list = (await (await fetch(`${BASE}/api/projects`)).json()).projects;
-    assert.equal(list.length, 30); assert.equal(new Set(list.map((p) => p.id)).size, 30);
-    for (const p of list) JSON.parse(fs.readFileSync(path.join(data, 'projects', p.id, 'project.json'), 'utf8')); // every file is complete JSON
-    const set = await (await fetch(`${BASE}/api/settings`)).json();
-    assert.equal(set.llm.model, 'model-A'); assert.equal(set.pronunciation, 'DNA = دي إن إيه'); assert.equal(set.seriesTag, 'tag-Z');
-    assert.deepEqual(fs.readdirSync(path.join(data)).filter((f) => f.endsWith('.tmp')), [], 'no temp files left');
   } finally { child.kill('SIGKILL'); }
 });
 

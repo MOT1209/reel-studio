@@ -1,2 +1,0 @@
-{ "name": "reel-remotion-poc", "private": true, "type": "module", "description": "Benchmark-only proof of concept (not a dependency of Reel Studio). Install: npm install; run via ../bench.mjs remotion",
-  "dependencies": { "@remotion/bundler": "4.0.546", "@remotion/renderer": "4.0.546", "react": "19.3.1", "react-dom": "19.3.1", "remotion": "4.0.546" } }

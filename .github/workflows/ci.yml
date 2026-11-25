@@ -17,12 +17,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - run: node tools/install-browser.mjs   # Remotion: headless shell + composition bundle
       - run: npm test
       - run: npm run test:xss
       - run: npm run test:a11y
       - run: npm run test:arabic-video
       - run: npm run e2e
       - run: npm run test:export
+      - run: npm run test:remotion
       - run: npm run test:ui
       - run: npm run templates
       - run: npm audit --omit=dev

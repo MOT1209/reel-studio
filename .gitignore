@@ -3,5 +3,3 @@ data/
 output/
 .env
 *.stackdump
-bench/remotion-poc/node_modules/
-bench/results-*.json

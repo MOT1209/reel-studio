@@ -46,7 +46,7 @@
   function snapShift(start, end, points, threshold) {
     const a = snapTime(start, points, threshold), b = snapTime(end, points, threshold);
     const da = a === null ? Infinity : Math.abs(a - start), db = b === null ? Infinity : Math.abs(b - end);
-    if (da === Infinity && db === Infinity) return 0;
+    if (da === Infinity && db === Infinity) return null; // no edge in reach (0 would mean "already exactly on one")
     return da <= db ? a - start : b - end;
   }
 

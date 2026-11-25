@@ -19,8 +19,24 @@ const P3 = "'><script>window.__xss=(window.__xss||[]).concat('c')</script>";
 const PAY = P1 + P2 + P3;
 const api = async (p, opts = {}) => { const r = await fetch(BASE + p, { ...opts, headers: { Origin: BASE, 'Content-Type': 'application/json', ...(opts.headers || {}) } }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
 
-procs.push(spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data') } }));
-for (let i = 0; i < 100; i++) { try { await fetch(`${BASE}/api/health`); break; } catch { await sleep(100); } }
+// RS_EXAMPLES_DIR: the planted example script goes to a temp folder, never into references/examples (those files are
+// sent to the LLM as style examples with every script)
+const EXAMPLES = path.join(TMP, 'examples'); fs.mkdirSync(EXAMPLES, { recursive: true });
+const repoExamples = () => fs.readdirSync(path.join(ROOT, 'references', 'examples')).sort().join('|');
+const repoBefore = repoExamples();
+// another server already on the port would receive the hostile payloads (and could write them into a real data folder)
+if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) { console.error(`port ${PORT} is already in use — stop that server first`); process.exit(1); }
+const child = spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data'), RS_EXAMPLES_DIR: EXAMPLES } });
+procs.push(child);
+// ready = OUR child printed its listening line (not merely "something answers on the port")
+const listening = await new Promise((resolve) => {
+  let buf = '';
+  child.stdout.on('data', (d) => { buf += d; if (buf.includes(`:${PORT}`)) resolve(true); });
+  child.once('exit', () => resolve(false));
+  setTimeout(() => resolve(false), 15000);
+});
+if (!listening) { console.error('the test server did not start — nothing was planted'); process.exit(1); }
+child.stdout.resume();
 
 const planted = [];
 const proj = await api('/api/projects', { method: 'POST', body: JSON.stringify({ topic: PAY, autostart: false }) }); planted.push(['project', proj.status]);
@@ -29,10 +45,13 @@ const up = await fetch(`${BASE}/api/assets`, { method: 'POST', body: fs.readFile
 planted.push(['asset', up.status]);
 const sk = await api('/api/skills', { method: 'POST', body: JSON.stringify({ id: 'evil-skill', name: '<img src=x onerror=window.__xss=[1]>', description: PAY, kind: 'prompt', prompt: 'x {{input}}', input: { type: 'script' }, output: { type: 'text' }, permissions: ['llm'], category: '<svg onload=__xss=[1]>' }) }); planted.push(['skill', sk.status]);
 const mcp = await api('/api/mcp', { method: 'POST', body: JSON.stringify({ name: PAY, url: 'http://127.0.0.1:9/mcp', allowPrivate: true, headers: { 'X-Test': 'a' } }) }); planted.push(['mcp', mcp.status]);
-await api('/api/style/examples', { method: 'POST', body: JSON.stringify({ name: PAY, text: PAY }) });
-await api('/api/settings', { method: 'PUT', body: JSON.stringify({ llm: { model: PAY }, elevenlabs: { voiceId: PAY }, pronunciation: PAY }) });
+const ex = await api('/api/style/examples', { method: 'POST', body: JSON.stringify({ name: PAY, text: PAY }) }); planted.push(['example', ex.status]);
+const st = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ llm: { model: PAY }, elevenlabs: { voiceId: PAY }, pronunciation: PAY }) }); planted.push(['settings', st.status]);
 console.log('planted:', JSON.stringify(planted));
 for (const k of ['project', 'asset', 'skill', 'mcp']) assert.ok(planted.some(([x, s]) => x === k && s === 201), `${k} payload was not accepted — test would prove nothing`);
+for (const k of ['example', 'settings']) assert.ok(planted.some(([x, s]) => x === k && s >= 200 && s < 300), `${k} payload was not accepted — test would prove nothing`);
+assert.equal(fs.readdirSync(EXAMPLES).length, 1, 'the example was written to the temp examples folder');
+assert.equal(repoExamples(), repoBefore, 'nothing was written into references/examples');
 
 const { launchBrowser } = await import('../server/render.mjs');
 const browser = await launchBrowser();
@@ -48,13 +67,21 @@ try {
     }
     assert.deepEqual(await xss(), []); assert.deepEqual(dialogs, []);
   });
-  await test('the hostile project opens (editor + stages) and settings tabs render without executing anything', async () => {
-    await page.goto(`${BASE}/#/projects`); await sleep(500);
-    await page.goto(`${BASE}/#/projects/${proj.body.id}`); await sleep(1200);
-    for (const t of await page.$$eval('#setTabs [data-tab]', (b) => b.map((x) => x.dataset.tab))) {
-      await page.evaluate((tt) => { document.querySelector('#settingsBtn, [data-open-settings], #btnSettings')?.click(); document.querySelector(`#setTabs [data-tab="${tt}"]`)?.click(); }, t); await sleep(150);
+  await test('the hostile project opens (title + stages) and every settings tab renders without executing anything', async () => {
+    // ?p= is how the app opens a project (the hash alone only selects the view)
+    await page.goto(`${BASE}/?p=${encodeURIComponent(proj.body.id)}#/projects`);
+    await page.waitForSelector('.stage[data-stage="script"]');
+    assert.ok((await page.evaluate(() => document.body.innerText)).includes('onerror'), 'the project with the hostile topic is really open');
+    await page.click('#btnSettings');
+    await page.waitForSelector('dialog#settings[open]');
+    const tabs = await page.$$eval('#setTabs [data-tab]', (b) => b.map((x) => x.dataset.tab));
+    assert.ok(tabs.length >= 5);
+    for (const t of tabs) {
+      await page.click(`#setTabs [data-tab="${t}"]`);
+      await page.waitForSelector(`dialog#settings .tab[data-tab="${t}"]:not([hidden])`);
+      await sleep(150);
     }
-    assert.deepEqual(await xss(), []);
+    assert.deepEqual(await xss(), []); assert.deepEqual(dialogs, []);
   });
   await test('the payload is stored and shown as text (the planted strings are really on the page)', async () => {
     await page.goto(`${BASE}/#/skills`); await sleep(800);

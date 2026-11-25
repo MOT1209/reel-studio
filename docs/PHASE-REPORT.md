@@ -1,11 +1,9 @@
 # Repair report — phases 0–12 (2026-11-24)
 
-> **Merged with `main` v3.0.** `main` meanwhile added an engine manager (Remotion + legacy), its own render queue (`render.maxJobs`, default 1), ffprobe output validation and scene schema. Rendering items below that duplicated `main` (my separate queue, `/api/queue`) were **dropped**; the rest was **ported onto `main`'s architecture** and re-tested there: child/browser registry and timeouts (`server/proc.mjs`), cgroup-aware worker counts (`server/memory.mjs`, used by both engines), verified `.part` mux without `-shortest` + frame-count checks (`server/engines/ffmpeg.mjs`), crash retry with one page (engine manager), graceful shutdown, streamed uploads, credential delete, atomic voice files, a browser leak on a failed `prepare` (new bug, fixed), editor keyframes/layers/snap/tracks/crop/duplicate/ripple (renderer shared by both engines), accessibility fixes. Tests below were re-run on the merged code.
-
 Legend: **T** = implemented and tested here · **I** = implemented, not covered by an automated test · **P** = partial · **N** = not implemented · **B** = blocked.
 All tests below ran on this machine against offline mocks (no real API key or real network), 4 CPU / 16 GB, Node 22.23.5, system ffmpeg, Playwright's Chromium.
 
-Final run on the merged code: `npm run test:all` → unit 30 · Arabic 14 · library 10 · skills/MCP 13 · vault 6 · voice 3 · engines 13 · robustness 14 · phase1 16 · e2e 38/38 · export 15 · Remotion 9 · UI 21 · XSS 3 · a11y 19 · Arabic-video 7 · templates 9 sheets · `npm audit --omit=dev`: 0 vulnerabilities. Separately (long-running, not in `test:all`): `npm run test:perf` and `npm run test:lowmem` (see `docs/PERFORMANCE.md`). (Baseline before any change: the same suites minus the new ones, all green — `docs/PHASE0-AUDIT.md`.)
+Final run: `npm run test:all` → unit 20 · Arabic 14 · library 10 · skills/MCP 13 · vault 6 · robustness 14 · phase1 20 · e2e 38/38 · export 12 · UI 14 · XSS 3 · Arabic-video 7 · templates 9 sheets · `npm audit --omit=dev`: 0 vulnerabilities. (Baseline before any change: the same suites minus the new ones, all green — `docs/PHASE0-AUDIT.md`.)
 
 ## Phase 0 — audit
 `docs/PHASE0-AUDIT.md`. No P0 reproduced. Not every file was read in full (listed in that document); `text`, `storyboard`, `arabic`, `fonts`, `skills`, `youtube`, `subtitles` and most of `public/render.js` / `app.js` were only exercised through their tests.
@@ -14,15 +12,14 @@ Final run on the merged code: `npm run test:all` → unit 30 · Arabic 14 · lib
 | Item | Status | Evidence |
 |---|---|---|
 | Graceful shutdown (SIGINT/SIGTERM: cancel jobs, kill ffmpeg + Chromium, flush projects, exit 0) | **T** | `phase1-test`: SIGTERM → exit 0, port closed |
-| Timeouts + bounded retry for ElevenLabs/Deepgram (`server/net.mjs`; Retry-After; no retry on 4xx; cancel wins) | **T** | 5 tests incl. hanging server, 429→200, 401 once |
+| Timeouts + bounded retry for ElevenLabs/Deepgram (`server/net.mjs`): retried = network errors, 408/425/429/5xx (429 is the one 4xx that is retried — it means "not processed, try later"; `Retry-After` honoured, a missing header uses the backoff); never retried = other 4xx; paid requests (TTS, transcription) are only retried on 429/503 or a connection that never reached the provider; the timeout covers the body; cancel wins | **T** | 8 tests incl. hanging server, stalled body, 429→200, 401 once, paid POST sent once |
 | Provider search: one retry on 5xx/network, 429 still shown to the user | **T** | `library-test` 429 case |
 | Voice upload streamed to disk, `RS_MAX_UPLOAD_MB`, 413 answered before the socket is dropped, no temp leftovers | **T** | `phase1-test` upload (413/415/200 + no `.upload-*` files) |
 | Atomic write of the render manifest and concat list | **T** (via render tests) | |
-| Atomic write of `voice.mp3` (TTS: atomic write; upload: convert to `.part`, then rename) and `voice-timing.json` | **I** | e2e passes through both paths; a crash-in-the-middle was not simulated |
+| Atomic write of `voice.mp3`, `voice-timing.json` | **N** | still `writeFileSync`; a crash mid-write leaves a truncated file (the stage is then marked interrupted and re-run) |
 | ffmpeg/ffprobe execution timeouts (`RS_FFMPEG_TIMEOUT_MIN`, default 45 min; probe 60 s) | **T** | `phase1-test` |
 | Render-input validation gate before rendering (`checkRenderInputs`) | **T** | unit (11 failure kinds) + e2e still green |
-| Concurrent requests: 30 simultaneous project creations + 3 simultaneous settings writes — nothing lost, every file valid JSON, no temp files | **T** | `phase1-test` |
-| Per-endpoint request schemas for **every** route | **P** | the important boundaries are validated (edit model, uploads, MCP, settings, skills); there is no central schema layer |
+| Concurrent writers to the same project / per-endpoint request schemas for **every** route | **N** | the server is single-threaded with synchronous saves; no test for concurrent edits was written |
 | CI (`.github/workflows/ci.yml`) | **I** | not run (no GitHub Actions run was observed) |
 
 ## Phase 2 — security
@@ -32,7 +29,7 @@ Final run on the merged code: `npm run test:all` → unit 30 · Arabic 14 · lib
 | Stored XSS: hostile strings in project, asset, skill, MCP, example, settings values → nothing executes in any view | **T** (`xss-test`; mutation-checked: with `esc()` neutered the test fails) |
 | Secrets: AES-256-GCM at rest, masked in API/UI, redacted in logs (pre-existing) | **T** (vault/library/skills tests) |
 | OS credential store on macOS/Linux | **N** — decided with the owner: keep the 0600 key file + document (Windows DPAPI exists, untested here) |
-| Explicit "delete this credential": `DELETE /api/settings/secrets/<section.field>` (reports when `.env` still supplies it; unknown key → 404) | **T** (`phase1-test`: sealed on disk, deleted from disk and API, others untouched) — plus a «حذف المفتاح المحفوظ» button in Settings (shown only for keys saved there; **T** in the UI test) |
+| Explicit "delete this credential" action | **N** (clearing a field in Settings is the only path) |
 | `spawn` with argument arrays, no shell | **I** — verified by reading every `spawn` in `server/`; DNS names in MCP URLs are not resolved, so a public name pointing at a private IP is not caught |
 | CSRF token | **N** (loopback bind + Host/Origin checks remain the guard) |
 
@@ -46,11 +43,10 @@ Final run on the merged code: `npm run test:all` → unit 30 · Arabic 14 · lib
 | `muxFinal` → `.part`, ffprobe check (codec, size, fps, frame count, video/audio/container duration, audio present), then rename; cancel leaves nothing | **T** | 3 tests |
 | **Bug found by that check:** `-shortest` silently dropped 1–2 frames of every render (324 of 326 frames at 30 fps). Audio now matches the frame duration and `-shortest` is gone | **T** | e2e + export fail without the fix, pass with it |
 | Chromium orphans after `kill -9` of the server | **B** — impossible to handle in-process; only graceful signals are covered |
-| **Bug found by the low-memory test:** inside a memory-limited container the renderer used the HOST's free RAM and its pages were OOM-killed (1.5 GB cgroup: crash + retry; 1 GB: failure). Now cgroup-aware, per-page estimate recalibrated, crashes retried with 1 page | **T** | `tools/lowmem-test.mjs`: 1.5 GB passes (peak 1380 MB, 0 OOM kills); 1 GB still fails (documented floor) |
 | Resume data atomic | **T** (manifest) |
 
 ## Phase 4 — Remotion / HyperFrames
-`docs/REMOTION-EVALUATION.md`: measured, **not integrated** (4.6× slower on the same scene, +19 % RAM, +217 MB, tiered licence). HyperFrames: metadata only, not benchmarked, not integrated.
+Superseded by v3.0: Remotion **is** integrated as an engine (default, with the legacy engine as fallback); measurements and the HyperFrames evaluation are in `docs/RENDERING.md`.
 
 ## Phase 5 — editor
 | Item | Status | Evidence |
@@ -59,10 +55,9 @@ Final run on the merged code: `npm run test:all` → unit 30 · Arabic 14 · lib
 | Layer order (4 buttons; array order = z-order) | **T** | export: green/magenta overlap, both orders, centre pixel measured; UI test |
 | Magnet + optional grid snapping (words, scenes, clips, tracks, cuts, trim, playhead) | **T** | unit (snap maths) + UI test (snaps within 0.011 s; unchecked → does not) |
 | Independent audio tracks (validated, fades, cut-aware, mixed) | **T** (export: tone present in its window, ≥ 12 dB above elsewhere) — **UI for adding a track was not driven by a test** (button presence only) |
-| Live preview plays audio tracks (start/end/offset/volume/fades) | **I** — audio playback is not observable headless; `render-data` carrying the tracks is **T** (export test) |
-| Crop of picture/video overlays (fractions of the source) | **T** — export test: cropping a two-colour image to its right half removes the other colour from the rendered frames |
-| Duplicate overlay; ripple (delete / shorten an overlay shifts the later ones in its row) | **T** (UI test) |
-| Re-ordering scenes beyond swap, inserting silence | **N** (narration remains the master clock — documented limit) |
+| Live preview plays audio tracks | **N** — only visible in the exported video |
+| Video cropping, clip duplication, re-ordering scenes beyond swap, inserting silence | **N** (narration remains the master clock — documented limit) |
+| Ripple for overlays | **P** — cuts ripple everything; moving an overlay does not ripple others |
 | Undo/redo, autosave, trim, split, delete, multi-select, zoom, text/subtitle editing | pre-existing, **T** by the existing UI test |
 
 ## Phase 6 — Arabic
@@ -78,10 +73,10 @@ Retry/timeouts (above), audio tracks, clip-sound mixing with fades, frame-exact 
 Added the pre-render gate (word timing monotonic, scenes strictly increasing within the script, templates, referenced assets exist, minimum duration). Stage retry/cancel/approval/recovery were already present and are covered by e2e. **N**: any check that LLM text is factually true (research notes remain flagged "unverified" — the app cannot verify facts). **B**: real LLM output quality.
 
 ## Phase 10 — UI
-`tools/a11y-test.mjs` (19 tests) audits every screen incl. the editor, its inspectors and every Settings tab at 1440 px and 390 px: it found 11 unnamed controls (library/fonts/voice/settings/editor-item fields), a header that pushed the Settings button 50 px off a phone screen, a table wider than the screen, and no `:focus-visible` style on buttons/links — all fixed, then **T**. `<html lang=ar dir=rtl>` checked on every screen. Colour contrast (WCAG AA 4.5:1, 3:1 for large text, computed against the real background) is now measured on every screen, the editor and every Settings tab: one failure found (dimmed caption-preview words, 2.45:1) and fixed. **N**: screen-reader testing, and a review of RTL *visual* polish beyond the checked screens.
+Only what the new features and the XSS test touched. **N**: an accessibility audit (labels, focus order, contrast), responsive-layout pass, and RTL review of every screen were **not** done.
 
 ## Phase 11 — tests / performance
-New suites listed at the top; real measurements in `docs/REMOTION-EVALUATION.md` §4 (flat RAM from 30 s to 90 s). Real-pipeline small/medium/large + queue-of-3 + low-memory cgroup runs: `docs/PERFORMANCE.md`. **N**: 4K, other OSes, an 8 GB physical machine, real (non-mock) audio longer than ~45 s.
+New suites listed at the top; real measurements in `docs/RENDERING.md` → Benchmarks (flat RAM from 30 s to 90 s). **N**: low-memory stress test, high-resolution-image and long-audio fixtures through the real pipeline, medium/large real projects (the mocks only produce ~10 s scripts).
 
 ## Phase 12 — cleanup / docs
 README updated (queue, shutdown, limits, editor features, tests, keychain limitation); `package.json` scripts, `engines.node` raised to ≥ 20 (code uses `AbortSignal`/`fetch` features and CI runs 22); version strings aligned to 2.1.0. `npm audit`: 0. **N**: dead-code/unused-dependency removal — there is one runtime dependency and no file was proven dead, so nothing was deleted. `docs/AUDIT.md` still quotes older test counts in its historical sections.
@@ -89,6 +84,6 @@ README updated (queue, shutdown, limits, editor features, tests, keychain limita
 ## Remaining / recommended next
 1. First run with real keys (LLM, ElevenLabs, Deepgram, one image provider) and send `data/logs/server.log`.
 2. Accessibility + responsive + RTL pass over every screen.
-3. A first listen to the live audio-track preview (audio playback cannot be observed headless).
-4. Run the CI workflow once on GitHub (it has not produced a run on this branch — Actions may need enabling/approval) and fix whatever differs on a clean Ubuntu runner.
-5. Real-hardware check on an 8 GB machine.
+3. Atomic writes for voice files; per-credential delete; live preview for audio tracks.
+4. Real medium/large project fixtures and a memory-constrained run (e.g. a 4–8 GB VM).
+5. Run the CI workflow once on GitHub and fix whatever differs on a clean Ubuntu runner (fonts, Chromium install).

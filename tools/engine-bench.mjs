@@ -12,7 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SECONDS = Number(process.argv[2]) || 20;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-bench-'));
 const DATA = path.join(TMP, 'data');
-const MOCK_PORT = 4394, PORT = 4309, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
+const MOCK_PORT = 4398, PORT = 4309, MOCK = `http://127.0.0.1:${MOCK_PORT}`, BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function up(u) { for (let i = 0; i < 150; i++) { try { await fetch(u); return; } catch { await sleep(100); } } throw new Error('not up ' + u); }
 async function api(p, opts = {}) {

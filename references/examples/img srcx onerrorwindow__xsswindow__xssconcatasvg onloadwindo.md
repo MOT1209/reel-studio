@@ -1,1 +1,0 @@
-<img src=x onerror="window.__xss=(window.__xss||[]).concat('a')">"><svg onload="window.__xss=(window.__xss||[]).concat('b')">'><script>window.__xss=(window.__xss||[]).concat('c')</script>

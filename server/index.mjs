@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, getSettings, getPublicSettings, updateSettings, deleteSecret, resolveFonts } from './settings.mjs';
+import { ROOT, getSettings, getPublicSettings, updateSettings, resolveFonts } from './settings.mjs';
 import { listVoices, testLlm, testElevenLabs, testDeepgram, testOpenAITts } from './apis.mjs';
 import { STYLE_FILE, EXAMPLES_DIR, readExamples } from './text.mjs';
 import { youtubeStatus, startAuth, finishAuth, unlinkYoutube } from './youtube.mjs';
@@ -106,9 +106,8 @@ async function route(req, res) {
     }
     if (a === 'settings') {
       if (m === 'GET') return json(res, 200, getPublicSettings());
-      if (m === 'PUT') { const out = updateSettings(await readJson(req)); EM.setMaxJobs(getSettings().render.maxJobs); return json(res, 200, out); }
+      if (m === 'PUT') { const out = updateSettings(await readJson(req)); applyMaxJobs(); return json(res, 200, out); }
     }
-    if (a === 'settings' && id === 'secrets' && b && m === 'DELETE') return json(res, 200, { ...deleteSecret(b), settings: getPublicSettings() });
     // rendering engines: availability (?fresh=1 re-checks), the selected default, and the render jobs of this session
     if (a === 'scene-schema' && m === 'GET') return json(res, 200, SCHEMA);
     if (a === 'projects' && id && b === 'scenes' && stage !== undefined && action === 'regenerate' && m === 'POST') {
@@ -124,6 +123,7 @@ async function route(req, res) {
       if (id && !b && m === 'GET') { const j = EM.getJob(id); return j ? json(res, 200, j) : json(res, 404, { error: 'no such job' }); }
       if (id && b === 'cancel' && m === 'POST') return json(res, 200, { ok: EM.cancelJob(id) });
     }
+    if (a === 'queue' && m === 'GET') return json(res, 200, EM.queueSnapshot());
     if (a === 'voices' && m === 'GET') return json(res, 200, { voices: await listVoices(getSettings()) });
     if (a === 'test' && m === 'POST' && TESTS[id]) {
       // optional unsaved values from the Settings form (masked keys are ignored → saved key is used)
@@ -268,8 +268,9 @@ async function route(req, res) {
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
       if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }
       if (b === 'upload' && m === 'POST') {
+        const name = safeDecode(String(req.headers['x-filename'] || '')); // before anything reaches disk: a bad name leaves no temp file
         const tmp = await A.streamToTemp(req, UPLOAD_LIMIT); // streamed to disk, never buffered whole in RAM
-        await P.saveUploadFile(id, tmp, safeDecode(String(req.headers['x-filename'] || '')), req.headers['content-type']);
+        await P.saveUploadFile(id, tmp, name, req.headers['content-type']);
         return json(res, 200, P.publicProject(p));
       }
       if (b === 'publish' && m === 'POST') {
@@ -360,7 +361,8 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) {
       if (e.status === 413) { res.setHeader('Connection', 'close'); res.on('finish', () => req.destroy()); } // answer first, then drop the oversized upload
       json(res, e.status || 500, { error: redact(e.message) });
-    } else res.end();
+    }
+    else res.end();
     if (!e.status) slog('error', 'request failed', { method: req.method, path: req.url.split('?')[0], err: e, stack: e.stack?.split('\n').slice(0, 4).join(' | ') });
   }
 });
@@ -379,7 +381,10 @@ async function gracefulShutdown(sig) {
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => gracefulShutdown(sig));
 
 EM.setJobLog(path.join(path.dirname(logFile), 'render-jobs.jsonl'));
-EM.setMaxJobs(getSettings().render.maxJobs);
+const MAX_ENV = EM.parseLimit(process.env.RS_MAX_RENDERS);
+if (MAX_ENV.note) slog('warn', MAX_ENV.note);
+function applyMaxJobs() { EM.setMaxJobs(MAX_ENV.n ?? getSettings().render.maxJobs); }
+applyMaxJobs();
 server.listen(PORT, HOST, async () => {
   const ff = await checkFfmpeg();
   console.log(`Reel Studio v3 → http://${HOST}:${PORT}`);
