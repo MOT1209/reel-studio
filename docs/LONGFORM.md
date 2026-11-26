@@ -71,6 +71,25 @@ tracks to the chapter, and leave music to the join step.
 - A chaptered project cannot switch to an uploaded voice-over (the staged audio would have to be cut per chapter).
 - Chapter renders need ffmpeg/ffprobe and a browser engine exactly like short renders.
 
+## Post-join QC
+
+A chaptered project is only marked done after `server/chapter-qc.mjs` has checked the joined file. Any failure stops
+the render with a message that names the chapter and the size of the error — a long video that plays out of sync is
+never shipped silently.
+
+| Check | Limit | 5-chapter run (5.8 min) |
+|---|---|---|
+| Frame count | exactly Σ chapter frames | 8390 |
+| Joined duration | frames / fps ± 100 ms | 349.585 s (±0) |
+| Audio vs video duration | ± 50 ms | 349.583 vs 349.585 s |
+| Each chapter's audio position (energy-envelope correlation) | ≤ 60 ms | 0…5 ms (max 5 ms) |
+| Lag growth across joins | ≤ 30 ms | 10 ms |
+| Loudness spread between chapters | ≤ 1.5 LU | 0.0 LU (all −14.0) |
+
+The stats are stored on the project as `render.qc` (`frames`, `lagsMs`, `maxLagMs`, `lagSpreadMs`, `loudnessLu`,
+`loudnessSpreadLu`) and written to the render log. `npm run test:qc` proves the gate itself: a clean join passes,
+while a 120 ms delayed join, a ~20 LU loudness jump and a wrong frame count are all rejected.
+
 ## Verified end to end
 
 `npm run test:longform-e2e` (3 chapters × 10 s, 720×1280 @ 24 fps, legacy engine, offline mocks): render of all
@@ -91,6 +110,8 @@ fallback. The whole 5-stage run took 627 s on 1 render worker (720×1280, `draft
   stage against a local SSE LLM. No ffmpeg/browser needed.
 - `tools/concat-test.mjs` (`npm run test:concat`) — joins three real chapters and measures audio drift at each join
   (needs ffmpeg).
+- `tools/qc-test.mjs` (`npm run test:qc`) — the post-join gate: a clean join passes; a delayed join, a loudness jump
+  and a wrong frame count fail with the expected messages (needs ffmpeg).
 - `tools/longform-e2e.mjs` (`npm run test:longform-e2e`) — a real 3-chapter project (3 × 10 s, 720×1280/24, legacy
   engine + offline mocks): every stage per chapter, chapter and joined frame counts, joined audio, caption/voice
   sync across the joins and the subtitle clock. Needs ffmpeg and a Playwright browser; writes

@@ -18,6 +18,7 @@ import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
 import { srcToOut, outToSrc, isHold } from './timeline.mjs';
 import { assembleProject, chapterDuration as chDuration, chapterFolder, chapterEdit } from './chapters.mjs';
+import { checkChapterJoin } from './chapter-qc.mjs';
 
 const tail = (text, n = 28) => String(text || '').trim().split(/\s+/).slice(-n).join(' ');
 
@@ -463,6 +464,9 @@ export function makeStages(ctx) {
     const expect = { width: L.width, height: L.height, fps, frames, duration, codec: chs[0].render?.codec || 'h264' };
     log(p, 'render', `joining ${chs.length} chapters · ${frames} frames · ${duration.toFixed(2)} s @ ${fps} fps`);
     await concatVideos({ files, out: staged, signal, expect });
+    // post-join gate: frames/duration, per-chapter audio position and loudness spread — a failure stops the project
+    // here with a message naming the chapter, instead of shipping a long video that plays out of sync
+    const qc = await checkChapterJoin({ files, joined: staged, fps, frames, duration, signal, log: (l) => log(p, 'render', l) });
     const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
     if (musicAsset) {
       // the music is mixed once over the joined audio, so it runs across the whole video instead of restarting
@@ -487,7 +491,7 @@ export function makeStages(ctx) {
       aspect: E.export.aspect, quality: E.export.quality, theme: (p.chapters[0].render?.theme) || getSettings().look.theme,
       engine: p.chapters[0].render?.engine, codec: p.chapters[0].render?.codec, bitrate: E.export.bitrate,
       renderSeconds: +chs.reduce((a, ch) => a + (ch.render?.renderSeconds || 0), 0).toFixed(2),
-      at: new Date().toISOString(), credits,
+      qc, at: new Date().toISOString(), credits,
       chapters: chs.map((ch) => ({ id: ch.id, title: ch.title, duration: ch.render?.duration, frames: ch.render?.frames, file: ch.render?.file })),
     };
     const outDir = getSettings().render.outputDir;
