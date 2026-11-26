@@ -287,7 +287,7 @@ async function route(req, res) {
         if (typeof body.publish === 'boolean') P.setPublishOption(id, body.publish);
         return json(res, 200, P.publicProject(p));
       }
-      if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p));
+      if (b === 'render-data' && m === 'GET') return json(res, 200, P.renderData(p, { chapter: url.searchParams.get('chapter') || null }));
       if (b === 'edit' && m === 'PUT') return json(res, 200, await P.saveEdit(id, await readJson(req)));
       if (b === 'clips' && stage && action && m === 'GET') {
         // extracted video-clip frames: /api/projects/<id>/clips/<key>/f_00001.jpg

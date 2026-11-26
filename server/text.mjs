@@ -4,7 +4,9 @@ import path from 'node:path';
 import { ROOT } from './settings.mjs';
 
 export const WORDS_PER_SECOND = 2.6;
-export const LENGTHS = [10, 20, 30, 45, 60, 'auto'];
+/** Durations the new-project form accepts (seconds). The hard ceiling is 30 minutes; longer videos are chaptered. */
+export const MAX_SECONDS = 1800;
+export const LENGTHS = [10, 20, 30, 45, 60, 90, 120, 180, 300, 600, 900, MAX_SECONDS, 'auto'];
 export const STYLE_FILE = path.join(ROOT, 'references', 'script-style.md');
 export const EXAMPLES_DIR = process.env.RS_EXAMPLES_DIR ? path.resolve(process.env.RS_EXAMPLES_DIR) : path.join(ROOT, 'references', 'examples');
 
@@ -43,18 +45,21 @@ Rules: 4–8 facts. Never invent sources, studies or numbers — use null when u
   ];
 }
 
-export function scriptMessages(topic, seconds, { dialect = 'egyptian', research = null } = {}) {
+export function scriptMessages(topic, seconds, { dialect = 'egyptian', research = null, chapter = null } = {}) {
   const style = fs.readFileSync(STYLE_FILE, 'utf8');
   const examples = readExamples();
   const ex = examples.length
     ? `\n\n## Reference scripts from this series (match their voice, rhythm and structure — never copy them)\n${examples.map((e, i) => `### Example ${i + 1}\n${e.text}`).join('\n\n')}`
     : '';
   const length = seconds === 'auto'
-    ? `LENGTH_SECONDS: auto — choose what the topic needs, between 20 and 60 s\nTARGET_WORDS: auto (≈ 2.6 words per second of your chosen length; usually 50–130)`
+    ? `LENGTH_SECONDS: auto — choose what the topic needs, between 20 and 120 s\nTARGET_WORDS: auto (≈ 2.6 words per second of your chosen length; usually 50–310)`
     : `LENGTH_SECONDS: ${seconds}\nTARGET_WORDS: ${Math.round(seconds * WORDS_PER_SECOND)} (stay within ±10%; count only the SCRIPT words)`;
+  const part = chapter
+    ? `\n\n## Chapter ${chapter.index + 1} of ${chapter.total}\nThis is ONE chapter of a longer video (${chapter.seconds} s of it). Write only this chapter: continue the argument from where the previous chapter stopped, do not repeat the opening hook or the series question if a previous chapter already used it, and end on a line that leads naturally into the next chapter (the last chapter closes the video). Keep the same title only as the video title; the SCRIPT must be this chapter's narration alone.${chapter.prevTail ? `\nThe previous chapter ended with: “${chapter.prevTail}”` : ''}`
+    : '';
   return [
     { role: 'system', content: `[[TASK:SCRIPT]]\nYou are the head writer of a faceless Arabic science-explainer reel series. Follow this style guide exactly.\n\n${style}${ex}${DIALECT_RULE[dialect] || ''}` },
-    { role: 'user', content: `TOPIC: ${topic}\n${length}${researchBlock(research)}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
+    { role: 'user', content: `TOPIC: ${topic}\n${length}${part}${researchBlock(research)}\nReply in the exact TITLE / SCRIPT / SOURCES format. No other text.` },
   ];
 }
 

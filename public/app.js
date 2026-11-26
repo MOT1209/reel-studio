@@ -1,5 +1,5 @@
 // Reel Studio — UI shell (vanilla JS modules, RTL Arabic). All LLM/user text is inserted escaped.
-import { $, esc, api, toast, diffHtml, act as actToast } from './ui.js';
+import { $, esc, api, toast, diffHtml, fmtTime, act as actToast } from './ui.js';
 import { mountEditor } from './editor.js';
 import { mountLibrary } from './views/library.js';
 import { mountFonts } from './views/fonts.js';
@@ -72,7 +72,7 @@ async function loadProjects() {
   $('#projects').innerHTML = projects.length ? projects.map((p) => `
     <li data-id="${esc(p.id)}" class="${current?.id === p.id ? 'active' : ''}">
       <div class="t">${esc(p.title || p.topic)}</div>
-      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${p.seconds === 'auto' ? 'أوتو' : p.seconds + ' ث'} · ${esc(p.createdAt.slice(0, 10))}</div>
+      <div class="m">${STAGES.map((s) => `<span class="pip ${esc(p.statuses[s])}" title="${STAGE_AR[s]}"></span>`).join('')} · ${p.seconds === 'auto' ? 'أوتو' : p.seconds >= 90 ? Math.round(p.seconds / 60) + ' دقيقة' : p.seconds + ' ث'}${p.chapters ? ` · ${p.chapters} فصل` : ''} · ${esc(p.createdAt.slice(0, 10))}</div>
     </li>`).join('') : '<li class="hint">لسه مفيش مشاريع.</li>';
   document.querySelectorAll('#projects li[data-id]').forEach((li) => li.addEventListener('click', () => openProject(li.dataset.id)));
 }
@@ -169,7 +169,7 @@ function render() {
     <div class="phead">
       <div>
         <h2>${esc(p.script?.title || p.topic)}</h2>
-        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds + ' ثانية'} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
+        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds >= 90 ? Math.round(p.seconds / 60) + ' دقيقة' : p.seconds + ' ثانية'}${p.chapters?.length ? ` · ${p.chapters.length} فصول (${p.chapterProgress?.done || 0} خلصوا)` : ''} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
       </div>
       <div class="btns">
         <span id="runBtns">${runBtns(p)}</span>
@@ -179,6 +179,7 @@ function render() {
       </div>
     </div>
     <div class="stages">${stagesHtml(p)}</div>
+    ${p.chapters?.length ? chaptersHtml(p) : ''}
     ${selStage === 'editor' ? '<div id="editorHost"></div>' : `<div class="work">
       <div class="panel" id="stagePanel"></div>
       <div class="panel">
@@ -202,6 +203,17 @@ function render() {
     act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(STAGES.map((s) => [s, b.dataset.pall]))) }))));
   if (selStage !== 'editor') renderStagePanel();
 }
+/** Chapter progress strip: one line per chapter with its five stage pips (the plan lives in project.json). */
+function chaptersHtml(p) {
+  const pr = p.chapterProgress || { total: p.chapters.length, done: 0, seconds: 0 };
+  const rows = p.chapters.map((ch) => {
+    const pips = STAGES.map((s) => `<span class="pip ${esc(ch.stages?.[s] || 'idle')}" title="${STAGE_AR[s]}"></span>`).join('');
+    const len = ch.render?.duration ? `${Number(ch.render.duration).toFixed(1)} ث مترندرة` : `${ch.seconds} ث`;
+    return `<div class="row" style="gap:8px;align-items:center;padding:2px 0"><span class="mono">${esc(ch.id)}</span> <span>${esc(ch.title || '—')}</span> ${pips} <span class="hint">${len}</span></div>`;
+  }).join('');
+  return `<div class="panel" style="margin:8px 0"><h3>الفصول — ${pr.done}/${pr.total} خلصوا · ${fmtTime(pr.seconds)} مترندر</h3>${rows}</div>`;
+}
+
 const runBtns = (p) => (p.running ? `<button id="btnCancel" class="danger">■ إلغاء (${STAGE_AR[p.running]})</button>` : `<button id="btnRun" class="primary">▶ كمّل</button>`);
 function bindRunBtns(p) {
   $('#btnRun')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/run`, { method: 'POST' })));

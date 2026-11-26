@@ -1121,8 +1121,8 @@
     }
     await Promise.all(jobs);
   }
-  async function fetchData(id) {
-    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/render-data`, { cache: 'no-store' });
+  async function fetchData(id, chapter = null) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/render-data${chapter ? `?chapter=${encodeURIComponent(chapter)}` : ''}`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`render-data ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
   }
@@ -1142,10 +1142,11 @@
   async function boot() {
     const q = new URLSearchParams(location.search);
     const id = q.get('project');
+    const chapter = q.get('chapter');
     if (!id) throw new Error('missing ?project=');
     PREVIEW = q.get('play') === '1';
     if (PREVIEW) document.body.classList.add('fit');
-    await setup(await fetchData(id));
+    await setup(await fetchData(id, chapter));
     window.drawFrame = drawFrame;
     window.prepareFrame = prepareFrame;
     drawFrame(Number(q.get('t')) || D.start);
@@ -1222,7 +1223,7 @@
       if (m.type === 'reel:guides') GUIDES = !!m.on;
       if (m.type === 'reel:play') setPlaying(true);
       if (m.type === 'reel:pause') setPlaying(false);
-      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
+      if (m.type === 'reel:reload') { const was = PLAYING; setPlaying(false); await setup(await fetchData(id, chapter)); setMusic(); goTo(Math.min(tau, D.duration)); if (was) setPlaying(true); }
     });
     requestAnimationFrame(loop);
   }

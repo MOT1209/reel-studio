@@ -6,7 +6,7 @@ import { legacyEngine } from './engines/legacy.mjs';
 import { outToSrc } from './timeline.mjs';
 
 export { run, probeDuration, checkFfmpeg, FFMPEG, FFPROBE, trackChild, killAllChildren, activeProcessCount } from './proc.mjs';
-export { writeSfx, mixAudio, muxFinal, contactSheet, QUALITY, CODECS, validateOutput, verifyVideo, countFrames, encodeSegmented } from './engines/ffmpeg.mjs';
+export { writeSfx, mixAudio, muxFinal, concatAudio, concatVideos, contactSheet, QUALITY, CODECS, validateOutput, verifyVideo, countFrames, encodeSegmented } from './engines/ffmpeg.mjs';
 export { launchBrowser, workerCount, parseWorkers, MAX_WORKERS } from './engines/legacy.mjs';
 
 export const FPS = 30;

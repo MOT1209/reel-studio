@@ -22,7 +22,7 @@ function loadScripts() {
   return scriptsReady;
 }
 
-export const Reel = ({ projectId }) => {
+export const Reel = ({ projectId, chapter = null }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const canvasRef = useRef(null);
@@ -34,14 +34,14 @@ export const Reel = ({ projectId }) => {
     (async () => {
       await loadScripts();
       const r = window.ReelRenderer.create(canvasRef.current, { host: 'remotion' });
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/render-data`, { cache: 'no-store' });
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/render-data${chapter ? `?chapter=${encodeURIComponent(chapter)}` : ''}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`render-data ${res.status}: ${(await res.text()).slice(0, 200)}`);
       await r.setup(await res.json());
       if (alive) setRenderer(r);
       continueRender(boot);
     })().catch((e) => cancelRender(e)); // fails the render at once with the real error (no 30 s timeout)
     return () => { alive = false; };
-  }, [projectId, boot]);
+  }, [projectId, chapter, boot]);
 
   useEffect(() => {
     if (!renderer) return;

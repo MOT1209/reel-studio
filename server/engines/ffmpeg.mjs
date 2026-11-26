@@ -275,6 +275,36 @@ export async function muxFinal({ video, audio, out, signal, expect = null }) {
   } finally { fs.rmSync(tmp, { force: true }); }
 }
 
+/** Joins chapter voice tracks into one MP3 (re-encoded, so a mixed set of TTS outputs still joins cleanly). */
+export async function concatAudio({ files, out, signal }) {
+  if (!files.length) throw new Error('concatAudio needs at least one file');
+  const inputs = files.flatMap((f) => ['-i', f]);
+  const filter = files.map((_, i) => `[${i}:a]`).join('') + `concat=n=${files.length}:v=0:a=1[out]`;
+  await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', filter, '-map', '[out]', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
+}
+
+/**
+ * Concatenates finished chapter MP4s with the concat demuxer. Video is copied (identical codec/size/fps, exact frame
+ * count). Audio is RE-ENCODED on purpose: AAC frames are 1024 samples and every segment carries encoder priming, so
+ * `-c:a copy` leaves ~26 ms of un-trimmed audio at every join — a 15-chapter video would be ~350 ms out of sync by
+ * the end (measured: 3× 2 s chapters drift 16 → 42 → 70 ms with copy, 16 → 22 → 26 ms with one AAC re-encode).
+ * Writes <out>.part.mp4, validates it with ffprobe when `expect` is given, then renames.
+ */
+export async function concatVideos({ files, out, signal, expect = null }) {
+  const list = `${out}.concat.txt`;
+  const tmp = `${out}.part.mp4`;
+  try {
+    fs.writeFileSync(list, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
+    await run(FFMPEG, ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', '-movflags', '+faststart', tmp], { signal });
+    const probe = expect ? await validateOutput(tmp, expect) : null;
+    fs.renameSync(tmp, out);
+    return probe;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+    fs.rmSync(list, { force: true });
+  }
+}
+
 /** Number of video frames (packets) in a file — proves a segment or an output has exactly the frames it should. */
 export async function countFrames(file) {
   const { out } = await run(FFPROBE, ['-v', 'error', '-count_packets', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', file]);

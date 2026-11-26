@@ -4,10 +4,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, getSettings, resolveFonts, resolvePalette, writeFileAtomic } from './settings.mjs';
-import { chatStream, ttsWithTimestamps, ttsOpenAI, transcribeWords, applyPronunciation } from './apis.mjs';
-import { estimateWords } from './estimate.mjs';
-import { scriptMessages, researchMessages, parseScript, tokenize, countWords, charsToWords, wordsWithChars, alignWords, WORDS_PER_SECOND, LENGTHS } from './text.mjs';
-import { storyboardMessages, reviewMessages, sceneMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { chatStream } from './apis.mjs';
+import { countWords, LENGTHS } from './text.mjs';
+import { sceneMessages, extractJson, repairStoryboard, storyboardNouns, TEMPLATES } from './storyboard.mjs';
+import { LONG_FORM_SECONDS, planChapters, newChapter, assembleProject, distributeEdits, splitScriptByWordCounts, chapterProgress, chapterEdit } from './chapters.mjs';
+import { makeStages } from './stage-run.mjs';
 import { assertStoryboard } from './scene-schema.mjs';
 import { iconsFor } from './icons.mjs';
 import { redact, log as slog } from './logger.mjs';
@@ -47,9 +48,23 @@ function save(p) {
   bus(p.id).emit('event', { type: 'state', data: publicProject(p) });
 }
 
+/** Chapter summary for the UI/SSE — the full records (words, storyboards) stay on disk and out of every state event. */
+function publicChapters(chs) {
+  return (chs || []).map((ch) => ({
+    id: ch.id, index: ch.index, title: ch.title, seconds: ch.seconds, stages: ch.stages, error: ch.error,
+    words: ch.words?.length || 0,
+    render: ch.render ? { duration: ch.render.duration, frames: ch.render.frames, file: ch.render.file, status: ch.render.status, engine: ch.render.engine || null, fallbackFrom: ch.render.fallbackFrom || null } : null,
+  }));
+}
+
 export function publicProject(p) {
-  const { lastPreview, icons, ...rest } = p;
-  return { ...rest, running: running.has(p.id) ? running.get(p.id).stage : null, iconKeys: icons ? Object.fromEntries(Object.entries(icons).map(([k, v]) => [k, v.key])) : null };
+  const { lastPreview, icons, chapters, ...rest } = p;
+  return {
+    ...rest, running: running.has(p.id) ? running.get(p.id).stage : null,
+    chapters: chapters?.length ? publicChapters(chapters) : null,
+    iconKeys: icons ? Object.fromEntries(Object.entries(icons).map(([k, v]) => [k, v.key])) : null,
+    chapterProgress: chapters?.length ? chapterProgress(p) : null,
+  };
 }
 
 export function getProject(id) {
@@ -62,6 +77,8 @@ export function getProject(id) {
   catch (e) { slog('error', 'unreadable project.json — skipped', { project: id, err: e }); return null; }
   if (!p?.stages || !STAGES.every((s) => p.stages[s])) { slog('error', 'project.json has no stages — skipped', { project: id }); return null; }
   for (const s of STAGES) if (p.stages[s].status === 'running') { p.stages[s].status = 'error'; p.stages[s].error = 'interrupted (server restarted)'; }
+  // a chapter interrupted mid-stage goes back to idle: the next run resumes at that chapter
+  for (const ch of p.chapters || []) for (const s of Object.keys(ch.stages || {})) if (ch.stages[s] === 'running') ch.stages[s] = 'idle';
   cache.set(id, p);
   return p;
 }
@@ -69,7 +86,7 @@ export function getProject(id) {
 export function listProjects() {
   return fs.readdirSync(PROJECTS_DIR).filter(validId).map(getProject).filter(Boolean)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .map((p) => ({ id: p.id, topic: p.topic, title: p.script?.title || '', seconds: p.seconds, createdAt: p.createdAt, statuses: Object.fromEntries(STAGES.map((s) => [s, p.stages[s].status])), running: running.has(p.id) }));
+    .map((p) => ({ id: p.id, topic: p.topic, title: p.script?.title || '', seconds: p.seconds, createdAt: p.createdAt, statuses: Object.fromEntries(STAGES.map((s) => [s, p.stages[s].status])), running: running.has(p.id), chapters: p.chapters?.length || null }));
 }
 
 export function createProject({ topic, seconds = 30, approvals = {}, voiceMode = 'tts', options = {} }) {
@@ -77,6 +94,7 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
   if (!topic) throw httpError(400, 'topic is required');
   seconds = seconds === 'auto' ? 'auto' : Number(seconds);
   if (!LENGTHS.includes(seconds)) throw httpError(400, `length must be one of ${LENGTHS.join(', ')}`);
+  const chapterSeconds = Number(options.chapterSeconds);
   const id = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
   const p = {
     id, topic, seconds, createdAt: new Date().toISOString(), updatedAt: null,
@@ -85,7 +103,10 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
     options: {
       forceTemplate: TEMPLATES.includes(options.forceTemplate) ? options.forceTemplate : null, publish: options.publish ?? !!getSettings().youtube?.autoPublish,
       dialect: ['msa', 'levantine', 'gulf'].includes(options.dialect) ? options.dialect : 'egyptian', research: options.research !== false,
+      chapters: options.chapters === true ? true : options.chapters === false ? false : 'auto',
+      chapterSeconds: Number.isFinite(chapterSeconds) && chapterSeconds >= 5 && chapterSeconds <= 600 ? chapterSeconds : null,
     },
+    chapters: null,
     research: null,
     stages: Object.fromEntries(STAGES.map((s) => [s, { status: 'idle', error: null, log: [], startedAt: null, endedAt: null }])),
     script: null, voice: null, words: null, timing: null, storyboard: null, storyboardFixes: [], icons: null, render: null, clips: {},
@@ -120,6 +141,30 @@ function resetFrom(p, stage) {
   for (const s of STAGES.slice(STAGES.indexOf(stage))) {
     p.stages[s] = { status: 'idle', error: null, log: s === stage ? p.stages[s].log : [], startedAt: null, endedAt: null };
   }
+  // a long project keeps its progress per chapter: the same stage (and everything after it) is reset there too
+  if (p.chapters?.length) {
+    for (const ch of p.chapters) {
+      for (const s of STAGES.slice(STAGES.indexOf(stage))) {
+        ch.stages[s] = 'idle';
+        if (s === 'script') { ch.script = null; ch.title = ''; }
+        if (s === 'voice') ch.voice = null;
+        if (s === 'timing') { ch.words = null; ch.timing = null; }
+        if (s === 'storyboard') { ch.storyboard = null; ch.storyboardFixes = []; ch.icons = null; }
+        if (s === 'render') { ch.render = null; ch.clips = {}; }
+      }
+      ch.error = null;
+    }
+    assembleProject(p);
+  }
+}
+
+/**
+ * Chapters are used when asked for explicitly (chapters: true, e.g. a 3× 10 s test or a deliberately short-chapter
+ * video) or above the long-form threshold; chapters: false and an uploaded voice-over keep a project single-pass.
+ */
+function isChaptered(p) {
+  if (p.options?.chapters === false || p.voiceMode === 'upload' || typeof p.seconds !== 'number') return false;
+  return p.options?.chapters === true || p.seconds >= LONG_FORM_SECONDS;
 }
 
 // ---- control -------------------------------------------------------------------
@@ -127,6 +172,11 @@ export function runPipeline(id) {
   const p = getProject(id);
   if (!p) throw httpError(404, 'project not found');
   if (running.has(id)) return false;
+  if (!p.chapters?.length && isChaptered(p)) {
+    p.chapters = planChapters(p.seconds, { chapterSeconds: p.options?.chapterSeconds || undefined }).map(newChapter);
+    log(p, 'script', `long-form: ${p.chapters.length} chapters × ~${Math.round(p.seconds / p.chapters.length)} s — progress is saved after every chapter`);
+    save(p);
+  }
   const entry = { stage: null, controller: null };
   running.set(id, entry);
   entry.promise = (async () => {
@@ -154,6 +204,8 @@ export function runPipeline(id) {
           st.status = cancelled ? 'idle' : 'error';
           st.error = cancelled ? null : e.message;
           st.endedAt = new Date().toISOString();
+          // a chapter left "running" is not done: the next run resumes at it
+          for (const ch of p.chapters || []) if (ch.stages?.[stage] === 'running') ch.stages[stage] = 'idle';
           log(p, stage, cancelled ? '■ cancelled' : `✖ ${e.message}`);
           save(p);
           break;
@@ -243,7 +295,20 @@ export async function editStage(id, stage, body) {
   const st = p.stages[stage];
   if (stage === 'script') {
     const text = String(body?.text ?? '').trim();
-    p.script = { ...(p.script || {}), title: String(body.title ?? p.script?.title ?? '').trim(), text, sources: Array.isArray(body.sources) ? body.sources.map(String) : p.script?.sources || [], edited: true, words: countWords(text) };
+    const title = String(body.title ?? p.script?.title ?? '').trim();
+    const sources = Array.isArray(body.sources) ? body.sources.map(String) : p.script?.sources || [];
+    if (p.chapters?.length) {
+      // an edited full script goes back to the chapters at line boundaries, keeping their sizes
+      const parts = splitScriptByWordCounts(text, p.chapters.map((ch) => ch.words?.length || ch.script?.words || 1));
+      p.chapters.forEach((ch, i) => {
+        ch.script = { ...(ch.script || {}), title, text: parts[i], sources, words: countWords(parts[i]), edited: true };
+        if (i === 0) ch.title = title || ch.title;
+        ch.stages.script = 'done';
+      });
+      assembleProject(p);
+    } else {
+      p.script = { ...(p.script || {}), title, text, sources, edited: true, words: countWords(text) };
+    }
   } else if (stage === 'timing') {
     body.words.forEach((w, i) => {
       const s = Number(w.start), e = Number(w.end);
@@ -251,11 +316,12 @@ export async function editStage(id, stage, body) {
       if (Number.isFinite(e)) p.words[i].end = +Math.max(e, p.words[i].start + 0.05).toFixed(3);
       if (typeof w.text === 'string' && w.text.trim()) p.words[i].text = w.text.trim();
     });
+    if (p.chapters?.length) distributeEdits(p, p.words, null);
   } else {
     const { storyboard, fixes } = repairStoryboard(body._parsed, p.words, { forceTemplate: p.options.forceTemplate });
     assertStoryboard(storyboard, { words: p.words });
-    p.storyboard = storyboard; p.storyboardFixes = fixes;
-    p.icons = iconsFor(storyboardNouns(storyboard));
+    if (p.chapters?.length) distributeEdits(p, null, storyboard);
+    else { p.storyboard = storyboard; p.storyboardFixes = fixes; p.icons = iconsFor(storyboardNouns(storyboard)); }
   }
   log(p, stage, '✎ edited by user');
   if (st.status === 'idle' || st.status === 'error') st.status = 'done';
@@ -295,6 +361,7 @@ export async function saveUploadFile(id, tmp, filename, mime) {
     const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(64); const got = fs.readSync(fd, head, 0, 64, 0); fs.closeSync(fd);
     if (!got) throw httpError(400, 'empty upload');
     if (!looksLikeMedia(head.subarray(0, got))) throw httpError(415, UPLOAD_BAD);
+    if (p.chapters?.length) throw httpError(409, 'المشروع ده بالنظام الفصلي — الصوت المرفوع للمشاريع القصيرة فقط');
     await stopForEdit(p, 'new voice-over uploaded');
     const ext = (path.extname(filename || '').toLowerCase().match(/^\.(mp3|wav|m4a|aac|ogg|opus|flac|webm|mp4)$/) || [, 'mp3'])[1];
     for (const f of fs.readdirSync(projectDir(id))) if (f.startsWith('upload.')) fs.rmSync(path.join(projectDir(id), f));
@@ -320,6 +387,7 @@ export function looksLikeMedia(buf) {
 export async function setVoiceMode(id, mode) {
   const p = getProject(id);
   if (!p) throw httpError(404, 'project not found');
+  if (p.chapters?.length && mode === 'upload') throw httpError(409, 'المشروع ده بالنظام الفصلي — الصوت المرفوع للمشاريع القصيرة فقط');
   if ((mode === 'upload' ? 'upload' : 'tts') !== p.voiceMode) await stopForEdit(p, 'voice mode changed');
   p.voiceMode = mode === 'upload' ? 'upload' : 'tts';
   if (p.stages.voice.status !== 'idle') resetFrom(p, 'voice');
@@ -327,259 +395,8 @@ export async function setVoiceMode(id, mode) {
 }
 
 // ---- stages --------------------------------------------------------------------
-const STAGE_FN = {
-  async script(p, signal) {
-    const s = getSettings();
-    const auto = p.seconds === 'auto';
-    const target = auto ? null : Math.round(p.seconds * WORDS_PER_SECOND);
-    log(p, 'script', `LLM ${s.llm.baseUrl} · model ${s.llm.model} · ${auto ? 'length: auto (LLM decides)' : `target ${target} words`} · ${{ msa: 'فصحى', levantine: 'شامي', gulf: 'خليجي' }[p.options?.dialect] || 'عامية مصرية'}`);
-    bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', reset: true } });
-    p.research = null;
-    if (p.options?.research !== false) {
-      // research pass: notes for the writer, shown to the user as UNVERIFIED (a failure only skips it)
-      try {
-        const r = await chatStream(s, researchMessages(p.topic), { signal, temperature: 0.2, maxTokens: 1500 });
-        const j = extractJson(r.text);
-        const facts = (Array.isArray(j.facts) ? j.facts : []).slice(0, 10).map((f) => ({
-          claim: String(f?.claim || '').slice(0, 300), confidence: ['high', 'medium', 'low'].includes(f?.confidence) ? f.confidence : 'low',
-          source: typeof f?.source === 'string' && f.source.trim() ? f.source.slice(0, 200) : null,
-        })).filter((f) => f.claim);
-        p.research = { angle: String(j.angle || '').slice(0, 200), facts, misconceptions: (Array.isArray(j.misconceptions) ? j.misconceptions : []).map(String).slice(0, 5), verified: false };
-        log(p, 'script', `research: ${facts.length} notes (unverified) · ${facts.filter((f) => f.confidence === 'high').length} high-confidence`);
-      } catch (e) {
-        if (signal.aborted) throw e;
-        log(p, 'script', `⚠ research pass skipped (${e.message})`);
-      }
-    }
-    const { text, model } = await chatStream(s, scriptMessages(p.topic, p.seconds, { dialect: p.options?.dialect, research: p.research }), {
-      signal, onDelta: (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'script', delta: d } }),
-    });
-    const parsed = parseScript(text);
-    const n = countWords(parsed.text);
-    p.script = { ...parsed, words: n, model: model || s.llm.model };
-    log(p, 'script', `"${parsed.title}" — ${n} words ≈ ${(n / WORDS_PER_SECOND).toFixed(0)} s${target ? ` (target ${target})` : ''}${model ? ' · ' + model : ''}`);
-    if (target && Math.abs(n - target) > target * 0.25) log(p, 'script', `⚠ word count is ${n > target ? 'above' : 'below'} target by ${Math.abs(n - target)} — the video will be ~${(n / WORDS_PER_SECOND).toFixed(0)} s`);
-    if ((p.options?.dialect || 'egyptian') === 'egyptian' && !/عارف\s+ليه/.test(parsed.text)) log(p, 'script', '⚠ series question «عارف ليه؟» not found');
-  },
-
-  async voice(p, signal) {
-    if (!p.script?.text) throw new Error('no script');
-    const dir = projectDir(p.id);
-    const out = path.join(dir, 'voice.mp3');
-    if (p.voiceMode === 'upload') {
-      if (!p.upload) throw new Error('voice mode is "upload" but no file was uploaded');
-      log(p, 'voice', `converting ${p.upload.file} → voice.mp3`);
-      await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-y', '-i', path.join(dir, p.upload.file), '-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', out], { signal });
-      p.voice = { file: 'voice.mp3', source: 'upload', duration: await probeDuration(out) };
-      log(p, 'voice', `voice-over ${p.voice.duration.toFixed(2)} s`);
-      return;
-    }
-    const s = getSettings();
-    const spoken = applyPronunciation(p.script.text, s.pronunciation);
-    if (s.tts?.provider === 'openai') {
-      log(p, 'voice', `OpenAI-compatible TTS ${s.openaiTts.baseUrl} · ${s.openaiTts.model} · voice ${s.openaiTts.voice} · speed ${s.openaiTts.speed}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
-      fs.writeFileSync(out, await ttsOpenAI(s, spoken.text, { signal }));
-      p.voice = { file: 'voice.mp3', source: 'openai', duration: await probeDuration(out) };
-      log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s (no timestamps — timing comes next)`);
-      return;
-    }
-    log(p, 'voice', `ElevenLabs voice ${s.elevenlabs.voiceId || '(none)'} · ${s.elevenlabs.modelId} · speed ${s.elevenlabs.speed ?? 1}${spoken.text !== p.script.text ? ' · pronunciation fixes applied' : ''}`);
-    const { audio, chars } = await ttsWithTimestamps(s, spoken.text, { signal });
-    fs.writeFileSync(out, audio);
-    const timed = charsToWords(chars);
-    fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'elevenlabs', chars, words: timed.map(({ chars: _c, ...w }) => w) }));
-    p.voice = { file: 'voice.mp3', source: 'elevenlabs', duration: await probeDuration(out), chars: chars.length, timedWords: timed.length };
-    log(p, 'voice', `voice.mp3 ${p.voice.duration.toFixed(2)} s · ${chars.length} timed characters → ${timed.length} words`);
-  },
-
-  async timing(p, signal) {
-    const dir = projectDir(p.id);
-    let timed, estimated = false;
-    const s0 = getSettings();
-    if (['upload', 'openai'].includes(p.voice?.source) && !s0.deepgram.apiKey) {
-      // no speech-to-text configured: estimate from the audio's own pauses (speech clock, words ∝ letters)
-      log(p, 'timing', '⚠ no Deepgram key — estimating word timing from the pauses in the audio; check it in the editor');
-      const dw = await estimateWords(p.script.text, path.join(dir, 'voice.mp3'), { signal });
-      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'estimate', words: dw }));
-      timed = wordsWithChars(dw);
-      estimated = true;
-    } else if (['upload', 'openai'].includes(p.voice?.source)) {
-      const s = s0;
-      log(p, 'timing', `Deepgram ${s.deepgram.model} (${s.deepgram.language}) on the ${p.voice.source === 'upload' ? 'uploaded' : 'generated'} voice`);
-      const buf = fs.readFileSync(path.join(dir, 'voice.mp3'));
-      const dw = await transcribeWords(s, buf, 'audio/mpeg', { signal });
-      if (!dw.length) throw new Error('Deepgram returned no words');
-      fs.writeFileSync(path.join(dir, 'voice-timing.json'), JSON.stringify({ source: 'deepgram', words: dw }));
-      timed = wordsWithChars(dw);
-      log(p, 'timing', `Deepgram heard ${dw.length} words`);
-    } else {
-      const vt = JSON.parse(fs.readFileSync(path.join(dir, 'voice-timing.json'), 'utf8'));
-      timed = charsToWords(vt.chars);
-    }
-    const tokens = tokenize(p.script.text);
-    const words = alignWords(tokens, timed);
-    p.words = words;
-    const weak = words.filter((w) => w.weak);
-    const avg = words.reduce((a, w) => a + w.match, 0) / Math.max(1, words.length);
-    p.timing = { weak: weak.length, matchAvg: +avg.toFixed(3), source: estimated ? 'estimate' : p.voice.source, estimated };
-    log(p, 'timing', `aligned ${words.length} script words · mean char match ${(avg * 100).toFixed(0)}% · ${weak.length} weak`);
-    if (weak.length) log(p, 'timing', `weak: ${weak.slice(0, 12).map((w) => `#${w.i} ${w.text}`).join(', ')}${weak.length > 12 ? '…' : ''}`);
-  },
-
-  async storyboard(p, signal) {
-    const s = getSettings();
-    const duration = p.voice.duration;
-    const ctx = { title: p.script.title, words: p.words, duration, forceTemplate: p.options.forceTemplate };
-    const emit = (d) => bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', delta: d } });
-    bus(p.id).emit('event', { type: 'llm', data: { stage: 'storyboard', reset: true } });
-    const first = await chatStream(s, storyboardMessages(ctx), { signal, onDelta: emit, temperature: 0.6 });
-    const r1 = repairStoryboard(extractJson(first.text), p.words, { forceTemplate: p.options.forceTemplate });
-    log(p, 'storyboard', `draft: ${r1.storyboard.scenes.length} scenes · ${r1.fixes.length} repairs`);
-    r1.fixes.forEach((f) => log(p, 'storyboard', `  fix: ${f}`));
-    let final = r1;
-    try {
-      emit('\n\n— self-review —\n');
-      const second = await chatStream(s, reviewMessages({ ...ctx, storyboard: r1.storyboard, notes: r1.notes }), { signal, onDelta: emit, temperature: 0.3 });
-      const r2 = repairStoryboard(extractJson(second.text), p.words, { forceTemplate: p.options.forceTemplate });
-      if (r2.storyboard.scenes.length >= 1) {
-        final = r2;
-        log(p, 'storyboard', `self-review: ${r2.storyboard.scenes.length} scenes · ${r2.fixes.length} repairs`);
-        r2.fixes.forEach((f) => log(p, 'storyboard', `  fix: ${f}`));
-      }
-    } catch (e) {
-      if (signal.aborted) throw e;
-      log(p, 'storyboard', `⚠ self-review failed (${e.message}) — keeping the draft`);
-    }
-    assertStoryboard(final.storyboard, { words: p.words });
-    log(p, 'storyboard', `scene JSON valid (schema ${final.storyboard.scenes.length} scenes)`);
-    p.storyboard = final.storyboard;
-    p.storyboardFixes = final.fixes;
-    await autoVisuals(p, signal);
-    p.icons = iconsFor(storyboardNouns(final.storyboard));
-    log(p, 'storyboard', `templates: ${final.storyboard.scenes.map((sc) => `${sc.type}/${sc.template}@${sc.at}`).join(' · ')}`);
-    log(p, 'storyboard', `icons: ${Object.entries(p.icons).map(([n, v]) => `${n}→${v.key}`).join(', ')}`);
-  },
-
-  async render(p, signal) {
-    const dir = projectDir(p.id);
-    // every engine receives validated scene JSON — an invalid storyboard stops here with the exact problems
-    assertStoryboard(p.storyboard, { words: p.words });
-    const E = effectiveEdit(p.edit);
-    const L = layoutFor(E.export.aspect, E.export.resolution);
-    { // validation gate: never start a long render on input the renderer cannot use
-      const rd = renderData(p);
-      const problems = checkRenderInputs({ words: p.words, storyboard: p.storyboard, edit: E, voiceExists: fs.existsSync(path.join(dir, 'voice.mp3')), hasAsset: (id) => !!getAsset(id), duration: rd.duration });
-      if (problems.length) throw new Error(`render input check failed: ${problems.join('; ')}`);
-    }
-    const FPS = E.export.fps;
-    // video clips (scene media and overlays) → frames on disk at the output fps and size
-    p.clips = {};
-    const clipJobs = [];
-    const full = renderData(p);
-    full.scenes.forEach((sc, k) => { if (sc.image && getAsset(sc.image)?.kind === 'video') clipJobs.push([`scene-${k}`, sc.image, sc.imageOffset || 0, sc.end - sc.start + 1]); });
-    for (const o of E.overlays) if (o.kind === 'video') clipJobs.push([`ov-${o.id}`, o.asset, o.offset || 0, o.end - o.start]);
-    for (const [ref, asset, offset, seconds] of clipJobs) {
-      const info = await prepareClip(dir, asset, { offset, seconds, fps: FPS, maxW: L.width, maxH: L.height, signal });
-      p.clips[ref] = info;
-      log(p, 'render', `clip ${ref}: ${info.count} frames from ${getAsset(asset).name}`);
-    }
-    save(p);
-    const data = renderData(p);
-    const { duration, start, segments } = data;
-    const audioCfg = getSettings().audio;
-    log(p, 'render', `${duration.toFixed(2)} s${E.sequence ? ` · custom order: ${segments.filter((x) => !isHold(x)).length} parts, ${segments.filter(isHold).length} pause(s)` : `${start || data.end < data.full ? ` (trim ${start.toFixed(2)}→${data.end.toFixed(2)})` : ''}${segments.length > 1 ? ` · ${segments.length - 1} cut(s)` : ''}`} · ${Math.ceil(duration * FPS)} frames @ ${FPS} fps · ${L.width}×${L.height} (${E.export.aspect}) · ${E.export.quality}`);
-    if (data.platform?.check.level === 'over') log(p, 'render', `⚠ ${data.platform.check.message}`);
-    const tmpVideo = path.join(dir, 'frames.mp4');
-    const key = crypto.createHash('sha256').update(JSON.stringify({ data, q: E.export.quality, v: 2 })).digest('hex').slice(0, 16);
-    let lastEmit = 0;
-    const total = Math.ceil(duration * FPS - 1e-9);
-    const job = await renderVideo({
-      project: p.id, engine: E.export.engine, fallback: getSettings().render.fallback !== false,
-      source: {
-        projectId: p.id, port: serverPort, data, url: `http://127.0.0.1:${serverPort}/render.html?project=${p.id}`,
-        timeOf: (i) => outToSrc(i / FPS, segments),
-      },
-      total, out: tmpVideo, fps: FPS, width: L.width, height: L.height, quality: E.export.quality, codec: E.export.codec, bitrate: E.export.bitrate,
-      segDir: path.join(dir, 'segments'), key, signal, log: (l) => log(p, 'render', l),
-      onJob: (j) => bus(p.id).emit('event', { type: 'job', data: j }),
-      onFrame: (i, total, jpg) => {
-        const now = Date.now();
-        if (now - lastEmit > 200 || i === total - 1) { lastEmit = now; bus(p.id).emit('event', { type: 'progress', data: { stage: 'render', frame: i + 1, total } }); }
-        if (jpg) { p.lastPreview = jpg; bus(p.id).emit('event', { type: 'preview', data: { t: i / FPS, jpeg: jpg.toString('base64') } }); }
-      },
-    });
-    log(p, 'render', 'mixing voice + SFX' + (E.audio.music ? ' + music' : '') + ', normalising to −14 LUFS');
-    // SFX live in output time: a scene change or a pop that was cut out makes no sound
-    const toOut = (t) => srcToOut(t, segments);
-    const cuts = data.scenes.slice(1).map((sc) => toOut(sc.start)).filter((t) => t !== null);
-    const ticks = [];
-    data.scenes.forEach((sc) => sc.items.forEach((it) => { if (it.at != null) { const o = toOut(p.words[it.at].start); if (o !== null) ticks.push(o); } }));
-    // audio is made exactly as long as the rendered frames (frames/fps ≥ duration), so the mux never has to cut video
-    const vdur = Math.ceil(duration * FPS - 1e-9) / FPS;
-    writeSfx(path.join(dir, 'sfx.wav'), vdur, audioCfg.whoosh ? cuts : [], audioCfg.tick ? ticks.sort((a, b) => a - b) : [], E.audio.sfxVolume);
-    const musicAsset = E.audio.music && getAsset(E.audio.music.asset);
-    if (E.audio.music && !musicAsset) log(p, 'render', '⚠ music file is no longer in the library — rendering without it');
-    await mixAudio({
-      voice: path.join(dir, 'voice.mp3'), sfx: path.join(dir, 'sfx.wav'), out: path.join(dir, 'mix.m4a'), duration: vdur, segments, voiceVolume: E.audio.voiceVolume,
-      clips: await clipSounds(E.overlays, E.audio.tracks || []),
-      music: musicAsset ? { ...E.audio.music, file: assetFile(musicAsset) } : null, signal, log: (l) => log(p, 'render', l),
-    });
-    // mux into a temp file, prove it with ffprobe (size, fps, codec, EXACT frame count, audio, durations), then rename
-    const probe = await muxFinal({ video: tmpVideo, audio: path.join(dir, 'mix.m4a'), out: path.join(dir, 'video.mp4'), signal,
-      expect: { width: L.width, height: L.height, fps: FPS, frames: total, duration: vdur, codec: job.codec } });
-    log(p, 'render', `checked: ${probe.width}×${probe.height} · ${probe.fps} fps · ${probe.frames} frames · ${probe.video}/${probe.audio} · ${probe.duration.toFixed(2)} s`);
-    await contactSheet({ video: path.join(dir, 'video.mp4'), out: path.join(dir, 'contact.jpg'), duration, aspect: E.export.aspect });
-    // temporary files: segments, the silent video and the SFX track are not needed once the MP4 exists
-    for (const f of [tmpVideo, path.join(dir, 'sfx.wav')]) fs.rmSync(f, { force: true });
-    fs.rmSync(path.join(dir, 'segments'), { recursive: true, force: true });
-    const used = [...data.scenes.map((sc) => sc.image), ...E.overlays.map((o) => o.asset), ...(E.audio.tracks || []).map((x) => x.asset), musicAsset?.id].filter(Boolean);
-    p.render = {
-      file: 'video.mp4', contact: 'contact.jpg', duration: +duration.toFixed(3), frames: Math.ceil(duration * FPS), fps: FPS, theme: data.theme.name,
-      width: L.width, height: L.height, aspect: E.export.aspect, quality: E.export.quality, credits: creditsFor(used), at: new Date().toISOString(),
-      engine: job.engine, fallbackFrom: job.fallbackFrom, codec: job.codec, bitrate: E.export.bitrate, renderSeconds: job.seconds, job: job.id,
-    };
-    const outDir = getSettings().render.outputDir;
-    if (outDir) {
-      try {
-        fs.mkdirSync(outDir, { recursive: true });
-        const name = `${(p.topic || p.id).replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').trim().slice(0, 60) || p.id} - ${p.id}.mp4`;
-        fs.copyFileSync(path.join(dir, 'video.mp4'), path.join(outDir, name));
-        p.render.exported = path.join(outDir, name);
-        log(p, 'render', `copied to ${p.render.exported}`);
-      } catch (e) { log(p, 'render', `⚠ output folder: ${e.message}`); }
-    }
-    log(p, 'render', `video.mp4 ready (${(fs.statSync(path.join(dir, 'video.mp4')).size / 1e6).toFixed(1)} MB) · contact sheet saved${p.render.credits.length ? ` · ${p.render.credits.length} credits` : ''}`);
-  },
-};
-
-/**
- * Automatic visual selection: every "photo" scene without an image gets the best stock result for its query from the
- * first configured provider (Pexels → Pixabay → Unsplash), imported with its licence. Without a provider, or when the
- * search fails, the scene falls back to an illustrated template — never a broken frame.
- */
-async function autoVisuals(p, signal) {
-  const status = PV.providerStatus();
-  const provider = ['pexels', 'pixabay', 'unsplash'].find((k) => status[k].configured);
-  const orientation = { '9:16': 'portrait', '1:1': 'square', '16:9': 'landscape' }[effectiveEdit(p.edit).export.aspect];
-  for (const [k, sc] of p.storyboard.scenes.entries()) {
-    if (sc.template !== 'photo' || sc.image) continue;
-    if (signal?.aborted) throw new Error('cancelled');
-    const q = sc.query || sc.items.map((it) => it.icon).filter(Boolean).join(' ') || sc.title;
-    try {
-      if (!provider) throw new Error('مفيش مكتبة صور متوصلة (الإعدادات ← المكتبات)');
-      const r = await PV.search(provider, q, { kind: 'image', orientation, per: 5 });
-      if (!r.items.length) throw new Error(`مفيش نتايج لـ "${r.queryUsed}"`);
-      const a = await PV.importResult(provider, r.items[0], { folder: `project-${p.id}` });
-      sc.image = a.id;
-      log(p, 'storyboard', `visual: scene ${k + 1} ← ${status[provider].name} "${r.queryUsed}" (${a.license.name}${a.source.author ? ', ' + a.source.author : ''})`);
-    } catch (e) {
-      if (signal?.aborted) throw e;
-      sc.template = 'cards';
-      if (!sc.items.length) sc.items.push({ label: sc.title || '…', icon: sc.query?.split(' ')[0] || 'cell', value: null, at: null });
-      log(p, 'storyboard', `⚠ scene ${k + 1}: photo → cards (${e.message})`);
-    }
-  }
-}
+// The stage bodies live in stage-run.mjs (the same code runs a whole short project or one chapter of a long one).
+const STAGE_FN = makeStages({ log, save, bus, projectDir, renderData, port: () => serverPort });
 
 /**
  * Editor save: storyboard and/or word timings and/or the edit model in one call. Anything that changes the picture
@@ -610,8 +427,13 @@ export async function saveEdit(id, body) {
   }
   const edit = body?.edit ? cleanEdit(body.edit, { duration }) : null;
   await stopForEdit(p, 'editor change');
-  if (words) p.words = words;
-  if (sb) { p.storyboard = sb; p.storyboardFixes = fixes; p.icons = iconsFor(storyboardNouns(sb)); }
+  if (p.chapters?.length) {
+    // the editor works on the joined timeline; the edits are mapped back to the chapters that own those words
+    fixes = distributeEdits(p, words, sb);
+  } else {
+    if (words) p.words = words;
+    if (sb) { p.storyboard = sb; p.storyboardFixes = fixes; p.icons = iconsFor(storyboardNouns(sb)); }
+  }
   if (edit) p.edit = { ...(p.edit || {}), ...edit };
   if (words || sb) { if (['idle', 'error'].includes(p.stages.storyboard.status)) p.stages.storyboard.status = 'done'; if (p.stages.timing.status !== 'done') p.stages.timing.status = 'done'; }
   if (words || sb || edit) resetFrom(p, 'render');
@@ -649,8 +471,8 @@ export async function regenerateScene(id, k, { hint = '' } = {}) {
     assertStoryboard(rep.storyboard, { words: p.words });
     if (rep.storyboard.scenes.length !== scenes.length) throw httpError(422, 'the new scene would merge with a neighbour — try again');
     await stopForEdit(p, 'scene regeneration');
-    p.storyboard = rep.storyboard;
-    p.icons = iconsFor(storyboardNouns(rep.storyboard));
+    if (p.chapters?.length) distributeEdits(p, null, rep.storyboard);
+    else { p.storyboard = rep.storyboard; p.icons = iconsFor(storyboardNouns(rep.storyboard)); }
     resetFrom(p, 'render');
     const ns = rep.storyboard.scenes[k];
     log(p, 'storyboard', `↻ scene ${k + 1} regenerated: ${sc.template} → ${ns.template}${hint ? ` (hint: ${String(hint).slice(0, 60)})` : ''}${rep.fixes.length ? ` · ${rep.fixes.length} auto-fixes` : ''}`);
@@ -719,29 +541,39 @@ export function cancelPublish(id) { publishing.get(id)?.abort(); }
 /** Subtitle export follows the project's trim and digit style. */
 export function subtitleOptions(p) {
   const e = p.edit || {};
-  return { segments: renderData(p).segments, digits: e.typography?.digits || getSettings().look.typography?.digits || 'latin' };
+  // a chaptered video is always the joined chapters in order (trim/cuts/custom order are single-pass edits), so the
+  // subtitles use one full segment and stay in sync with the rendered video
+  const segments = p.chapters?.length ? [[0, Math.max(0.1, p.voice?.duration || 0)]] : renderData(p).segments;
+  return { segments, digits: e.typography?.digits || getSettings().look.typography?.digits || 'latin' };
 }
 
 /** Everything render.html needs; times are resolved here so the page stays deterministic. */
-export function renderData(p) {
-  if (!p.words || !p.storyboard) throw httpError(409, 'storyboard is not ready');
-  const E = effectiveEdit(p.edit);
+export function renderData(p, { chapter = null } = {}) {
+  const ch = chapter ? (p.chapters || []).find((x) => x.id === chapter) : null;
+  if (chapter && !ch) throw httpError(404, `chapter ${chapter} not found`);
+  // a chapter render gets the chapter's own words/storyboard/voice on a project-scoped view (asset and clip URLs
+  // live under the project) plus the project's export settings
+  const S = ch ? { ...ch, id: p.id, topic: p.topic, edit: chapterEdit(p.edit, ch), options: p.options } : p;
+  if (!S.words || !S.storyboard) throw httpError(409, ch ? `chapter ${chapter}: storyboard is not ready` : 'storyboard is not ready');
+  const E = effectiveEdit(S.edit);
   const L = layoutFor(E.export.aspect, E.export.resolution);
-  const typo = typographyFor(p.edit);
-  const lastEnd = p.words[p.words.length - 1]?.end || 0;
-  const full = Math.max(p.voice?.duration || 0, lastEnd + 0.3) + 0.6;
+  const typo = typographyFor(S.edit);
+  const lastEnd = S.words[S.words.length - 1]?.end || 0;
+  // the joined chapters already carry the 0.6 s tail in each chapter video; a single render still gets one
+  const joined = Array.isArray(S.chapters) && S.chapters.length > 0;
+  const full = Math.max(S.voice?.duration || 0, lastEnd + 0.3) + (joined ? 0 : 0.6);
   const start = Math.min(E.trim.start, full - 1);
   const end = E.trim.end ? Math.min(E.trim.end, full) : full;
   let segments = E.sequence ? sequenceToSegments(E.sequence) : keptSegments(start, end, E.cuts); // custom order wins
   // only the default trim/cut path falls back; a custom sequence is validated (cleanSequence) and kept as is
   if (!E.sequence && outDuration(segments) < 0.5) segments = [[start, end]];
-  const sc = p.storyboard.scenes;
+  const sc = S.storyboard.scenes;
   const scenes = sc.map((s, i) => ({
     ...s,
-    start: i === 0 ? 0 : p.words[s.at].start,
-    end: i + 1 < sc.length ? p.words[sc[i + 1].at].start : full,
-    items: s.items.map((it) => ({ ...it, t: it.at != null ? p.words[it.at].start : null })),
-    clip: p.clips?.[`scene-${i}`] ? clipRef(p, `scene-${i}`) : null,
+    start: i === 0 ? 0 : S.words[s.at].start,
+    end: i + 1 < sc.length ? S.words[sc[i + 1].at].start : full,
+    items: s.items.map((it) => ({ ...it, t: it.at != null ? S.words[it.at].start : null })),
+    clip: S.clips?.[`scene-${i}`] ? clipRef(S, `scene-${i}`) : null,
   }));
   const media = {};
   const addMedia = (id) => {
@@ -752,37 +584,15 @@ export function renderData(p) {
   scenes.forEach((s) => addMedia(s.image));
   E.overlays.forEach((o) => addMedia(o.asset));
   return {
-    id: p.id, title: p.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
+    id: p.id, title: S.script?.title || p.topic, seriesTag: getSettings().seriesTag, duration: outDuration(segments), start, end, full, segments, fps: E.export.fps,
     music: E.audio.music && getAsset(E.audio.music.asset) ? { src: `/api/assets/${E.audio.music.asset}/file`, volume: E.audio.music.volume, voiceVolume: E.audio.voiceVolume } : null,
     theme: { name: getSettings().look.theme, colors: resolvePalette(), grid: getSettings().look.grid !== false },
     layout: L, typography: typo, transition: E.transition,
     platform: E.export.platform ? { id: E.export.platform, ...PLATFORMS[E.export.platform], check: durationCheck(E.export.platform, outDuration(segments)) } : null,
-    words: p.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
-    accents: p.storyboard.accents, scenes, icons: p.icons || {}, media,
-    overlays: E.overlays.map((o) => ({ ...o, clip: p.clips?.[`ov-${o.id}`] ? clipRef(p, `ov-${o.id}`) : null })),
+    words: S.words.map(({ i, text, line, start: st, end: en }) => ({ i, text, line, start: st, end: en })),
+    accents: S.storyboard.accents, scenes, icons: S.icons || {}, media,
+    overlays: E.overlays.map((o) => ({ ...o, clip: S.clips?.[`ov-${o.id}`] ? clipRef(S, `ov-${o.id}`) : null })),
     fonts: { main: facesFor(typo.font), captions: facesFor(typo.captionFont) },
   };
-}
-/** Video overlays whose sound is turned up → mix inputs (source time). Files without an audio stream are skipped. */
-async function clipSounds(overlays, tracks = []) {
-  const out = [];
-  // independent audio tracks (sound effects, a second voice, extra music): same source-time mix as clip sounds, so cuts apply
-  for (const x of tracks) {
-    const a = getAsset(x.asset);
-    if (!a || a.kind !== 'audio' || !(x.volume > 0)) continue;
-    out.push({ file: assetFile(a), at: x.start, offset: x.offset || 0, length: Math.min(x.end - x.start, Math.max(0.1, (a.duration || 1e9) - (x.offset || 0))), volume: x.volume, fadeIn: x.fadeIn || 0, fadeOut: x.fadeOut || 0 });
-  }
-  for (const o of overlays) {
-    if (o.kind !== 'video' || !(o.volume > 0)) continue;
-    const a = getAsset(o.asset);
-    if (!a || !(await hasAudio(a))) continue;
-    out.push({ file: assetFile(a), at: o.start, offset: o.offset || 0, length: Math.min(o.end - o.start, Math.max(0.1, (a.duration || 1e9) - (o.offset || 0))), volume: o.volume });
-  }
-  return out;
-}
-async function hasAudio(a) {
-  if (typeof a.hasAudio === 'boolean') return a.hasAudio;
-  const { out } = await run(process.env.FFPROBE_PATH || 'ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', assetFile(a)]).catch(() => ({ out: '' }));
-  return out.includes('audio');
 }
 const clipRef = (p, ref) => ({ ...p.clips[ref], url: `/api/projects/${p.id}/clips/${encodeURIComponent(p.clips[ref].key)}/` });

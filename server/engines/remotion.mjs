@@ -112,7 +112,7 @@ export const remotionEngine = {
     await ensureBundle(ctx.log);
     if (!ctx.port) throw new Error('remotion engine needs the server port');
     ctx.serveUrl = `http://127.0.0.1:${ctx.port}${PUBLIC_PATH}`;
-    ctx.inputProps = { projectId: ctx.projectId, total: ctx.total, fps: ctx.fps, width: ctx.width, height: ctx.height };
+    ctx.inputProps = { projectId: ctx.projectId, chapter: ctx.chapter || null, total: ctx.total, fps: ctx.fps, width: ctx.width, height: ctx.height };
     ctx.browserExecutable = findBrowser();
     ctx.browserErrors = [];
     ctx.chromiumOptions = chromiumOptions();

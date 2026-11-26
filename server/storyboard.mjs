@@ -19,10 +19,14 @@ const ALT = {
 };
 const TEMPLATE_ALIAS = { image: 'photo', picture: 'photo', video: 'photo', footage: 'photo', text: 'type', quote: 'type', typography: 'type', headline: 'type', news: 'type', compare: 'cards', versus: 'cards', card: 'cards', bars: 'chart', bar: 'chart', gauge: 'meter', organ: 'body', anatomy: 'body', macro: 'zoom', micro: 'zoom', steps: 'flow', process: 'flow', loop: 'cycle', stack: 'layers', history: 'timeline' };
 const MIN_SCENE_SEC = 1.2;
+/** Scene cap for one storyboard. Long videos are split into chapters (see chapters.mjs) instead of one huge board. */
+export const MAX_SCENES = 30;
+/** How many scenes a duration should get: one per ~3.2 s, never fewer than 2, never more than MAX_SCENES. */
+export const sceneTarget = (duration) => Math.max(2, Math.min(MAX_SCENES, Math.round((Number(duration) || 0) / 3.2)));
 
 export function storyboardMessages({ title, words, duration, forceTemplate }) {
   const wordList = words.map((w) => `${w.i}:${w.text}@${w.start.toFixed(2)}`).join(' ');
-  const target = Math.max(2, Math.min(12, Math.round(duration / 3.2)));
+  const target = sceneTarget(duration);
   return [
     { role: 'system', content: `[[TASK:STORYBOARD]]
 You are the motion designer of a faceless science-explainer reel (dark technical illustrations, one illustration card per scene).
