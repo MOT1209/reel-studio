@@ -21,6 +21,7 @@ import { getAsset, assetFile, creditsFor } from './assets.mjs';
 import * as PV from './providers.mjs';
 import { keptSegments, outDuration, srcToOut, outToSrc, sequenceToSegments, isHold } from './timeline.mjs';
 import { PLATFORMS, PLATFORM_IDS, durationCheck } from './platforms.mjs';
+import { notifyProject } from './webhooks.mjs';
 
 export const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
@@ -117,6 +118,7 @@ export function createProject({ topic, seconds = 30, approvals = {}, voiceMode =
   fs.mkdirSync(projectDir(id), { recursive: true });
   cache.set(id, p);
   save(p);
+  notifyProject(p, 'project.created', { createdAt: p.createdAt });
   return p;
 }
 
@@ -198,6 +200,10 @@ export function runPipeline(id) {
           st.status = p.approvals[stage] === 'wait' ? 'review' : 'done';
           log(p, stage, st.status === 'review' ? '⏸ waiting for your approval' : '✔ done');
           save(p);
+          notifyProject(p, 'project.stage.done', {
+            stage, status: st.status,
+            ...(stage === 'render' && p.render ? { render: { file: p.render.file, duration: p.render.duration, frames: p.render.frames } } : {}),
+          });
           if (st.status === 'review') break;
         } catch (e) {
           const cancelled = entry.controller.signal.aborted || e.name === 'AbortError' || e.message === 'cancelled';
@@ -208,6 +214,7 @@ export function runPipeline(id) {
           for (const ch of p.chapters || []) if (ch.stages?.[stage] === 'running') ch.stages[stage] = 'idle';
           log(p, stage, cancelled ? '■ cancelled' : `✖ ${e.message}`);
           save(p);
+          if (!cancelled) notifyProject(p, 'project.stage.failed', { stage, error: redact(e.message) });
           break;
         }
       }
@@ -517,10 +524,12 @@ export async function publishProject(id, { privacy } = {}) {
     });
     Object.assign(p.publish, { status: 'done', videoId: r.videoId, url: r.url, privacy: r.privacy, channel: st.channel, at: new Date().toISOString() });
     plog(p, `✔ اتنشر: ${r.url} (${r.privacy})`);
+    notifyProject(p, 'project.published', { videoId: r.videoId, url: r.url, privacy: r.privacy, channel: st.channel?.title || null });
   } catch (e) {
     const cancelled = ctl.signal.aborted;
     Object.assign(p.publish, { status: cancelled ? 'idle' : 'error', error: cancelled ? null : e.message });
     plog(p, cancelled ? '■ النشر اتلغى' : `✖ ${e.message}`);
+    if (!cancelled) notifyProject(p, 'project.publish.failed', { error: redact(e.message) });
   } finally {
     publishing.delete(id);
     publishDone.delete(id);

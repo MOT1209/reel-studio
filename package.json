@@ -12,7 +12,10 @@
     "start": "node server/index.mjs",
     "mock": "node tools/mock-apis.mjs",
     "build-icons": "node tools/build-icons.mjs",
-    "test": "node tools/unit.mjs && node tools/longform-test.mjs && node tools/concat-test.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/vault-test.mjs && node tools/voice-test.mjs && node tools/engines-test.mjs && node tools/robustness.mjs && node tools/phase1-test.mjs",
+    "test": "node tools/unit.mjs && node tools/longform-test.mjs && node tools/concat-test.mjs && node tools/arabic-test.mjs && node tools/library-test.mjs && node tools/skills-test.mjs && node tools/vault-test.mjs && node tools/voice-test.mjs && node tools/engines-test.mjs && node tools/robustness.mjs && node tools/phase1-test.mjs && node tools/webhooks-test.mjs",
+    "test:longform": "node tools/longform-test.mjs",
+    "test:concat": "node tools/concat-test.mjs",
+    "test:longform-e2e": "node tools/longform-e2e.mjs",
     "test:library": "node tools/library-test.mjs",
     "test:arabic": "node tools/arabic-test.mjs",
     "test:unit": "node tools/unit.mjs",
@@ -28,11 +31,9 @@
     "test:engines": "node tools/engines-test.mjs",
     "test:remotion": "node tools/remotion-test.mjs",
     "test:phase1": "node tools/phase1-test.mjs",
+    "test:webhooks": "node tools/webhooks-test.mjs",
     "test:xss": "node tools/xss-test.mjs",
-    "test:arabic-video": "node tools/arabic-video-test.mjs",
-    "test:longform": "node tools/longform-test.mjs",
-    "test:concat": "node tools/concat-test.mjs",
-    "test:longform-e2e": "node tools/longform-e2e.mjs"
+    "test:arabic-video": "node tools/arabic-video-test.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.546",
@@ -41,6 +42,7 @@
     "playwright": "^1.49.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "remotion": "4.0.546"
+    "remotion": "4.0.546",
+    "svix": "1.99.1"
   }
 }
