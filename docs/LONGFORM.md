@@ -25,14 +25,22 @@ project — same prompts, same validation, same render checks.
    joined with the ffmpeg concat demuxer and the joined file is probed for the summed frame count and duration.
    Background music is mixed once over the joined audio, so it runs across the whole video.
 
-### Why the join re-encodes the audio (and copies the video)
+### Why the join trims each chapter's audio (and copies the video)
 
-AAC frames are 1024 samples and every chapter's MP4 carries encoder priming/padding. `-c:a copy` leaves that
-un-trimmed audio at each join, so the sound drifts later and later against the picture. Measured on three 2 s
-chapters (tone at 0.5 s): `-c:a copy` → 16 / 42 / 70 ms, one AAC re-encode → 16 / 22 / 26 ms. A 15-chapter video
-would end ~350 ms out of sync with copy. `concatVideos` therefore copies the video (`-c:v copy`, exact frame count)
-and re-encodes the audio once (`aac 48 kHz stereo 192k`), which removes the accumulating offset. This is covered by
-`tools/concat-test.mjs` (drift must stay within one AAC frame and must not grow).
+AAC frames are 1024 samples and every chapter's MP4 carries encoder priming/padding, so the audio of a chapter is a
+little longer than its video. Two mechanisms add up at every join:
+
+| Join method | Measured drift |
+|---|---|
+| `-c:a copy` on the concat demuxer | 16 → 42 → 70 ms on 3× 2 s chapters (+26 ms per join) |
+| one AAC re-encode (priming fixed) | 16 / 22 / 26 ms on 2 s chapters, but **+14 ms per join** on real 70 s chapters: 24 → 38 → 53 → 66 → 80 ms over 5 chapters — ~350 ms at 24 chapters |
+| each chapter's audio cut/padded to `frames / fps`, then joined | **3 ms median, 6 ms p90** on the 5-chapter (5.8 min) run; joins add nothing (Δ 0 ms) |
+
+`concatVideos` now: (1) joins the videos with the concat demuxer and `-c:v copy` (exact frame count, no re-encode),
+(2) reads every chapter's video length, cuts or pads its audio to exactly that length (`apad,atrim`) and concatenates
+the pieces, (3) muxes the audio once (`aac 48 kHz stereo 192k`) with the copied video. Captions keep their offsets
+because every chapter starts exactly where its video starts. Covered by `tools/concat-test.mjs` (drift must not
+grow) and by the end-to-end chapter tests below.
 
 ## Progress and resume
 
@@ -67,10 +75,15 @@ tracks to the chapter, and leave music to the join step.
 
 `npm run test:longform-e2e` (3 chapters × 10 s, 720×1280 @ 24 fps, legacy engine, offline mocks): render of all
 three chapters finished in 26 s; 261 + 261 + 261 = 783 frames, the joined file has exactly 783 frames and AAC
-48 kHz stereo audio of the same length; Σ chapter durations vs joined duration Δ 26 ms; caption ↔ voice sync on
-the joined video median 28 ms / p90 35 ms, and 30 ms for the words in the two seconds after each join; subtitles
-end at the last word. `npm run e2e` (single 10 s project, 1080×1920) still passes 38/38 with −14 LUFS audio and
-4 ms median caption sync.
+48 kHz stereo audio of the same length; caption ↔ voice sync on the joined video median 3 ms / p90 60 ms, and 3 ms
+for the words in the two seconds after each join; subtitles end at the last word. `npm run e2e` (single 10 s
+project, 1080×1920) still passes 38/38 with −14 LUFS audio and 4 ms median caption sync.
+
+The scale run (`E2E_ENGINE=remotion E2E_CHAPTERS=5 E2E_CHAPTER_SECONDS=60`, Remotion engine, 5 chapters → 5.8 min
+of video) passed 15/15: 5 × 1678 = **8390 frames**, joined file exactly 8390 frames / 349.58 s, joined audio
+349.583 s vs video 349.585 s, Σ chapters vs joined **Δ 0 ms**, caption ↔ voice **median 3 ms / p90 6 ms**, 3 ms for
+the words after each join, 175 subtitle cues ending at the last word, every chapter `engine: remotion` with no
+fallback. The whole 5-stage run took 627 s on 1 render worker (720×1280, `draft`).
 
 ## Tests
 

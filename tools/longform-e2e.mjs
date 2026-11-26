@@ -2,7 +2,8 @@
 //   a 30 s project split into 3 chapters of 10 s → render each chapter → join them → check the joined file,
 //   the chapter frame counts, the audio join, caption/voice sync across the joins and the subtitle clock.
 // Uses the legacy canvas engine at 720×1280/24 fps by default (E2E_ENGINE=remotion runs the same project on
-// Remotion); every chapter is a full 5-stage run.
+// Remotion); every chapter is a full 5-stage run. Size can be raised for a scale run:
+//   E2E_CHAPTERS=5 E2E_CHAPTER_SECONDS=60 E2E_TIMEOUT_MS=2700000 (5 minutes of video, five 60 s chapters).
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,13 +14,14 @@ const MOCK_PORT = Number(process.env.MOCK_PORT || 4397);
 const PORT = Number(process.env.E2E_PORT || 4304);
 const ENGINE = process.env.E2E_ENGINE || 'legacy';
 const DATA = path.join(ROOT, 'data', process.env.E2E_DATA || 'e2e-longform');
-const OUT_NAME = process.env.E2E_OUT || 'test-reel-longform-3ch';
 const BASE = `http://127.0.0.1:${PORT}`;
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
-const CHAPTER_SECONDS = 10;
-const CHAPTERS = 3;
-const FPS = 24;
+const CHAPTER_SECONDS = Number(process.env.E2E_CHAPTER_SECONDS || 10);
+const CHAPTERS = Number(process.env.E2E_CHAPTERS || 3);
+const FPS = Number(process.env.E2E_FPS || 24);
+const RENDER_TIMEOUT_MS = Number(process.env.E2E_TIMEOUT_MS || 10 * 60000);
+const OUT_NAME = process.env.E2E_OUT || `test-reel-longform-${CHAPTERS}ch`;
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? '✔' : '✖'} ${name}${detail ? ' — ' + detail : ''}`); };
@@ -93,7 +95,7 @@ async function main() {
     const bad = Object.entries(s).find(([, x]) => x.status === 'error');
     if (bad) throw Object.assign(new Error(`stage ${bad[0]} failed: ${bad[1].error}`), { fatal: true });
     return s.render.status === 'done';
-  }, 10 * 60000);
+  }, RENDER_TIMEOUT_MS);
   const proj = await api(`/api/projects/${p.id}`);
   const dir = path.join(DATA, 'projects', p.id);
   console.log(`render finished in ${((Date.now() - t0) / 1000).toFixed(0)} s`);

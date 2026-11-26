@@ -37,6 +37,9 @@ function mockScript(topic, target) {
   const lines = [HOOK, QUESTION];
   let n = wc(HOOK) + wc(QUESTION) + wc(RECAP);
   for (const l of MIDDLE) { if (n + wc(l) > target * 1.05 && lines.length > 2) break; lines.push(l); n += wc(l); }
+  // a long chapter (e.g. 60 s) needs more narration than the fixed middle provides: repeat it (short targets are
+  // already covered above, so the 10–20 s tests keep exactly the same script)
+  for (let i = 0; n < target * 0.95 && i < 400; i++) { const l = MIDDLE[i % MIDDLE.length]; lines.push(l); n += wc(l); }
   lines.push(RECAP);
   return `<think>The user wants about ${target} words on "${topic}". I will plan the hook first…</think>TITLE: ليه السما لونها أزرق؟\nSCRIPT:\n${lines.join('\n')}\nSOURCES:\n- NASA Space Place, "Why is the sky blue?"\n- Encyclopaedia Britannica, "Rayleigh scattering"`;
 }

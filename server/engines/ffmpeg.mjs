@@ -284,24 +284,48 @@ export async function concatAudio({ files, out, signal }) {
 }
 
 /**
- * Concatenates finished chapter MP4s with the concat demuxer. Video is copied (identical codec/size/fps, exact frame
- * count). Audio is RE-ENCODED on purpose: AAC frames are 1024 samples and every segment carries encoder priming, so
- * `-c:a copy` leaves ~26 ms of un-trimmed audio at every join — a 15-chapter video would be ~350 ms out of sync by
- * the end (measured: 3× 2 s chapters drift 16 → 42 → 70 ms with copy, 16 → 22 → 26 ms with one AAC re-encode).
- * Writes <out>.part.mp4, validates it with ffprobe when `expect` is given, then renames.
+ * Concatenates finished chapter MP4s. Video comes from the concat demuxer with `-c:v copy` (identical codec/size/fps,
+ * exact frame count). Audio is handled separately: every chapter's audio is cut OR padded to that chapter's video
+ * length and the pieces are joined, then muxed once. Two measured reasons:
+ *  - `-c:a copy` on the demuxer leaves each chapter's AAC priming in place: 3× 2 s chapters drifted 16 → 42 → 70 ms;
+ *  - a single AAC re-encode fixes priming but not the padding: each chapter's audio is a little longer than its video
+ *    (3279 AAC frames vs 1678 video frames), so the sound slipped ~14 ms at every join (5 chapters: 24 → 38 → 53 →
+ *    66 → 80 ms, i.e. ~350 ms at 24 chapters).
+ * Trimming/padding each piece to frames/fps keeps every chapter on its caption offsets; the joined audio is then
+ * exactly as long as the video. Writes <out>.part.mp4, validates with ffprobe when `expect` is given, then renames.
  */
 export async function concatVideos({ files, out, signal, expect = null }) {
   const list = `${out}.concat.txt`;
+  const videoOnly = `${out}.video.mp4`;
+  const audioOnly = `${out}.audio.m4a`;
   const tmp = `${out}.part.mp4`;
   try {
     fs.writeFileSync(list, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
-    await run(FFMPEG, ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', '-movflags', '+faststart', tmp], { signal });
+    await run(FFMPEG, ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-map', '0:v:0', '-c:v', 'copy', '-an', videoOnly], { signal });
+    // each chapter's audio must occupy exactly as much time as its video (frames / fps)
+    const durs = [];
+    for (const f of files) {
+      const { out: probe } = await run(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=nb_frames,r_frame_rate,duration', '-of', 'json', f]);
+      const s = JSON.parse(probe).streams?.[0] || {};
+      const [num, den] = String(s.r_frame_rate || '0/1').split('/').map(Number);
+      const byFrames = Number(s.nb_frames) && num ? (Number(s.nb_frames) * den) / num : 0;
+      const dur = byFrames || Number(s.duration);
+      if (!(dur > 0)) throw new Error(`concat: could not read the video length of ${path.basename(f)}`);
+      durs.push(dur);
+    }
+    const inputs = files.flatMap((f) => ['-i', f]);
+    const parts = files.map((_, i) => `[${i}:a]apad,atrim=0:${durs[i].toFixed(6)},asetpts=N/SR/TB[a${i}]`).join(';');
+    const filter = `${parts};${files.map((_, i) => `[a${i}]`).join('')}concat=n=${files.length}:v=0:a=1[aout]`;
+    await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', filter, '-map', '[aout]', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', audioOnly], { signal });
+    await run(FFMPEG, ['-hide_banner', '-y', '-i', videoOnly, '-i', audioOnly, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-movflags', '+faststart', tmp], { signal });
     const probe = expect ? await validateOutput(tmp, expect) : null;
     fs.renameSync(tmp, out);
     return probe;
   } finally {
     fs.rmSync(tmp, { force: true });
     fs.rmSync(list, { force: true });
+    fs.rmSync(videoOnly, { force: true });
+    fs.rmSync(audioOnly, { force: true });
   }
 }
 
