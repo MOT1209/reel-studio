@@ -2,6 +2,7 @@
   "name": "reel-studio",
   "version": "3.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Reel Studio — AI video studio for Arabic educational reels, shorts and explainers, rendered locally.",
   "type": "module",
   "engines": {

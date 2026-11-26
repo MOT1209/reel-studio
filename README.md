@@ -123,3 +123,10 @@ LLM_BASE_URL=http://127.0.0.1:4399/v1 ELEVENLABS_BASE_URL=http://127.0.0.1:4399 
 - تقرير المراحل: [`docs/PHASE-REPORT.md`](docs/PHASE-REPORT.md).
 - عدد صفحات الرندر اللي بتشتغل مع بعض بيتحدد حسب المعالج والذاكرة الفاضية (`RS_RENDER_WORKERS` للكلاسيكي: رقم صحيح 1–4، أي قيمة تانية بتترفض مع تحذير، والقيمة الصحيحة بتتقلل لو الذاكرة ما تكفيش؛ `RS_REMOTION_CONCURRENCY` لـ Remotion). الصور بتتصغّر قبل الرسم، والفيديو بيتحوّل لفريمات صغيرة على الديسك.
 - الملفات: `data/projects/<id>/` (المشروع، الصوت، الفيديو) · `data/assets/` (المكتبة) · `data/fonts/` (الخطوط المستوردة) · `data/skills/` · `data/logs/`.
+
+## الرخصة
+
+- **كود المشروع:** MIT — النص الكامل في [`LICENSE`](LICENSE) · حقوق النشر © 2026 **Rashid (Alking.ai)**.
+- **Remotion** (`remotion` و`@remotion/*`): ترخيص مستقل — مجاني للأفراد والشركات حتى 3 موظفين، وترخيص شركة فوق ذلك أو عند بيع المشروع: <https://remotion.dev/license>. تفاصيل القرار والقياسات في [`docs/RENDERING.md`](docs/RENDERING.md).
+- **الخطوط العربية** (IBM Plex Sans Arabic وغيرها): SIL Open Font License 1.1 — النصوص الكاملة في [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt).
+- **الأيقونات:** Tabler Icons وHealth Icons وغيرها بتراخيصها الأصلية — التفاصيل في [`assets/icons/LICENSES.md`](assets/icons/LICENSES.md).
