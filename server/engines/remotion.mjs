@@ -4,6 +4,7 @@
 // served by the Reel Studio server at /remotion/, so render data, fonts, media and render.js are same-origin.
 import fs from 'node:fs';
 import os from 'node:os';
+import { parseWorkers } from '../memory.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -81,12 +82,11 @@ export function findBrowser() {
   return null;
 }
 
-/** Parallel browser tabs: same memory rule as the legacy engine (each tab ~400 MB), at most 4; RS_REMOTION_CONCURRENCY overrides. */
+/** Parallel browser tabs: same memory rule as the legacy engine (cgroup-aware, ≈ 450 MB per tab + 600 MB base), at most 4. RS_REMOTION_CONCURRENCY must be an integer 1–4. */
 function concurrency() {
-  if (Number(process.env.RS_REMOTION_CONCURRENCY)) return Math.max(1, Math.min(8, Number(process.env.RS_REMOTION_CONCURRENCY)));
-  const byCpu = Math.max(1, os.cpus().length - 1);
-  const byMem = Math.max(1, Math.floor((os.freemem() / 1024 ** 2 - 500) / 450));
-  return Math.min(4, byCpu, byMem);
+  const r = parseWorkers(process.env.RS_REMOTION_CONCURRENCY, { name: 'RS_REMOTION_CONCURRENCY' });
+  if (r.note) console.warn(r.note);
+  return r.n;
 }
 
 /** Chrome options; RS_REMOTION_GL picks Remotion's GL backend (benchmarked in docs/RENDERING.md). */

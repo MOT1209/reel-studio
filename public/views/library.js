@@ -11,9 +11,9 @@ export function mountLibrary(el, { pick = null, kinds = null, onPick = null } = 
     <div class="libtabs tabs"><button data-ltab="local" class="on">ملفاتي</button><button data-ltab="stock">بحث في مكتبات الصور</button></div>
     <div data-lpane="local">
       <div class="toolbar">
-        <input id="libQ" placeholder="بحث بالاسم أو الوسم أو المصدر…">
-        <select id="libKind"><option value="">كل الأنواع</option><option value="image">صور</option><option value="video">فيديو</option><option value="audio">صوت</option></select>
-        <select id="libFolder"><option value="">كل الفولدرات</option></select>
+        <input id="libQ" aria-label="بحث في المكتبة" placeholder="بحث بالاسم أو الوسم أو المصدر…">
+        <select id="libKind" aria-label="نوع الملف"><option value="">كل الأنواع</option><option value="image">صور</option><option value="video">فيديو</option><option value="audio">صوت</option></select>
+        <select id="libFolder" aria-label="الفولدر"><option value="">كل الفولدرات</option></select>
         <label class="btn primary">⬆ رفع ملفات<input type="file" id="libFile" multiple accept="image/*,video/*,audio/*" hidden></label>
       </div>
       <details class="uplmeta"><summary>بيانات الرفع (فولدر · وسوم · رخصة)</summary>

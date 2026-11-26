@@ -87,3 +87,19 @@ README updated (queue, shutdown, limits, editor features, tests, keychain limita
 3. Atomic writes for voice files; per-credential delete; live preview for audio tracks.
 4. Real medium/large project fixtures and a memory-constrained run (e.g. a 4–8 GB VM).
 5. Run the CI workflow once on GitHub and fix whatever differs on a clean Ubuntu runner (fonts, Chromium install).
+
+
+## Addendum — what this branch adds on top of `main` v3.1 (2026-11-25)
+`main` already contains the first port of the audit work (PR #6/#8: shutdown, retries, MCP hardening, keyframes, audio tracks, frame-exact output, XSS and Arabic-video tests). What was still missing there and is added here, **each tested on the merged code**:
+
+| Item | Status | Evidence |
+|---|---|---|
+| Memory budget from the process's **cgroup** (not the host's free RAM), ≈ 450 MB/page + 600 MB base, shared by both engines (`server/memory.mjs`) | **T** | `phase1-test` (table); `tools/lowmem-test.mjs`: 1.5 GB cgroup passes (peak 1309 MB, 0 OOM kills, 0 crashes); 1 GB still fails (documented floor) |
+| Credential delete: `DELETE /api/settings/secrets/<section.field>` + «حذف المفتاح المحفوظ» button | **T** | `phase1-test` (sealed on disk → deleted; unknown key 404; `.env` value reported), UI test |
+| Crop of picture/video overlays | **T** | export test (two-colour image cropped to one half) + unit |
+| Duplicate overlay; ripple delete / shorten | **T** | UI test |
+| Accessibility + responsive audit (`tools/a11y-test.mjs`, 19 tests: names, alt, lang/dir, focus ring, phone width, WCAG contrast) and its fixes (11 unnamed fields, header/table overflow at 390 px, focus-visible, dim caption words 2.45:1) | **T** | a11y test |
+| Real-pipeline scale + queue test (`tools/perf-test.mjs`) | **T** | small 21.4 s/1630 MB · medium 53.7 s/1650 MB · large (6000×4000 photos + 1080p clip) 71.5 s/2142 MB · 3 projects → 1 at a time |
+| Concurrency test (30 simultaneous creations + settings writes) | **T** | `phase1-test` |
+
+Full suite on this tree: unit 33 · Arabic 14 · library 10 · skills/MCP 13 · vault 6 · voice 3 · engines 15 · robustness 14 · phase1 22 · e2e 38/38 · export 14 · Remotion 9 · UI 21 · XSS 3 · a11y 19 · Arabic-video 7 · templates 9 sheets; `npm audit --omit=dev`: 0.
