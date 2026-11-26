@@ -147,6 +147,20 @@ export function getPublicSettings() {
   return { ...s, _source: source, _themes: THEMES, _palette: resolvePalette(s.look), _vault: protection(DATA_DIR) };
 }
 
+/**
+ * Removes one stored credential ("llm.apiKey", "elevenlabs.apiKey", "deepgram.apiKey", "youtube.clientSecret", "pexels.apiKey"…).
+ * A value that comes from .env cannot be deleted here — the result says so (the user must edit .env).
+ */
+export function deleteSecret(key) {
+  const hit = SECRETS.find(([sec, f]) => `${sec}.${f}` === key);
+  if (!hit) { const e = new Error(`unknown credential "${String(key).slice(0, 40)}"`); e.status = 404; throw e; }
+  const [sec, f, env] = hit;
+  const stored = readStored();
+  const had = !!stored?.[sec]?.[f];
+  if (had) { delete stored[sec][f]; writeStored(stored); }
+  return { key, deleted: had, stillSetBy: process.env[env] ? '.env' : null };
+}
+
 /** Partial update from the Settings screen. Masked/empty secrets mean "keep". */
 export function updateSettings(patch) {
   const stored = readStored();

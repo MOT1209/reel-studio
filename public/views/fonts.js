@@ -28,12 +28,12 @@ export async function mountFonts(el) {
     </div>
     <div class="panel">
       <div class="toolbar">
-        <input id="fQ" placeholder="ابحث عن خط…">
-        <select id="fCat"><option value="">كل الأنواع</option>${Object.entries(CAT_AR).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+        <input id="fQ" aria-label="بحث عن خط" placeholder="ابحث عن خط…">
+        <select id="fCat" aria-label="نوع الخط"><option value="">كل الأنواع</option>${Object.entries(CAT_AR).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
         <label class="inl">الحجم <input type="range" id="fSize" min="20" max="90" value="40"></label>
         <label class="inl">الوزن <input type="range" id="fW" min="100" max="1000" step="100" value="700"></label>
       </div>
-      <textarea id="fSample" rows="2" dir="auto">${esc(SAMPLE)}</textarea>
+      <textarea id="fSample" aria-label="نص تجربة الخط" rows="2" dir="auto">${esc(SAMPLE)}</textarea>
       <div class="fontlist" id="fontList"></div>
     </div>
     <div class="panel">
