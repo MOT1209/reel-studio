@@ -195,7 +195,8 @@ function build(p, selected) {
   const pub = p.publish?.status;
   if (pub && pub !== 'idle') {
     const ps = pub === 'done' ? 'done' : pub === 'running' ? 'running' : 'error';
-    chain.push({ key: 'publish', stage: 'render', w: NW, h: NH, status: ps, icon: 'publish', label: STAGE_LABEL.publish, meta: ps === 'done' ? 'اتنشر على يوتيوب' : ps === 'running' ? 'بيرفع…' : 'فشل الرفع', appr: false });
+    // no stage: publishing is informational here, so it must not borrow the render node's selection or progress bar
+    chain.push({ key: 'publish', stage: null, w: NW, h: NH, status: ps, icon: 'publish', label: STAGE_LABEL.publish, meta: ps === 'done' ? 'اتنشر على يوتيوب' : ps === 'running' ? 'بيرفع…' : 'فشل الرفع', appr: false });
   }
 
   // the editor is not part of the automatic flow: it hangs under the render node as a manual node
@@ -244,6 +245,7 @@ function chapterNode(p) {
 
 // ---------- markup ----------
 function nodeClass(n, selected) {
+  // `stage` is not styled any more: it is the class the browser suites click (.stage[data-stage="editor"]).
   return ['stage', 'gnode',
     n.key === 'chapters' ? 'gchapters' : '',
     n.status === 'running' ? 'running' : '',
@@ -273,7 +275,11 @@ function nodeHtml(n, p, selected) {
   const badge = n.key === 'editor' ? '' : `<span class="badge ${n.status === 'ready' ? '' : n.status}">${STATUS[n.status] || ''}</span>`;
   const prog = n.stage === 'render' ? '<div class="gprog"><i data-gprog style="width:0%"></i></div>' : '';
   const appr = n.appr ? `<label class="gappr" title="المرحلة تستنى موافقتك قبل ما تبدأ"><input type="checkbox" data-wait="${n.stage}" ${p.approvals?.[n.stage] === 'wait' ? 'checked' : ''}> استنى موافقتي</label>` : '';
-  return `<div class="${nodeClass(n, selected)}" data-key="${n.key}" data-stage="${n.stage}" role="button" tabindex="0" aria-pressed="${selected === n.stage}" title="${esc(n.label)}" style="${style}">
+  // A node with no stage (the publish tail) is informational: without data-stage it cannot be picked and it never
+  // shares the render node's selection. The selectable nodes are groups, not buttons, because the approval checkbox
+  // lives inside them and a button must not contain another control.
+  const open = n.stage == null ? 'role="group"' : `data-stage="${n.stage}" role="group" tabindex="0" aria-current="${selected === n.stage}"`;
+  return `<div class="${nodeClass(n, selected)}" data-key="${n.key}" ${open} aria-label="${esc(n.label)}" title="${esc(n.label)}" style="${style}">
     <div class="ghead"><span class="gic">${svg(n.icon)}</span><span class="gname">${esc(n.label)}</span><span class="gdot ${n.status}"></span></div>
     <div class="grow">${badge}<span class="gmeta">${esc(n.meta)}</span></div>
     ${prog}
@@ -287,7 +293,7 @@ function paint(host, next, p, selected) {
     const el = host.querySelector(`.gnode[data-key="${n.key}"]`);
     if (!el) continue;
     el.className = nodeClass(n, selected);
-    el.setAttribute('aria-pressed', String(selected === n.stage));
+    if (el.dataset.stage) el.setAttribute('aria-current', String(selected === n.stage));
     const name = el.querySelector('.gname'); if (name) name.textContent = n.label;
     const meta = el.querySelector('.gmeta'); if (meta) meta.textContent = n.meta;
     const dot = el.querySelector('.gdot'); if (dot) dot.className = 'gdot ' + n.status;
