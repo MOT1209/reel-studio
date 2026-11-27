@@ -142,6 +142,8 @@ npm run e2e               # one 10 s reel end to end: format, −14 LUFS, sync, 
 npm run test:longform     # chapter planning, progress, resume, edit distribution (no render)
 npm run test:concat       # join drift on real chapters (ffmpeg)
 npm run test:qc           # post-join QC: frames, per-chapter sync, loudness spread
+npm run test:qc-e2e       # end-to-end: a bad join fails the project with a QC error (ffmpeg + browser)
+npm run test:estimate     # pre-render time/cost estimate
 npm run test:longform-e2e # 3 chapters, real render + join (E2E_CHAPTERS/E2E_CHAPTER_SECONDS for a scale run)
 npm run test:export       # editor → real video: 16:9 and 1:1, cuts, music, layers, clips, fonts, resume
 npm run test:remotion     # same project on both engines: ffprobe, SSIM, animations, H.265, cancel
@@ -334,6 +336,8 @@ npm run e2e               # ريل 10 ث كامل: الصيغة، −14 LUFS، �
 npm run test:longform     # تخطيط الفصول والتقدم والاستكمال وتوزيع التعديلات (بدون رندر)
 npm run test:concat       # انحراف الوصل على فصول حقيقية (ffmpeg)
 npm run test:qc           # فحص بعد الوصل: الفريمات وتزامن كل فصل وتشتت الجهارة
+npm run test:qc-e2e       # من الطرف للطرف: وصلة سيئة بتفشّل المشروع برسالة QC (ffmpeg + متصفح)
+npm run test:estimate     # تقدير الوقت والتكلفة قبل الرندر
 npm run test:longform-e2e # 3 فصول برندر ووصل حقيقي (E2E_CHAPTERS / E2E_CHAPTER_SECONDS لمقياس أكبر)
 npm run test:export       # المحرر ← فيديو حقيقي: 16:9 و1:1، القص، الموسيقى، الطبقات، الكليبات، الخطوط، الاستكمال
 npm run test:remotion     # نفس المشروع على المحركين: ffprobe وSSIM والحركات وH.265 والإلغاء
