@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,19 @@ const procs = []; process.on('exit', () => procs.forEach((p) => { try { p.kill()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function up(u) { for (let i = 0; i < 100; i++) { try { await fetch(u); return; } catch { await sleep(100); } } throw new Error('not up ' + u); }
 const api = async (p, opts = {}) => (await fetch(BASE + p, { ...opts, headers: { Origin: BASE, 'Content-Type': 'application/json' } })).json();
+// A second run must not silently attach to the first run's server: the spawns below ignore their output, so a
+// server that loses the port race would die unnoticed and the tests would talk to the other run's server.
+async function assertFree(port) {
+  await new Promise((resolve, reject) => {
+    const s = net.createServer()
+      .once('error', () => reject(new Error(`port ${port} is already in use — stop the other Reel Studio test run first`)))
+      .once('listening', () => s.close(() => resolve()));
+    s.listen(port, '127.0.0.1');
+  });
+}
+for (const port of [PORT, MOCK_PORT]) {
+  try { await assertFree(port); } catch (e) { console.error(`[a11y-test] ${e.message}`); process.exit(1); }
+}
 procs.push(spawn('node', ['tools/mock-apis.mjs'], { cwd: ROOT, env: { ...process.env, MOCK_PORT: String(MOCK_PORT) }, stdio: 'ignore' }));
 procs.push(spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data'), LLM_BASE_URL: `${MOCK}/v1`, ELEVENLABS_BASE_URL: MOCK, DEEPGRAM_BASE_URL: MOCK, ELEVENLABS_API_KEY: 'mock', ELEVENLABS_VOICE_ID: 'v', DEEPGRAM_API_KEY: 'mock' } }));
 await up(`${MOCK}/media/_stats`); await up(`${BASE}/api/health`);

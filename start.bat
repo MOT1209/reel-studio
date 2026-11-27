@@ -6,7 +6,7 @@ title Reel Studio v2
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [X] Node.js 18+ is required: https://nodejs.org/
+  echo [X] Node.js 20+ is required: https://nodejs.org/
   pause
   exit /b 1
 )

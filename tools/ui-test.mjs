@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +23,19 @@ async function test(name, fn) { try { await fn(); n++; console.log('✔', name);
 const api = async (p, opts = {}) => (await fetch(BASE + p, { ...opts, headers: { Origin: BASE, 'Content-Type': 'application/json', ...(opts.headers || {}) } })).json();
 async function until(desc, fn, ms = 20000) { const t0 = Date.now(); for (;;) { const v = await fn().catch(() => null); if (v) return v; if (Date.now() - t0 > ms) throw new Error('timeout: ' + desc); await sleep(250); } }
 
+// A second run must not silently attach to the first run's server: the spawns below ignore their output, so a
+// server that loses the port race would die unnoticed and the tests would talk to the other run's server.
+async function assertFree(port) {
+  await new Promise((resolve, reject) => {
+    const s = net.createServer()
+      .once('error', () => reject(new Error(`port ${port} is already in use — stop the other Reel Studio test run first`)))
+      .once('listening', () => s.close(() => resolve()));
+    s.listen(port, '127.0.0.1');
+  });
+}
+for (const port of [PORT, MOCK_PORT]) {
+  try { await assertFree(port); } catch (e) { console.error(`[ui-test] ${e.message}`); process.exit(1); }
+}
 procs.push(spawn('node', ['tools/mock-apis.mjs'], { cwd: ROOT, env: { ...process.env, MOCK_PORT: String(MOCK_PORT) }, stdio: 'ignore' }));
 procs.push(spawn('node', ['server/index.mjs'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RS_PORT: String(PORT), RS_DATA_DIR: path.join(TMP, 'data'),
   LLM_BASE_URL: `${MOCK}/v1`, ELEVENLABS_BASE_URL: MOCK, DEEPGRAM_BASE_URL: MOCK, ELEVENLABS_API_KEY: 'mock', ELEVENLABS_VOICE_ID: 'mock-voice-eg', DEEPGRAM_API_KEY: 'mock', LLM_API_KEY: '',
@@ -39,6 +53,14 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error' && !/favicon|Failed to load resource/.test(m.text())) errors.push(m.text()); });
 page.on('dialog', (d) => d.accept());
+// Warm the app up before the timed tests: the first page load pays the cold browser/disk cost (JS, CSS, fonts),
+// and on a loaded machine that can exceed the first view's timeout. A failed warm-up is not fatal: the tests
+// below still report the real problem.
+await page.goto(`${BASE}/#/dashboard`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+await page.waitForFunction(() => {
+  const v = document.querySelector('[data-view="dashboard"]');
+  return v && !v.textContent.includes('بيحمّل');
+}, null, { timeout: 60000 }).catch(() => {});
 const shot = (name) => page.screenshot({ path: path.join(SHOTS, name + '.png') });
 const img = path.join(TMP, 'pic.jpg');
 execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=800x600', '-frames:v', '1', img]);
