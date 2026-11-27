@@ -100,6 +100,19 @@ try {
   });
 
   const saved = () => api(`/api/projects/${proj.id}`);
+  // the timeline's scale is the zoom control's px-per-second and its length comes from the project's own voice,
+  // so read both instead of assuming the 70 px default or a ~30 s video
+  const pps = () => page.$eval('#edZoom', (e) => Number(e.value));
+  const fullLen = async () => { const p = await saved(); return Math.max(p.voice?.duration || 0, p.words.at(-1).end + 0.3) + 0.6; };
+  const clickAt = async (sec) => { const r = await page.$('.tl-row.ruler'); await r.scrollIntoViewIfNeeded(); const b = await r.boundingBox(); await page.mouse.click(b.x + sec * (await pps()) + 1, b.y + 22); };
+  // an empty stretch of the timeline that fits a `len`-second overlay (so a new block is not buried under an old one)
+  const freeStart = async (len) => {
+    const full = await fullLen(), ovs = (await saved()).edit.overlays;
+    for (let sec = 0.2; sec + len <= full - 0.2; sec = +(sec + 0.1).toFixed(2)) {
+      if (!ovs.some((o) => sec < o.end + 0.15 && sec + len > o.start - 0.15)) return sec;
+    }
+    return 0.2;
+  };
   await test('editor: opens with timeline + live preview', async () => {
     await page.goto(`${BASE}/?p=${proj.id}#/projects`);
     await page.waitForSelector('.stage[data-stage="editor"]:not(.off)');
@@ -188,16 +201,16 @@ try {
   });
 
   await test('editor: mark in/out on the ruler and cut the range out (I / O / ✂); undo restores it', async () => {
-    const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();
-    const rb = await ruler.boundingBox();
+    // the range sits inside the project at a fifth and a third of its length, whatever that length is
+    const full = await fullLen()
+      , inSec = +(full * 0.2).toFixed(2), outSec = +(full * 0.32).toFixed(2);
     // the toolbar can re-wrap after a mark, moving the timeline — measure the ruler before every click
-    const at = async (sec) => { const r = await page.$('.tl-row.ruler'); await r.scrollIntoViewIfNeeded(); const b = await r.boundingBox(); await page.mouse.click(b.x + sec * 70 + 1, b.y + 22); };
-    await at(2); await page.click('#markIn');
-    await at(3.5);
+    await clickAt(inSec); await page.click('#markIn');
+    await clickAt(outSec);
     await page.click('#markOut');
     assert.equal(await page.isDisabled('#cutRange'), false);
     await page.click('#cutRange');
-    await until('cut saved', async () => { const c = (await saved()).edit.cuts; return c?.length === 1 && Math.abs(c[0].start - 2) < 0.05 && Math.abs(c[0].end - 3.5) < 0.05; });
+    await until('cut saved', async () => { const c = (await saved()).edit.cuts; return c?.length === 1 && Math.abs(c[0].start - inSec) < 0.05 && Math.abs(c[0].end - outSec) < 0.05; });
     assert.match(await page.textContent('#edDur'), /مقطع محذوف/);
     const d = await api(`/api/projects/${proj.id}/render-data`);
     assert.equal(d.segments.length, 2);
@@ -209,9 +222,7 @@ try {
   });
 
   await test('editor: insert a pause, drag a part to the end, restore the original order', async () => {
-    const r = await page.$('.tl-row.ruler'); await r.scrollIntoViewIfNeeded();
-    const b = await r.boundingBox();
-    await page.mouse.click(b.x + 5 * 70 + 1, b.y + 22);
+    await clickAt((await fullLen()) * 0.5); // mid-timeline, not a fixed 5 s
     await page.click('#addPause');
     await until('pause saved', async () => (await saved()).edit.sequence?.some((x) => x.hold === 1));
     const seq0 = (await saved()).edit.sequence;
@@ -240,10 +251,9 @@ try {
 
   await test('editor: shift-click selects several overlays; Delete removes them together', async () => {
     const n0 = (await saved()).edit.overlays.length;
-    const ruler = await page.$('.tl-row.ruler'); await ruler.scrollIntoViewIfNeeded();
-    const rb = await ruler.boundingBox();
-    await page.mouse.click(rb.x + 0.5 * 70, rb.y + 22); await page.click('#addText');
-    await page.mouse.click(rb.x + 5 * 70, rb.y + 22); await page.click('#addText');
+    const at1 = await freeStart(5.4); // two 2.5 s overlays with room between them
+    await clickAt(at1); await page.click('#addText');
+    await clickAt(at1 + 2.7); await page.click('#addText');
     await until('two more saved', async () => (await saved()).edit.overlays.length === n0 + 2);
     const blocks = await page.$$('#tlInner .blk.ov.text');
     await blocks[blocks.length - 1].click({ position: { x: 20, y: 10 } });
@@ -254,6 +264,9 @@ try {
   });
 
   await test('editor: layer order buttons, keyframe at the playhead, magnet snapping vs none, audio-track button', async () => {
+    // the overlays this test drags default to 2.5 s: start in an empty stretch (so the drag hits the new block,
+    // not an older one) that still has words after it
+    await clickAt(await freeStart(2.6));
     const before = (await saved()).edit.overlays.length;
     await page.click('#addText'); await until('1st text', async () => (await saved()).edit.overlays.length === before + 1);
     await page.click('#addText'); await until('2nd text', async () => (await saved()).edit.overlays.length === before + 2);
@@ -266,12 +279,17 @@ try {
     await until('keyframe saved', async () => { const o = (await saved()).edit.overlays.find((x) => x.id === lastId); return o.keyframes?.length === 1 && o.keyframes[0].ease === 'inOut'; });
     // magnet: drag the selected text so its start lands 0.05 s before a word start; with the magnet on it snaps to the word
     const P = await saved(); const o = P.edit.overlays.find((x) => x.id === lastId);
-    const word = P.words.find((w) => w.start > o.start + 1.0 && w.start < o.start + 3);
+    // every word edge, overlay edge, cut and mark is a snap target: pick a word whose start is the nearest one,
+    // so "snapped to the word" means the magnet worked and not that some other edge happened to be closer
+    const thr = 8 / (await pps());
+    const edges = [...P.edit.cuts.flatMap((c) => [c.start, c.end]), ...P.edit.overlays.filter((x) => x.id !== lastId).flatMap((x) => [x.start, x.end])];
+    const word = P.words.find((w) => w.start > o.start + 1.0 && w.start < Math.min(P.voice?.duration || 99, o.start + 6) && edges.every((e) => Math.abs(e - w.start) > 2 * thr));
+    assert.ok(word, 'a word start with no closer overlay/cut edge to snap to');
     const drag = async (target) => {
       const blk = await page.$(`#tlInner .blk.ov[data-ov="${lastId}"]`); await blk.scrollIntoViewIfNeeded(); const b = await blk.boundingBox();
       const cur = (await saved()).edit.overlays.find((x) => x.id === lastId).start;
       await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down();
-      await page.mouse.move(b.x + b.width / 2 + (target - cur) * 70, b.y + b.height / 2, { steps: 6 }); await page.mouse.up();
+      await page.mouse.move(b.x + b.width / 2 + (target - cur) * (await pps()), b.y + b.height / 2, { steps: 6 }); await page.mouse.up();
     };
     await drag(word.start - 0.05);
     await until('snapped to the word', async () => Math.abs((await saved()).edit.overlays.find((x) => x.id === lastId).start - word.start) < 0.011);
