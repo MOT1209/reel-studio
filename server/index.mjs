@@ -14,6 +14,7 @@ import * as EM from './engines/manager.mjs';
 import { SCHEMA } from './scene-schema.mjs';
 import { BUNDLE_DIR as REMOTION_DIR } from './engines/remotion.mjs';
 import * as P from './pipeline.mjs';
+import { estimateRender } from './render-estimate.mjs';
 import { log as slog, redact, logFile } from './logger.mjs';
 import * as AR from './arabic.mjs';
 import { buildCues, toSrt, toVtt } from './subtitles.mjs';
@@ -265,6 +266,7 @@ async function route(req, res) {
       }
       if (b === 'events' && m === 'GET') return sse(req, res, id);
       if (b === 'run' && m === 'POST') return json(res, 200, { started: P.runPipeline(id) });
+      if (b === 'estimate' && m === 'GET') return json(res, 200, { estimate: estimateRender(p) });
       if (b === 'cancel' && m === 'POST') return json(res, 200, { cancelled: await P.cancel(id) });
       if (b === 'approvals' && m === 'PUT') { P.setApprovals(id, await readJson(req)); return json(res, 200, P.publicProject(p)); }
       if (b === 'voice-mode' && m === 'PUT') { await P.setVoiceMode(id, (await readJson(req)).mode); return json(res, 200, P.publicProject(p)); }

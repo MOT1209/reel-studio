@@ -315,8 +315,14 @@ export async function concatVideos({ files, out, signal, expect = null }) {
     }
     const inputs = files.flatMap((f) => ['-i', f]);
     const parts = files.map((_, i) => `[${i}:a]apad,atrim=0:${durs[i].toFixed(6)},asetpts=N/SR/TB[a${i}]`).join(';');
-    const filter = `${parts};${files.map((_, i) => `[a${i}]`).join('')}concat=n=${files.length}:v=0:a=1[aout]`;
-    await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', filter, '-map', '[aout]', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', audioOnly], { signal });
+    // Test seam for tools/qc-e2e.mjs: shifts the joined audio by a known amount while keeping its length, so the
+    // post-join QC can be proven to fail a project whose join is out of sync. Never set in normal runs.
+    const faultShift = Math.round(Number(process.env.RS_TEST_JOIN_SHIFT_MS || 0));
+    const total = durs.reduce((a, b) => a + b, 0);
+    const chain = `${parts};${files.map((_, i) => `[a${i}]`).join('')}concat=n=${files.length}:v=0:a=1[aout]`
+      + (faultShift > 0 ? `;[aout]adelay=${faultShift}:all=1,apad,atrim=0:${total.toFixed(6)},asetpts=N/SR/TB[ashift]` : '');
+    if (faultShift > 0) console.warn(`[concat] test seam: audio shifted ${faultShift} ms (RS_TEST_JOIN_SHIFT_MS)`);
+    await run(FFMPEG, ['-hide_banner', '-y', ...inputs, '-filter_complex', chain, '-map', faultShift > 0 ? '[ashift]' : '[aout]', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', audioOnly], { signal });
     await run(FFMPEG, ['-hide_banner', '-y', '-i', videoOnly, '-i', audioOnly, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-movflags', '+faststart', tmp], { signal });
     const probe = expect ? await validateOutput(tmp, expect) : null;
     fs.renameSync(tmp, out);

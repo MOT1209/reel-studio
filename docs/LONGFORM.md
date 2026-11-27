@@ -90,6 +90,42 @@ The stats are stored on the project as `render.qc` (`frames`, `lagsMs`, `maxLagM
 `loudnessSpreadLu`) and written to the render log. `npm run test:qc` proves the gate itself: a clean join passes,
 while a 120 ms delayed join, a ~20 LU loudness jump and a wrong frame count are all rejected.
 
+`npm run test:qc-e2e` proves the whole path: a real 3-chapter project renders, then the render stage is re-run with a
+150 ms shift injected at the join (`RS_TEST_JOIN_SHIFT_MS`, a test-only seam in `concatVideos`) and the project must
+fail with `chapter QC failed — sync error 150 ms at ch-01 (limit 60 ms)` instead of finishing.
+
+## Before the render: time and cost
+
+`GET /api/projects/:id/estimate` (shown in the render tab before the stage starts) reports what the project will take:
+
+| Estimate | Basis |
+|---|---|
+| Render time | the measured render rate below × video length, scaled by the frame's pixel count and fps, plus 2.1 s per chapter and one 5.5 s join — shown as a range (−15 % / +25 %) because a short probe cannot promise a 30-minute render on a loaded machine |
+| Words / TTS characters | the script when it exists, otherwise duration × 2.6 words/s (Arabic ≈ 6.2 chars/word) |
+| LLM tokens | research + per-chapter script/storyboard + one review pass |
+| Disk | the chapter MP4s plus the joined copy at the export bitrate |
+| Cost | only when `RS_PRICE_TTS_PER_1K_CHARS`, `RS_PRICE_LLM_PER_1K_TOKENS` and `RS_PRICE_RENDER_PER_MINUTE` are set (USD per 1000 units) |
+
+### Where the render rate comes from
+
+`npm run estimate:calibrate` (`tools/estimate-calibrate.mjs`) renders a real project instead of guessing: 3 chapters
+of ~13 s at the **default** settings (9:16 1080p, standard, 30 fps, engine `auto`), a join-only re-run to time the
+join, and one 720p project per engine. It prints the table that `server/render-estimate.mjs` stores in `MEASURED`:
+
+| Engine | 1080p · 30 fps · standard | 720p | Pixel exponent |
+|---|---|---|---|
+| Remotion (`auto` picks it first) | 2.17 s per video second (13 s chapter in 28 s) | 1.73 s | 0.29 |
+| Legacy canvas | 0.78 s per video second | 0.56 s | 0.42 |
+
+The same run measured the fixed costs — 2.1 s per chapter after its frames (audio mix, mux, ffprobe, contact sheet)
+and 5.5 s for the join + post-join QC — and the model reproduces the measured render stage within 1 % (97 s
+estimated vs 96.7 s measured, 3 chapters / 39 s / 1080p / standard / 30 fps). Note how far the real rates are from
+the old resolution² assumption: 1080p costs 1.41× 720p on the legacy engine, not 2.25×.
+
+It is a planning aid that never blocks a render. `npm run test:estimate` covers the formulas (range brackets the
+midpoint, the calibration anchor, resolution/quality/fps/engine changes, a written script overriding the plan,
+priced and unpriced).
+
 ## Verified end to end
 
 `npm run test:longform-e2e` (3 chapters × 10 s, 720×1280 @ 24 fps, legacy engine, offline mocks): render of all

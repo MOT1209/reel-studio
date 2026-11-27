@@ -240,6 +240,21 @@ function bindStageButtons() {
 }
 
 const fmt = (t) => Number(t).toFixed(2);
+async function loadEstimate(pid) {
+  const el = document.getElementById('estCard');
+  if (!el) return;
+  try {
+    const { estimate: e } = await api(`/api/projects/${pid}/estimate`);
+    // the render rate is measured, not promised: show the range (fast / slow end)
+    const mins = (x) => (x < 1 ? '<1' : String(Math.round(x)));
+    const lo = mins(e.renderMinutesMin ?? e.renderMinutes), hi = mins(e.renderMinutesMax ?? e.renderMinutes);
+    const tokens = e.llmTokens >= 1000 ? `${Math.round(e.llmTokens / 1000)}k` : e.llmTokens;
+    el.innerHTML = `تقدير قبل الرندر: <b>${lo === hi ? `~${hi}` : `${lo}–${hi}`} دقيقة</b> · ${e.words} كلمة · ${e.ttsCharacters} حرف TTS · ${tokens} توكن · ~${e.diskMB} MB`
+      + (e.cost ? ` · <b>~$${e.cost.total}</b>` : '')
+      + ` <span class="hint">(${esc(e.basis)})</span>`;
+  } catch (err) { el.textContent = 'التقدير مش متاح: ' + err.message; }
+}
+
 function renderStagePanel() {
   const p = current, s = selStage, st = p.stages[s], el = $('#stagePanel');
   const file = (n) => `/api/projects/${encodeURIComponent(p.id)}/files/${n}?v=${encodeURIComponent(p.updatedAt || '')}`;
@@ -292,6 +307,8 @@ function renderStagePanel() {
         <div class="preview"><iframe src="/render.html?project=${encodeURIComponent(p.id)}&play=1&v=${encodeURIComponent(p.updatedAt || '')}"></iframe></div>`;
     }
   } else if (s === 'render') {
+    // before the render starts: what it will take (see /api/projects/:id/estimate)
+    if (!p.render && st.status !== 'running') html += '<p class="hint" id="estCard">تقدير قبل الرندر: بنحسب…</p>';
     if (st.status === 'running') {
       html += `<div class="bar"><i id="renderBar" style="width:${live.progress ? (100 * live.progress.frame / live.progress.total).toFixed(1) : 0}%"></i></div><p class="hint" id="renderPct"></p>
         <div class="preview"><img id="livePreview" src="${live.preview || ''}" alt=""></div>`;
@@ -318,6 +335,7 @@ function renderStagePanel() {
   }
   if (p.script?.sources?.length && s === 'render') html += `<div class="sources"><h4>المصادر</h4>${p.script.sources.map((x) => `<div>${esc(x)}</div>`).join('')}</div>`;
   el.innerHTML = html;
+  if (s === 'render' && !p.render && st.status !== 'running') loadEstimate(p.id);
   bindStageButtons();
   $('#btnPublish')?.addEventListener('click', async () => {
     const priv = $('#pubPrivacy').value;
