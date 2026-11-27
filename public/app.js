@@ -1,6 +1,7 @@
 // Reel Studio — UI shell (vanilla JS modules, RTL Arabic). All LLM/user text is inserted escaped.
-import { $, esc, api, toast, diffHtml, fmtTime, act as actToast } from './ui.js';
+import { $, esc, api, toast, diffHtml, act as actToast } from './ui.js';
 import { mountEditor } from './editor.js';
+import { mountGraph, STAGE_LABEL } from './graph.js';
 import { mountLibrary } from './views/library.js';
 import { mountFonts } from './views/fonts.js';
 import { mountVoice } from './views/voice.js';
@@ -8,8 +9,7 @@ import { mountSkills } from './views/skills.js';
 import { mountDashboard } from './views/dashboard.js';
 
 const STAGES = ['script', 'voice', 'timing', 'storyboard', 'render'];
-const STAGE_AR = { script: 'السكريبت', voice: 'الصوت', timing: 'التوقيت', storyboard: 'الستوري بورد', render: 'الرندر', editor: 'المحرر' };
-const STATUS_AR = { idle: 'مستني', running: 'شغال…', review: 'مستني موافقتك', done: 'تمام', error: 'خطأ' };
+const STAGE_AR = STAGE_LABEL;
 let FONTS = [];
 let editor = null; // { pid, inst }
 
@@ -117,6 +117,7 @@ function openProject(id) {
     if (pg.stage === 'publish') { const b = $('#pubBar'); if (b) b.style.width = pg.frame + '%'; return; }
     live.progress = pg;
     const pct = (100 * live.progress.frame) / live.progress.total;
+    graph?.setProgress(pct);
     const b = $('#renderBar'); if (b) b.style.width = pct.toFixed(1) + '%';
     const t = $('#renderPct'); if (t) t.textContent = `${live.progress.frame} / ${live.progress.total} فريم`;
   });
@@ -127,93 +128,95 @@ function openProject(id) {
 }
 let userPicked = false;
 
-const TABS = [...STAGES, 'editor'];
-function stagesHtml(p) {
-  return TABS.map((s, i) => {
-    if (s === 'editor') {
-      const ok = !!(p.storyboard && p.words);
-      return `<div class="stage editor-tab ${selStage === s ? 'sel' : ''} ${ok ? '' : 'off'}" data-stage="editor" title="${ok ? '' : 'بيتفتح بعد الستوري بورد'}"><div class="n">✎</div><div class="name">المحرر</div><span class="badge">${ok ? 'جاهز' : 'بعد الستوري بورد'}</span></div>`;
-    }
-    const st = p.stages[s];
-    return `<div class="stage ${s === selStage ? 'sel' : ''}" data-stage="${s}">
-      <div class="n">0${i + 1}</div>
-      <div class="name">${STAGE_AR[s]}</div>
-      <span class="badge ${st.status}">${STATUS_AR[st.status]}</span>
-      ${s === 'render' && st.status === 'running' ? `<div class="bar"><i id="renderBar" style="width:${live.progress ? (100 * live.progress.frame / live.progress.total).toFixed(1) : 0}%"></i></div>` : ''}
-      <label class="appr"><input type="checkbox" data-wait="${s}" ${p.approvals[s] === 'wait' ? 'checked' : ''}> استنى موافقتي</label>
-    </div>`;
-  }).join('');
+/** A click on a canvas node selects the stage whose panel is shown below (the canvas itself writes nothing). */
+function selectStage(s) {
+  if (s === 'editor' && !(current && current.storyboard && current.words)) { toast('المحرر بيتفتح بعد ما الستوري بورد يخلص', 'bad'); return; }
+  if (selStage === 'editor' && s !== 'editor') closeEditor();
+  selStage = s; userPicked = true; render();
 }
-function bindStages(p) {
-  document.querySelectorAll('.stage').forEach((el) => el.addEventListener('click', (e) => {
-    if (e.target.matches('input')) return;
-    if (el.dataset.stage === 'editor' && !(p.storyboard && p.words)) { toast('المحرر بيتفتح بعد ما الستوري بورد يخلص', 'bad'); return; }
-    if (selStage === 'editor' && el.dataset.stage !== 'editor') closeEditor();
-    selStage = el.dataset.stage; userPicked = true; render();
-  }));
-  document.querySelectorAll('[data-wait]').forEach((c) => c.addEventListener('change', () =>
-    act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify({ [c.dataset.wait]: c.checked ? 'wait' : 'auto' }) }))));
+let graph = null; // the node canvas instance (kept so progress/state events patch it instead of rebuilding it)
+let shellPid = null; // which project the shell (header + canvas host + body slot) was built for
+
+/** Patch the canvas in place; rebuild it only when its shape changed (a stage or the publish node appeared). */
+function refreshGraph(p) {
+  const host = $('#graphHost');
+  if (!host) return;
+  if (graph && graph.host === host && graph.projectId === p.id && graph.update(p, selStage)) return;
+  graph?.destroy();
+  graph = mountGraph(host, p, { selected: selStage, onSelect: selectStage, onApproval: setApproval });
 }
 
-function render() {
-  const p = current;
-  if (!p) return;
-  // the editor keeps its own state (and its preview iframe): only refresh the stage strip around it
-  if (selStage === 'editor' && editor?.pid === p.id && $('#editorHost')) {
-    $('.stages').innerHTML = stagesHtml(p); bindStages(p);
-    $('#runBtns').innerHTML = runBtns(p); bindRunBtns(p);
-    return;
-  }
-  const running = p.running;
+/** The project shell is built once per project: SSE state events patch it, they never wipe the canvas. */
+function buildShell(p) {
   $('#main').innerHTML = `
-    <div class="phead">
+    <div class="phead" id="phead">
       <div>
-        <h2>${esc(p.script?.title || p.topic)}</h2>
-        <div class="sub">${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds >= 90 ? Math.round(p.seconds / 60) + ' دقيقة' : p.seconds + ' ثانية'}${p.chapters?.length ? ` · ${p.chapters.length} فصول (${p.chapterProgress?.done || 0} خلصوا)` : ''} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span></div>
+        <h2 id="ptitle"></h2>
+        <div class="sub" id="psub"></div>
       </div>
       <div class="btns">
-        <span id="runBtns">${runBtns(p)}</span>
+        <span id="runBtns"></span>
         <button class="ghost small" data-pall="auto" title="كل المراحل تكمّل لوحدها">كله تلقائي</button>
         <button class="ghost small" data-pall="wait" title="كل مرحلة تستنى موافقتك">كله بموافقتي</button>
         <button id="btnDelete" class="ghost danger">حذف</button>
       </div>
     </div>
-    <div class="stages">${stagesHtml(p)}</div>
-    ${p.chapters?.length ? chaptersHtml(p) : ''}
-    ${selStage === 'editor' ? '<div id="editorHost"></div>' : `<div class="work">
+    <div class="panel graph-card" id="graphHost"></div>
+    <div id="projectBody"></div>`;
+  shellPid = p.id;
+  graph?.destroy(); graph = null; // the old host is gone with the old markup
+  document.querySelectorAll('[data-pall]').forEach((b) => b.addEventListener('click', () =>
+    act(() => api(`/api/projects/${current.id}/approvals`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(STAGES.map((s) => [s, b.dataset.pall]))) }))));
+  $('#btnDelete').addEventListener('click', async () => {
+    if (!confirm('تحذف المشروع ده وكل ملفاته؟')) return;
+    await act(() => api(`/api/projects/${current.id}`, { method: 'DELETE' }));
+    closeEditor(); if (es) es.close(); current = null; shellPid = null; graph?.destroy(); graph = null;
+    $('#main').innerHTML = '<div class="empty">اتحذف.</div>'; loadProjects();
+  });
+}
+
+function patchShell(p) {
+  const title = $('#ptitle');
+  if (title) title.textContent = p.script?.title || p.topic;
+  const sub = $('#psub');
+  if (sub) sub.innerHTML = `${esc(p.topic)} · ${p.seconds === 'auto' ? 'مدة أوتو' : p.seconds >= 90 ? Math.round(p.seconds / 60) + ' دقيقة' : p.seconds + ' ثانية'}${p.chapters?.length ? ` · ${p.chapters.length} فصول (${p.chapterProgress?.done || 0} خلصوا)` : ''} · ${p.voiceMode === 'upload' ? 'صوت مرفوع' : 'ElevenLabs'} · <span class="mono">${esc(p.id)}</span>`;
+  const btns = $('#runBtns');
+  if (btns) { btns.innerHTML = runBtns(p); bindRunBtns(p); }
+}
+function setApproval(stage, wait) {
+  return act(() => api(`/api/projects/${current.id}/approvals`, { method: 'PUT', body: JSON.stringify({ [stage]: wait ? 'wait' : 'auto' }) }));
+}
+
+function render() {
+  const p = current;
+  if (!p) return;
+  // the editor keeps its own state (and its preview iframe): only refresh the chrome around it
+  if (selStage === 'editor' && editor?.pid === p.id && $('#editorHost')) {
+    patchShell(p); refreshGraph(p);
+    return;
+  }
+  if (shellPid !== p.id || !$('#phead')) buildShell(p);
+  patchShell(p);
+  refreshGraph(p);
+  const layout = document.querySelector('.layout');
+  if (selStage === 'editor') {
+    layout?.classList.add('wide-editor'); // the editor needs the full width
+    $('#projectBody').innerHTML = '<div id="editorHost"></div>';
+    if (!FONTS.length) api('/api/fonts').then((r) => { FONTS = r.fonts; }).catch(() => {});
+    editor = { pid: p.id, inst: mountEditor($('#editorHost'), p, { fonts: FONTS }) };
+  } else {
+    layout?.classList.remove('wide-editor');
+    $('#projectBody').innerHTML = `<div class="work">
       <div class="panel" id="stagePanel"></div>
       <div class="panel">
         <h3>السجل — ${STAGE_AR[selStage]}</h3>
         <div class="log" id="log"></div>
       </div>
-    </div>`}`;
-  bindRunBtns(p);
-  document.querySelector('.layout').classList.toggle('wide-editor', selStage === 'editor'); // the editor needs the full width
-  if (selStage === 'editor') {
-    if (!FONTS.length) api('/api/fonts').then((r) => { FONTS = r.fonts; }).catch(() => {});
-    editor = { pid: p.id, inst: mountEditor($('#editorHost'), p, { fonts: FONTS }) };
-  } else { const log = $('#log'); log.textContent = p.stages[selStage].log.join('\n') + '\n'; log.scrollTop = log.scrollHeight; }
-  $('#btnDelete').addEventListener('click', async () => {
-    if (!confirm('تحذف المشروع ده وكل ملفاته؟')) return;
-    await act(() => api(`/api/projects/${p.id}`, { method: 'DELETE' }));
-    closeEditor(); if (es) es.close(); current = null; $('#main').innerHTML = '<div class="empty">اتحذف.</div>'; loadProjects();
-  });
-  bindStages(p);
-  document.querySelectorAll('[data-pall]').forEach((b) => b.addEventListener('click', () =>
-    act(() => api(`/api/projects/${p.id}/approvals`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(STAGES.map((s) => [s, b.dataset.pall]))) }))));
-  if (selStage !== 'editor') renderStagePanel();
+    </div>`;
+    const log = $('#log'); log.textContent = p.stages[selStage].log.join('\n') + '\n'; log.scrollTop = log.scrollHeight;
+    renderStagePanel();
+  }
 }
-/** Chapter progress strip: one line per chapter with its five stage pips (the plan lives in project.json). */
-function chaptersHtml(p) {
-  const pr = p.chapterProgress || { total: p.chapters.length, done: 0, seconds: 0 };
-  const rows = p.chapters.map((ch) => {
-    const pips = STAGES.map((s) => `<span class="pip ${esc(ch.stages?.[s] || 'idle')}" title="${STAGE_AR[s]}"></span>`).join('');
-    const len = ch.render?.duration ? `${Number(ch.render.duration).toFixed(1)} ث مترندرة` : `${ch.seconds} ث`;
-    return `<div class="row" style="gap:8px;align-items:center;padding:2px 0"><span class="mono">${esc(ch.id)}</span> <span>${esc(ch.title || '—')}</span> ${pips} <span class="hint">${len}</span></div>`;
-  }).join('');
-  return `<div class="panel" style="margin:8px 0"><h3>الفصول — ${pr.done}/${pr.total} خلصوا · ${fmtTime(pr.seconds)} مترندر</h3>${rows}</div>`;
-}
-
 const runBtns = (p) => (p.running ? `<button id="btnCancel" class="danger">■ إلغاء (${STAGE_AR[p.running]})</button>` : `<button id="btnRun" class="primary">▶ كمّل</button>`);
 function bindRunBtns(p) {
   $('#btnRun')?.addEventListener('click', () => act(() => api(`/api/projects/${p.id}/run`, { method: 'POST' })));

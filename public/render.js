@@ -1155,7 +1155,7 @@
     window.drawFrame = drawFrame;
     window.prepareFrame = prepareFrame;
     drawFrame(Number(q.get('t')) || D.start);
-    if (PREVIEW) setupPlayer(id, q.get('embed') === '1');
+    if (PREVIEW) setupPlayer(id, q.get('embed') === '1', chapter);
     window.__ready = true;
   }
   /**
@@ -1163,7 +1163,7 @@
    * reordered parts play in their new order, pauses hold the frame in silence. The voice <audio> is re-positioned at
    * every part boundary; within a part its clock drives the picture.
    */
-  function setupPlayer(id, embedded) {
+  function setupPlayer(id, embedded, chapter = null) {
     const audio = new Audio(`/api/projects/${encodeURIComponent(id)}/files/voice.mp3`);
     const btn = document.getElementById('play'), seek = document.getElementById('seek'), tm = document.getElementById('time');
     if (embedded) document.getElementById('bar').style.display = 'none'; // the editor has its own transport
