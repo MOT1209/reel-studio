@@ -136,9 +136,15 @@ try {
 
   await test('editor: dragging the trim-end handle sets the export end', async () => {
     const h = await page.$('.trimh.end'); await h.scrollIntoViewIfNeeded(); const b = await h.boundingBox();
+    // the fixture's video is ~13 s, not 30: compare the saved end with the time under the cursor when
+    // it was released (the timeline's px-per-second), not with a fixed second count
+    const { left, pps } = await page.evaluate(() => ({ left: document.querySelector('#tlInner').getBoundingClientRect().left, pps: Number(document.querySelector('#edZoom').value) }));
+    const dropX = b.x - 140;
     await page.mouse.move(b.x + 4, b.y + 10); await page.mouse.down();
-    await page.mouse.move(b.x - 140, b.y + 10, { steps: 8 }); await page.mouse.up();
-    await until('trim saved', async () => { const e = (await saved()).edit.trim; return e?.end && e.end < 10.5; });
+    await page.mouse.move(dropX, b.y + 10, { steps: 8 }); await page.mouse.up();
+    const end = await until('trim saved', async () => { const e = (await saved()).edit.trim; return Number.isFinite(e?.end) && e.end; });
+    const want = (dropX - left) / pps, tol = 8 / pps + 0.05; // the drag snaps within 8 px
+    assert.ok(Math.abs(end - want) <= tol, `trim end ${end} vs ${want.toFixed(2)} ±${tol.toFixed(2)} (${pps} px/s)`);
   });
 
   await test('editor: select scene 2 → template "type" → saved; render stage reset', async () => {
