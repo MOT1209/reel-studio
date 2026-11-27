@@ -33,6 +33,8 @@ const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 /** pan/zoom per project id, so a re-mount after a shape change keeps what the user set. */
 const VIEWS = new Map();
+/** drop a project's saved pan/zoom once the project is deleted (the Map is module-level and would otherwise keep it) */
+export function forgetView(pid) { if (pid) VIEWS.delete(pid); }
 
 export function mountGraph(host, p, { selected = null, onSelect = () => {}, onApproval = () => {} } = {}) {
   let model = build(p, selected);

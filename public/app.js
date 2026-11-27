@@ -1,7 +1,7 @@
 // Reel Studio — UI shell (vanilla JS modules, RTL Arabic). All LLM/user text is inserted escaped.
 import { $, esc, api, toast, diffHtml, act as actToast } from './ui.js';
 import { mountEditor } from './editor.js';
-import { mountGraph, STAGE_LABEL } from './graph.js';
+import { mountGraph, STAGE_LABEL, forgetView } from './graph.js';
 import { mountLibrary } from './views/library.js';
 import { mountFonts } from './views/fonts.js';
 import { mountVoice } from './views/voice.js';
@@ -137,13 +137,27 @@ function selectStage(s) {
 let graph = null; // the node canvas instance (kept so progress/state events patch it instead of rebuilding it)
 let shellPid = null; // which project the shell (header + canvas host + body slot) was built for
 
+/** The control that had keyboard focus inside the canvas, as a selector the new markup can match. */
+function focusedIn(host) {
+  const a = document.activeElement;
+  if (!a || !host.contains(a)) return null;
+  if (a.dataset?.stage) return `.gnode[data-stage="${a.dataset.stage}"]`;
+  if (a.dataset?.wait) return `[data-wait="${a.dataset.wait}"]`;
+  if (a.dataset?.gz) return `[data-gz="${a.dataset.gz}"]`;
+  if (a.hasAttribute?.('data-gfit')) return '[data-gfit]';
+  return null;
+}
+
 /** Patch the canvas in place; rebuild it only when its shape changed (a stage or the publish node appeared). */
 function refreshGraph(p) {
   const host = $('#graphHost');
   if (!host) return;
   if (graph && graph.host === host && graph.projectId === p.id && graph.update(p, selStage)) return;
+  // a re-mount throws the old nodes away, so put keyboard focus back on the same control afterwards
+  const focus = focusedIn(host);
   graph?.destroy();
   graph = mountGraph(host, p, { selected: selStage, onSelect: selectStage, onApproval: setApproval });
+  if (focus) host.querySelector(focus)?.focus();
 }
 
 /** The project shell is built once per project: SSE state events patch it, they never wipe the canvas. */
@@ -170,6 +184,7 @@ function buildShell(p) {
   $('#btnDelete').addEventListener('click', async () => {
     if (!confirm('تحذف المشروع ده وكل ملفاته؟')) return;
     await act(() => api(`/api/projects/${current.id}`, { method: 'DELETE' }));
+    forgetView(current.id);
     closeEditor(); if (es) es.close(); current = null; shellPid = null; graph?.destroy(); graph = null;
     $('#main').innerHTML = '<div class="empty">اتحذف.</div>'; loadProjects();
   });
